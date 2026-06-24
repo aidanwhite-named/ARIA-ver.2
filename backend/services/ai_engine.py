@@ -26,6 +26,7 @@ _active_lock = threading.Lock()
 
 _DEFAULT_MODEL = {
     "claude": "claude-haiku-4-5-20251001",
+    "openai": "gpt-5.4-mini",
     "agy": "gemini-3.5-flash",
     "gemini": "gemini-3.5-flash",
 }
@@ -70,6 +71,10 @@ def _resolve_model(settings: Settings, agent: str) -> str:
         selected = model.strip()
         if engine == "claude" and selected.lower().startswith("gemini"):
             return _DEFAULT_MODEL["claude"]
+        if engine == "openai" and (
+            selected.lower().startswith("claude") or selected.lower().startswith("gemini")
+        ):
+            return _DEFAULT_MODEL["openai"]
         if engine == "agy" and selected.lower().startswith("claude"):
             return _DEFAULT_MODEL["agy"]
         return selected
@@ -621,7 +626,21 @@ def _build_cmd(
         cmd.extend(["--print", prompt_arg])
         return cmd, False, None, subprocess.DEVNULL, prompt_file, env
 
-    raise ValueError(f"지원하지 않는 엔진입니다: {engine} (claude 또는 agy만 사용 가능)")
+    if engine == "openai":
+        codex_bin = shutil.which("codex", path=env.get("PATH", ""))
+        if not codex_bin:
+            raise RuntimeError("OpenAI Codex CLI를 찾을 수 없습니다. Codex 설치 및 PATH 설정을 확인해 주세요.")
+        cmd = [
+            codex_bin,
+            "exec",
+            "--model",
+            model,
+            "--skip-git-repo-check",
+            "-",
+        ]
+        return cmd, False, full_prompt.encode("utf-8"), subprocess.PIPE, None, env
+
+    raise ValueError(f"지원하지 않는 엔진입니다: {engine} (claude, openai 또는 agy만 사용 가능)")
 
 
 def _format_empty_response_error(engine: str, stderr: str, returncode: int) -> str:
@@ -642,8 +661,8 @@ async def call_ai(
     web_search: bool = False,
 ) -> str:
     engine = _normalize_engine(settings.engine)
-    if engine not in ("claude", "agy"):
-        raise ValueError(f"지원하지 않는 엔진입니다: {engine} (claude 또는 agy만 사용 가능)")
+    if engine not in ("claude", "openai", "agy"):
+        raise ValueError(f"지원하지 않는 엔진입니다: {engine} (claude, openai 또는 agy만 사용 가능)")
     return await _cli_run(engine, prompt, system, _resolve_model(settings, agent), web_search)
 
 
@@ -654,7 +673,7 @@ async def call_ai_streaming(
     agent: str = "default",
 ) -> AsyncGenerator[str, None]:
     engine = _normalize_engine(settings.engine)
-    if engine not in ("claude", "agy"):
+    if engine not in ("claude", "openai", "agy"):
         raise ValueError(f"지원하지 않는 엔진입니다: {engine}")
     async for chunk in _cli_run_streaming(engine, prompt, system, _resolve_model(settings, agent)):
         yield chunk
@@ -872,6 +891,8 @@ def check_cli_available(engine: str) -> bool:
     try:
         if engine == "agy":
             available = shutil.which("agy", path=_cli_env().get("PATH", "")) is not None
+        elif engine == "openai":
+            available = shutil.which("codex", path=_cli_env().get("PATH", "")) is not None
         else:
             result = subprocess.run(
                 f"{engine} --version",
@@ -904,6 +925,9 @@ def _probe_cli_ready(engine: str, model: str) -> dict:
 
     try:
         if engine == "claude":
+            cmd, shell, stdin_payload, _stdin_pipe, _prompt_file, env = _build_cmd(engine, model, "Say OK")
+            input_text = stdin_payload.decode("utf-8")
+        elif engine == "openai":
             cmd, shell, stdin_payload, _stdin_pipe, _prompt_file, env = _build_cmd(engine, model, "Say OK")
             input_text = stdin_payload.decode("utf-8")
         elif engine == "agy":
@@ -995,6 +1019,15 @@ def _candidate_account_paths(engine: str) -> list[Path]:
             local_appdata / "Claude",
             local_appdata / "claude",
         ]
+    if engine == "openai":
+        return [
+            home / ".codex",
+            home / ".codex.json",
+            appdata / "OpenAI" / "Codex",
+            appdata / "OpenAI",
+            local_appdata / "OpenAI" / "Codex",
+            local_appdata / "OpenAI",
+        ]
     if engine in ("agy", "gemini"):
         return [
             home / ".antigravity",
@@ -1048,6 +1081,54 @@ def _email_from_text(text: str) -> str:
     return match.group(0) if match else ""
 
 
+def _decode_jwt_payload(token: str) -> dict:
+    token = (token or "").strip()
+    parts = token.split(".")
+    if len(parts) < 2 or not parts[1]:
+        return {}
+    payload = parts[1]
+    padding = "=" * (-len(payload) % 4)
+    try:
+        decoded = _decode_json_bytes(__import__("base64").urlsafe_b64decode(payload + padding))
+    except Exception:
+        return {}
+    try:
+        parsed = json.loads(decoded)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _decode_json_bytes(raw: bytes) -> str:
+    return _decode(raw).strip()
+
+
+def _extract_codex_auth_email(path: Path) -> str:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+
+    direct = _email_from_json_value(payload)
+    if direct:
+        return direct
+
+    tokens = payload.get("tokens")
+    if not isinstance(tokens, dict):
+        return ""
+
+    for key in ("id_token", "access_token"):
+        claims = _decode_jwt_payload(tokens.get(key, ""))
+        if not claims:
+            continue
+        email = _email_from_json_value(claims)
+        if email:
+            return email
+    return ""
+
+
 def _iter_small_account_files(root: Path):
     if not root.exists():
         return
@@ -1079,6 +1160,13 @@ def find_cli_account_email(engine: str) -> str:
     engine = _normalize_engine(engine)
     if engine in _account_cache:
         return _account_cache[engine]
+
+    if engine == "openai":
+        auth_path = _get_fixed_home() / ".codex" / "auth.json"
+        email = _extract_codex_auth_email(auth_path)
+        if email:
+            _account_cache[engine] = email
+            return email
 
     for root in _candidate_account_paths(engine):
         for path in _iter_small_account_files(root) or []:

@@ -170,6 +170,11 @@ class ModelListResponse(BaseModel):
         "claude-sonnet-4-6",
         "claude-haiku-4-5-20251001",
     ]
+    openai: List[str] = [
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+    ]
     gemini: List[str] = [
         "gemini-3.5-flash",
         "gemini-3.1-flash-lite",

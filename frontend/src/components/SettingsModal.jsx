@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react'
 import { getModels, getSettings, saveSettings, getEngineStatus } from '../api/client'
 
-const ENGINES = ['claude', 'agy']
-const ENGINE_LABEL = { claude: 'Claude', agy: 'AGY CLI' }
+const ENGINES = ['claude', 'openai', 'agy']
+const ENGINE_LABEL = { claude: 'Claude', openai: 'OpenAI Codex', agy: 'AGY CLI' }
 
 export default function SettingsModal({ onClose }) {
   const [settings, setSettings] = useState(null)
-  const [models, setModels] = useState({ claude: [], agy: [] })
+  const [models, setModels] = useState({ claude: [], openai: [], agy: [] })
   const [status, setStatus] = useState({ label: '확인 중...', account_label: '' })
   const [saved, setSaved] = useState(false)
 
@@ -21,11 +21,19 @@ export default function SettingsModal({ onClose }) {
         }
         for (const key of ['model_parser', 'model_report']) {
           if (!sanitized[key] || (validModels.length > 0 && !validModels.includes(sanitized[key]))) {
-            sanitized[key] = s.engine === 'claude' ? 'claude-haiku-4-5-20251001' : first
+            sanitized[key] = s.engine === 'claude'
+              ? 'claude-haiku-4-5-20251001'
+              : s.engine === 'openai'
+                ? 'gpt-5.4-mini'
+                : first
           }
         }
         if (!sanitized.model_compare || (validModels.length > 0 && !validModels.includes(sanitized.model_compare))) {
-          sanitized.model_compare = s.engine === 'claude' ? 'claude-sonnet-4-6' : first
+          sanitized.model_compare = s.engine === 'claude'
+            ? 'claude-sonnet-4-6'
+            : s.engine === 'openai'
+              ? 'gpt-5.5'
+              : first
         }
         setSettings(sanitized)
         setModels(m)
@@ -46,6 +54,10 @@ export default function SettingsModal({ onClose }) {
       updates.model_parser = 'claude-haiku-4-5-20251001'
       updates.model_compare = 'claude-sonnet-4-6'
       updates.model_report = 'claude-haiku-4-5-20251001'
+    } else if (newEngine === 'openai') {
+      updates.model_parser = 'gpt-5.4-mini'
+      updates.model_compare = 'gpt-5.5'
+      updates.model_report = 'gpt-5.4-mini'
     } else {
       updates.model_parser = first
       updates.model_compare = first
