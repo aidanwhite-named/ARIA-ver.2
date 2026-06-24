@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+venv/
+.venv/
+*.egg-info/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# 업로드/보고서 (사용자 데이터)
+uploads/
+reports/
+
+# ChromaDB
+chroma_db/
+backend/.chroma_db/
+
+# 설정 캐시
+backend/settings.json
+
+# 로컬 설정
+.claude/settings.local.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# cases 및 임시 파일
+cases/
+deleted_diff.txt
+

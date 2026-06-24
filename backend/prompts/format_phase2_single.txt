@@ -1,0 +1,21 @@
+${inv_header}
+
+[구성대비]
+
+[구성요소]
+
+${components}
+
+[종합 판단]
+
+[유사점]
+
+${similar}
+
+[차이점]
+
+${diff}
+
+[결론]
+
+${conclusion}

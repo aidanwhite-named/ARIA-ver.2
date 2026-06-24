@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <defs>
+    <linearGradient id="dream-bg" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stopColor="#fdf4ff" />
+      <stop offset="100%" stopColor="#eff6ff" />
+    </linearGradient>
+    <radialGradient id="glow-cyan" cx="0.3" cy="0.3" r="0.6">
+      <stop offset="0%" stopColor="#22d3ee" stopOpacity="0.8" />
+      <stop offset="100%" stopColor="#22d3ee" stopOpacity="0" />
+    </radialGradient>
+    <radialGradient id="glow-magenta" cx="0.7" cy="0.7" r="0.6">
+      <stop offset="0%" stopColor="#d946ef" stopOpacity="0.8" />
+      <stop offset="100%" stopColor="#d946ef" stopOpacity="0" />
+    </radialGradient>
+    <radialGradient id="glow-violet" cx="0.5" cy="0.8" r="0.7">
+      <stop offset="0%" stopColor="#8b5cf6" stopOpacity="0.7" />
+      <stop offset="100%" stopColor="#8b5cf6" stopOpacity="0" />
+    </radialGradient>
+    <filter id="dream-blur" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="4" />
+    </filter>
+  </defs>
+  <rect width="32" height="32" rx="8" fill="url(#dream-bg)" />
+  <g filter="url(#dream-blur)">
+    <circle cx="10" cy="10" r="10" fill="url(#glow-cyan)" />
+    <circle cx="24" cy="22" r="12" fill="url(#glow-magenta)" />
+    <circle cx="16" cy="28" r="12" fill="url(#glow-violet)" />
+  </g>
+  <rect x="0.5" y="0.5" width="31" height="31" rx="7.5" fill="rgba(255, 255, 255, 0.4)" stroke="rgba(255,255,255,0.8)" strokeWidth="1" />
+  <path d="M16 6L8 24H11.5L16 11L20.5 24H24L16 6Z" fill="#ffffff" />
+  <path d="M16 15L17.2 18.2L20.5 19.5L17.2 20.8L16 24L14.8 20.8L11.5 19.5L14.8 18.2L16 15Z" fill="#ffffff" />
+</svg>

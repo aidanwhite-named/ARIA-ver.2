@@ -1,0 +1,82 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-gray-50 text-gray-900;
+  font-family: 'Pretendard', 'Outfit', system-ui, -apple-system, sans-serif;
+  font-size: 15px;
+}
+
+.aria-wordmark {
+  font-family: 'Outfit', sans-serif;
+  font-weight: 800;
+  letter-spacing: 0;
+  font-size: 1.85rem;
+  line-height: 1;
+  background: linear-gradient(135deg, #0891b2 0%, #2563eb 48%, #7c3aed 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.aria-sub {
+  font-family: 'Outfit', 'Pretendard', sans-serif;
+  font-weight: 600;
+  letter-spacing: 0;
+  font-size: 0.6rem;
+  color: #64748b;
+  text-transform: uppercase;
+  margin-top: 2px;
+}
+
+/* 마크다운 보고서 스타일 */
+.report-content {
+  font-size: 15px;
+  line-height: 1.8;
+}
+.report-content h1 { @apply text-2xl font-bold mt-6 mb-3 text-gray-900; }
+.report-content h2 { @apply text-xl font-bold mt-5 mb-2 text-gray-800; }
+.report-content h3 { @apply text-lg font-semibold mt-4 mb-2 text-gray-700; }
+.report-content p  { @apply mb-3 leading-relaxed; }
+.report-content hr { @apply my-6 border-gray-200; }
+.report-content blockquote {
+  @apply border-l-4 border-blue-400 pl-4 py-2 my-3 bg-blue-50 text-gray-700 rounded-r;
+  font-size: 14px;
+}
+.report-content pre {
+  @apply bg-gray-100 p-4 rounded-lg text-sm overflow-x-auto my-3;
+}
+
+/* 구성요소 섹션 강조 */
+.report-content strong {
+  @apply font-semibold text-gray-900;
+}
+
+/* LLM 검색 전략 (KeywordPanel) — 표·코드블록 위주 마크다운 */
+.strategy-content {
+  font-size: 13px;
+  line-height: 1.7;
+}
+.strategy-content h2 { @apply text-sm font-bold mt-4 mb-2 text-gray-800; }
+.strategy-content h3 { @apply text-[13px] font-semibold mt-3 mb-1.5 text-gray-700; }
+.strategy-content p  { @apply mb-2; }
+.strategy-content ul, .strategy-content ol { @apply mb-2 pl-5 list-disc; }
+.strategy-content li { @apply mb-0.5; }
+.strategy-content table { @apply w-full border-collapse my-2 text-xs; }
+.strategy-content th { @apply border border-gray-200 bg-gray-50 px-2 py-1 text-left font-semibold text-gray-700; }
+.strategy-content td { @apply border border-gray-200 px-2 py-1 align-top; }
+.strategy-content pre {
+  @apply bg-slate-50 border border-slate-200 p-2.5 rounded-lg my-2 overflow-x-auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 11px;
+}
+.strategy-content code { font-size: 11px; }
+
+/* 판정 레이블 */
+.judgment-동일       { @apply text-red-600 font-bold; }
+.judgment-실질적동일  { @apply text-orange-500 font-bold; }
+.judgment-일부차이    { @apply text-yellow-600 font-semibold; }
+.judgment-일부유사    { @apply text-blue-500 font-semibold; }
+.judgment-차이        { @apply text-gray-400; }
