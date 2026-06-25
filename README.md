@@ -69,6 +69,10 @@ PowerShell에서 다음 명령을 실행합니다.
 ### Backend
 
 ```powershell
+# Windows 환경에서 한글 로그 깨짐을 방지하기 위해 UTF-8 모드를 활성화합니다.
+$env:PYTHONUTF8="1"
+$env:PYTHONIOENCODING="utf-8"
+
 pip install -r backend/requirements.txt
 python -m uvicorn backend.main:app --host 0.0.0.0 --port 8200 --reload
 ```

@@ -1,12 +1,13 @@
-﻿"""
-Hybrid RAG Retriever ??BGE-M3 Dense + SQLite FTS5 BM25 + RRF 寃고빀
+"""
+Hybrid RAG Retriever — BGE-M3 Dense + SQLite FTS5 BM25 + RRF 결합
 
-援ъ꽦?붿냼 ?띿뒪?몃? 荑쇰━濡??쇱븘 ?몄슜諛쒕챸 ?⑤씫?먯꽌 愿???⑤씫 top-K媛쒕? ?좏깮?쒕떎.
-LLM???몄슜諛쒕챸 ?꾨Ц(?ⓩ뻼) ????좏깮???⑤씫留??꾨떖???낅젰 ?좏겙???덇컧?쒕떎.
+구성요소 텍스트를 쿼리로 삼아 인용발명 단락에서 관련 단락 top-K개를 선택한다.
+LLM에게 인용발명 원문(全文) 대신 선택된 단락만 전달하여 입력 토큰을 줄인다.
 
-罹먯떆 ?뺤콉:
-- Dense 寃?? cases/{job_id}/vector_db/qdrant 濡쒖뺄 Qdrant 而щ젆??- ?먮Ц/metadata/reference DB 諛?BM25: cases/{job_id}/reference.sqlite (SQLite FTS5)
-- ?⑤씫 Dense ?꾨쿋??npy??Qdrant 而щ젆???ъ깮?깆슜 鍮뚮뱶 罹먯떆濡??좎?
+캐시 의존:
+- Dense 검색: cases/{job_id}/vector_db/qdrant 로컬 Qdrant 컬렉션
+- 본문/metadata/reference DB 및 BM25: cases/{job_id}/reference.sqlite (SQLite FTS5)
+- 단락 Dense 임베딩: npy 및 Qdrant 컬렉션 생성시용 빌드 캐시로 저장
 """
 from __future__ import annotations
 
@@ -25,15 +26,16 @@ from backend.services.reference_store import search_paragraphs_fts5
 
 logger = logging.getLogger(__name__)
 
-# BGE-M3 紐⑤뜽 ID (HuggingFace)
+# BGE-M3 모델 ID (HuggingFace)
 _BGE_MODEL_ID = "BAAI/bge-m3"
 _RERANKER_MODEL_ID = "BAAI/bge-reranker-v2-m3"
 
-# ?꾩뿭 紐⑤뜽 ?깃???(理쒖큹 1?뚮쭔 濡쒕뱶)
+# 전역 모델 인스턴스(최초 1번만 로드)
 _bge_model = None
-_model_load_failed = False  # 紐⑤뜽 濡쒕뱶 ?ㅽ뙣 ???대갚 諛⑹?瑜??꾪븳 ?뚮옒洹?
+_model_load_failed = False  # 모델 로드 실패 시 폴백 방지를 위한 플래그
 _reranker_model = None
 _reranker_load_failed = False
+_reranker_inference_failed = False
 _runtime_status = {
     "dense": "not_attempted",
     "qdrant": "not_attempted",
@@ -43,7 +45,7 @@ _runtime_status = {
 }
 
 def _get_bge_model():
-    """BGE-M3 紐⑤뜽???깃??ㅼ쑝濡?濡쒕뱶?쒕떎. ?ㅽ뙣 ??None 諛섑솚."""
+    """BGE-M3 모델을 싱글톤으로 로드한다. 실패 시 None 반환."""
     global _bge_model, _model_load_failed
     if _model_load_failed:
         return None
@@ -75,6 +77,11 @@ def _get_reranker_model():
         from FlagEmbedding import FlagReranker  # type: ignore
         logger.info("BGE reranker 모델 로드 중(최초 실행 시 다운로드가 발생할 수 있음)...")
         _reranker_model = FlagReranker(_RERANKER_MODEL_ID, use_fp16=False)
+        tokenizer = getattr(_reranker_model, "tokenizer", None)
+        if tokenizer is not None and not hasattr(tokenizer, "prepare_for_model"):
+            raise RuntimeError(
+                "?? ??? transformers/FlagEmbedding ????? reranker tokenizer.prepare_for_model? ???? ????"
+            )
         _runtime_status["reranker"] = "ready"
         logger.info("BGE reranker 모델 로드 완료")
         return _reranker_model
@@ -102,6 +109,9 @@ def _rerank_candidates(
     chunks: List[_SearchChunk],
     candidate_idxs: List[int],
 ) -> Optional[List[Tuple[float, int]]]:
+    global _reranker_inference_failed, _reranker_model, _reranker_load_failed
+    if _reranker_inference_failed:
+        return None
     model = _get_reranker_model()
     queries = [(elem.text or "").strip() for elem in elements if (elem.text or "").strip()]
     if model is None or not queries or not candidate_idxs:
@@ -123,13 +133,16 @@ def _rerank_candidates(
         return sorted(ranked, key=lambda item: (-item[0], item[1]))
     except Exception as exc:
         logger.warning("Reranker 추론 실패, RRF 순서를 사용합니다: %s", exc)
+        _reranker_inference_failed = True
+        _reranker_load_failed = True
+        _reranker_model = None
         _runtime_status["reranker"] = "failed"
         _runtime_status["fallback_reason"] = f"Reranker 추론 실패: {exc}"
         return None
 
 
 # ---------------------------------------------------------------------------
-# ?⑤씫/洹몃９ ??寃??泥?겕 由ъ뒪??異붿텧
+# 단락/그룹 검색 청크 데이터클래스
 # ---------------------------------------------------------------------------
 
 _CHUNK_SIZE = 1_200
@@ -151,9 +164,11 @@ class _SearchChunk:
 
 
 def _doc_chunks(doc: ExtractedDocument) -> List[_SearchChunk]:
-    """臾몄꽌?먯꽌 寃?됱슜 泥?겕瑜?異붿텧?쒕떎.
+    """문서에서 검색용 청크를 추출한다.
 
-    ?곗꽑 metadata媛 ?덈뒗 paragraph/group chunk瑜??ъ슜?쒕떎. ?몄슜諛쒕챸 PDF ?대???    泥?뎄??? paragraph_chunks/group_chunks ?앹꽦 ?④퀎?먯꽌 ?쒖쇅?섏뼱 寃??index??    ?ㅼ뼱?ㅼ? ?딅뒗?? 援щ쾭??罹먯떆??湲곗〈 paragraphs/pages濡??대갚?쒕떎.
+    사전 metadata가 있는 paragraph/group chunk를 사용한다. 인용발명 PDF 대량
+    처리시 paragraph_chunks/group_chunks 생성 단계에서 제외되어 검색 index에
+    들어가지 않는 경우, 구버전 캐시를 기존 paragraphs/pages로 대체한다.
     """
     chunks: List[_SearchChunk] = []
 
@@ -240,7 +255,7 @@ def _doc_chunks(doc: ExtractedDocument) -> List[_SearchChunk]:
 
 
 # ---------------------------------------------------------------------------
-# ?꾨쿋??罹먯떆 寃쎈줈 怨꾩궛
+# 임베딩 캐시 경로 계산
 # ---------------------------------------------------------------------------
 
 def _embedding_cache_path(sha256: str, uploads_dir: Path) -> Path:
@@ -250,7 +265,7 @@ def _embedding_cache_path(sha256: str, uploads_dir: Path) -> Path:
 
 
 def _sha256_of_doc(doc: ExtractedDocument) -> str:
-    """臾몄꽌 raw_text??SHA-256. pdf_path媛 ?덉쑝硫??뚯씪 湲곕컲, ?놁쑝硫??띿뒪??湲곕컲."""
+    """문서 raw_text의 SHA-256. pdf_path가 있으면 파일 기반, 없으면 텍스트 기반."""
     if doc.pdf_path and Path(doc.pdf_path).exists():
         try:
             h = hashlib.sha256()
@@ -264,14 +279,14 @@ def _sha256_of_doc(doc: ExtractedDocument) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Dense ?꾨쿋???앹꽦 諛?罹먯떆
+# Dense 임베딩 생성 및 캐시
 # ---------------------------------------------------------------------------
 
 def _build_dense_embeddings(
     texts: List[str],
     model,
 ) -> np.ndarray:
-    """BGE-M3濡?dense ?꾨쿋??諛곗뿴??諛섑솚?쒕떎. shape: (N, dim)"""
+    """BGE-M3로 dense 임베딩 배열을 반환한다. shape: (N, dim)"""
     if not texts:
         return np.zeros((0, 1024), dtype=np.float32)
     result = model.encode(
@@ -283,7 +298,7 @@ def _build_dense_embeddings(
         return_colbert_vecs=False,
     )
     vecs = result["dense_vecs"]
-    # L2 ?뺢퇋??(肄붿궗???좎궗?????댁쟻?쇰줈 ?섏궛)
+    # L2 정규화(코사인 유사도와 동일하게 계산)
     norms = np.linalg.norm(vecs, axis=1, keepdims=True)
     norms = np.where(norms == 0, 1e-9, norms)
     return (vecs / norms).astype(np.float32)
@@ -295,9 +310,9 @@ def get_or_build_dense_index(
     uploads_dir: Path,
 ) -> Optional[np.ndarray]:
     """
-    Dense ?꾨쿋?⑹쓣 罹먯떆?먯꽌 濡쒕뱶?섍굅???덈줈 ?앹꽦?쒕떎.
+    Dense 임베딩을 캐시에서 로드하거나 새로 생성한다.
 
-    諛섑솚: shape (N, dim) float32 諛곗뿴. 紐⑤뜽 ?놁쑝硫?None.
+    반환: shape (N, dim) float32 배열. 모델 없으면 None.
     """
     model = _get_bge_model()
     if model is None:
@@ -324,7 +339,8 @@ def get_or_build_dense_index(
 
 
 # ---------------------------------------------------------------------------
-# SQLite FTS5 BM25 / Qdrant 濡쒖뺄 dense 寃??# ---------------------------------------------------------------------------
+# SQLite FTS5 BM25 / Qdrant 로컬 dense 검색
+# ---------------------------------------------------------------------------
 
 def _case_dir_for_doc(doc: ExtractedDocument, uploads_dir: Path) -> Optional[Path]:
     """uploads/{job_id}/pdfs/foo.pdf -> cases/{job_id}."""
@@ -360,7 +376,7 @@ def build_qdrant_index(
     chunks: List[_SearchChunk],
     uploads_dir: Path,
 ):
-    """濡쒖뺄 Qdrant 而щ젆?섏쓣 以鍮꾪븯怨?(client, collection, model)??諛섑솚?쒕떎."""
+    """로컬 Qdrant 컬렉션을 준비하고 (client, collection, model)을 반환한다."""
     if not chunks:
         return None
     model = _get_bge_model()
@@ -502,11 +518,11 @@ def _paragraph_index(chunks: List[_SearchChunk]) -> Dict[str, List[int]]:
 # ---------------------------------------------------------------------------
 
 def _rrf_fuse(
-    dense_ranks: List[int],       # ?⑤씫 ?몃뜳???쒖꽌 (dense top-K)
-    bm25_ranks: List[int],        # ?⑤씫 ?몃뜳???쒖꽌 (bm25 top-K)
+    dense_ranks: List[int],       # 단락 인덱스 순서 (dense top-K)
+    bm25_ranks: List[int],        # 단락 인덱스 순서 (bm25 top-K)
     k: int = 60,
 ) -> List[Tuple[float, int]]:
-    """RRF ?먯닔瑜?怨꾩궛??(score, para_idx) 紐⑸줉???대┝李⑥닚?쇰줈 諛섑솚?쒕떎."""
+    """RRF 점수를 계산하여 (score, para_idx) 목록을 내림차순으로 반환한다."""
     scores: Dict[int, float] = {}
     for rank, idx in enumerate(dense_ranks):
         scores[idx] = scores.get(idx, 0.0) + 1.0 / (k + rank + 1)
@@ -516,7 +532,8 @@ def _rrf_fuse(
 
 
 # ---------------------------------------------------------------------------
-# ?⑥씪 荑쇰━ ???⑤씫 寃??# ---------------------------------------------------------------------------
+# 단일 쿼리 파트 검색
+# ---------------------------------------------------------------------------
 
 def _search_single_query(
     query: str,
@@ -527,8 +544,8 @@ def _search_single_query(
     top_k_per_source: int = 10,
 ) -> List[int]:
     """
-    ?섎굹??荑쇰━ 臾몄옄?댁뿉 ???Qdrant Dense + SQLite FTS5 BM25 寃?됱쓣 ?섑뻾?섍퀬,
-    RRF濡?寃고빀???⑤씫 ?몃뜳??紐⑸줉(以묒슂???대┝李⑥닚)??諛섑솚?쒕떎.
+    하나의 쿼리 문자열에 대해 Qdrant Dense + SQLite FTS5 BM25 검색을 수행하고,
+    RRF로 결합된 단락 인덱스 목록(중요도 내림차순)을 반환한다.
     """
     n = len(chunks)
     if n == 0:
@@ -552,17 +569,17 @@ def _search_single_query(
                     bm25_ranks.append(idx)
                     seen.add(idx)
 
-    # ?????놁쑝硫?鍮?寃곌낵
+    # 둘 다 없으면 빈 결과
     if not dense_ranks and not bm25_ranks:
         return []
 
-    # RRF 寃고빀
+    # RRF 결합
     fused = _rrf_fuse(dense_ranks, bm25_ranks)
     return [idx for _, idx in fused]
 
 
 # ---------------------------------------------------------------------------
-# 援ъ꽦?붿냼蹂??ㅼ쨷 荑쇰━ ???듯빀 ?⑤씫 吏묓빀
+# 구성요소별 다중 쿼리 통합 단락 선택
 # ---------------------------------------------------------------------------
 
 def retrieve_for_elements(
@@ -575,15 +592,15 @@ def retrieve_for_elements(
     reranker_top_k: Optional[int] = None,
 ) -> Optional[Dict[str, str]]:
     """
-    援ъ꽦?붿냼 由ъ뒪?몃? 荑쇰━濡??쇱븘 ?몄슜諛쒕챸 ?⑤씫 以?愿?⑥꽦 ?믪? ?⑤씫???좏깮?쒕떎.
+    구성요소 리스트를 쿼리로 삼아 인용발명 단락 중 관련성 높은 단락을 선택한다.
 
-    ?숈옉:
-    1. 臾몄꽌 ?⑤씫 ??Dense ?꾨쿋??罹먯떆) + BM25 ?몃뜳??鍮뚮뱶
-    2. 媛?援ъ꽦?붿냼 ?띿뒪?몃? 荑쇰━濡?Dense+BM25 寃?? 援ъ꽦?붿냼蹂?top_k_per_element媛??좏깮
-    3. ?꾩껜 援ъ꽦?붿냼??寃곌낵瑜??⑹궛 ??RRF ?ш껐????理쒖쥌 top_k媛??⑤씫 ?좏깮
-    4. ?좏깮???⑤씫??{chunk_id: text} dict濡?諛섑솚 (?쒖꽌: ?먮Ц ??
+    동작:
+    1. 문서 단락 당 Dense 임베딩 캐시) + BM25 인덱스 빌드
+    2. 각 구성요소 텍스트를 쿼리로 Dense+BM25 검색. 구성요소별 top_k_per_element가 선택
+    3. 전체 구성요소의 결과를 합산 후 RRF 스코어링하여 최종 top_k개 단락 선택
+    4. 선택된 단락을 {chunk_id: text} dict로 반환 (순서: 원문 순)
 
-    ?ㅽ뙣(紐⑤뜽 ?놁쓬, ?몃뜳???놁쓬) ??None 諛섑솚 ???몄텧遺?먯꽌 湲곗〈 諛⑹떇 ?대갚.
+    실패(모델 없음, 인덱스 없음) 시 None 반환 후 호출부에서 기존 방식 대체.
     """
     hits = retrieve_with_metadata(
         elements=elements,
@@ -609,11 +626,11 @@ def retrieve_with_metadata(
     reranker_top_k: Optional[int] = None,
 ) -> Optional[List[Dict]]:
     """
-    援ъ꽦?붿냼蹂?RAG 寃??寃곌낵瑜?metadata? ?④퍡 諛섑솚?쒕떎.
+    구성요소별 RAG 검색 결과를 metadata와 함께 반환한다.
 
-    寃?됱? paragraph chunk? group chunk瑜??④퍡 ??곸쑝濡??섎릺, 理쒖쥌 諛섑솚?
-    ?⑤씫 ?먮Ц DB(paragraph_records/paragraph_chunks)?먯꽌 ?ъ“?뚰븳 paragraph
-    ?⑥쐞 hit留??쒓났?쒕떎. group chunk??臾몃㎘ 寃?됯낵 臾명뿄 ?좎젙 ?먯닔?먮쭔 ?곗씤??
+    검색은 paragraph chunk와 group chunk를 함께 대상으로 되며, 최종 반환은
+    단락 원문 DB(paragraph_records/paragraph_chunks)에서 조회한 paragraph
+    단위 hit만 제공한다. group chunk는 문맥 검색과 문구 정정 인자에만 관여한다.
     """
     chunks = _doc_chunks(doc)
     if not chunks:
@@ -629,7 +646,7 @@ def retrieve_with_metadata(
         _runtime_status["fallback_reason"] = "Qdrant와 SQLite FTS5를 모두 사용할 수 없음"
         return None
 
-    # 援ъ꽦?붿냼蹂?寃????湲濡쒕쾶 ?먯닔 ?꾩쟻
+    # 구성요소별 검색 결과 글로벌 점수 적산
     global_scores: Dict[int, float] = {}
     k_rrf = 60
 
@@ -646,7 +663,7 @@ def retrieve_with_metadata(
             chunks,
             top_k_per_source=top_k_per_element * 2,
         )
-        # 以묒슂???믪? 援ъ꽦?붿냼(importance ?댁닔濡?媛以????쏀븳 boost
+        # 중요도 높은 구성요소(importance 점수로 계산)에 한한 boost
         try:
             imp_weight = float(elem.importance) / 3.0
         except (ValueError, TypeError):
@@ -660,7 +677,7 @@ def retrieve_with_metadata(
         _close_qdrant(qdrant_handle)
         return None
 
-    # ?곸쐞 top_k媛??좏깮 ???먮Ц ?쒖꽌 蹂듭썝
+    # 상위 top_k개 선택 후 본문 순서 복원
     sorted_idxs = sorted(global_scores.keys(), key=lambda i: -global_scores[i])
     output_k = max(1, min(int(reranker_top_k or top_k), top_k)) if use_reranker else top_k
     candidate_idxs = sorted_idxs[:top_k]
@@ -729,13 +746,12 @@ def retrieve_with_metadata(
 
 
 # ---------------------------------------------------------------------------
-# ?좏깮 ?⑤씫 ??LLM ?낅젰 ?띿뒪???щ㎎
+# 선택 단락 → LLM 입력 텍스트 포맷
 # ---------------------------------------------------------------------------
 
 def format_rag_doc_text(selected: Dict[str, str]) -> str:
-    """?좏깮???⑤씫 dict瑜?`[XXXX] ?띿뒪?? ?뺤떇??臾몄옄?대줈 吏곷젹?뷀븳??"""
+    """선택된 단락 dict를 `[XXXX] 텍스트` 형식의 문자열로 직렬화한다."""
     lines = []
     for chunk_id, text in selected.items():
         lines.append(f"{chunk_id} {text}")
     return "\n".join(lines)
-

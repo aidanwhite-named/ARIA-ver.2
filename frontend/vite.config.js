@@ -11,8 +11,8 @@ export default defineConfig({
         target: 'http://127.0.0.1:8200',
         changeOrigin: false,
         // LLM 기반 보고서 생성은 오래 걸릴 수 있어 10분까지 대기한다.
-        timeout: 600000,
-        proxyTimeout: 600000,
+        timeout: 3600000,
+        proxyTimeout: 3600000,
       },
       '/settings': {
         target: 'http://127.0.0.1:8200',

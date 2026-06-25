@@ -101,6 +101,12 @@ export async function reportBatchDependent(jobId, claimNumbers, useContext = tru
   return res.json()
 }
 
+export async function getDependentBatchStatus(jobId) {
+  const res = await fetch(`${BASE}/analyze/report_batch_dependent_status/${jobId}`)
+  if (!res.ok) throw new Error(parseErrorMessage(await res.text(), '종속항 상태 조회 실패'))
+  return res.json()
+}
+
 // 생성 취소 — 실행 중인 LLM CLI 프로세스 강제 종료
 export async function cancelGeneration() {
   const res = await fetch(`${BASE}/analyze/cancel`, { method: 'POST' })

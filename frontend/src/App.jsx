@@ -2,7 +2,7 @@ import { useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeRaw from 'rehype-raw'
-import { addManualClaim, streamPrepare, streamReport, reportBatchDependent, uploadFiles, getContextInfo, clearContext, checkJobStatus, detectCategory, getKeywords, deleteJob, cancelGeneration } from './api/client'
+import { addManualClaim, streamPrepare, streamReport, reportBatchDependent, getDependentBatchStatus, uploadFiles, getContextInfo, clearContext, checkJobStatus, detectCategory, getKeywords, deleteJob, cancelGeneration } from './api/client'
 import ClaimAnalysisWindow from './components/ClaimAnalysisWindow'
 
 import FilePanel from './components/FilePanel'
@@ -716,13 +716,38 @@ export default function App() {
         try {
           const ac = new AbortController()
           cancelRef.current.abort = ac
-          const { reports } = await reportBatchDependent(
-            jobId, dependents.map(d => d.claim.claim_number), useCtx, false, ac.signal,
-          )
+          let statusPollActive = true
+          let lastStatusKey = ''
+          const statusPoll = (async () => {
+            while (statusPollActive && !cancelRef.current?.requested) {
+              try {
+                const status = await getDependentBatchStatus(jobId)
+                const statusKey = [status.state, status.stage, status.message, status.reports_ready].join('::')
+                if (status.message && statusKey !== lastStatusKey) {
+                  lastStatusKey = statusKey
+                  const readySuffix = typeof status.reports_ready === 'number' && status.reports_ready > 0
+                    ? ` (완료 ${status.reports_ready}건)`
+                    : ''
+                  addLog(`[종속항 상태] ${status.message}${readySuffix}`)
+                }
+                if (status.state === 'completed' || status.state === 'failed') break
+              } catch (_) {}
+              await new Promise(resolve => setTimeout(resolve, 2000))
+            }
+          })()
+          let reports
+          try {
+            ;({ reports } = await reportBatchDependent(
+              jobId, dependents.map(d => d.claim.claim_number), useCtx, false, ac.signal,
+            ))
+          } finally {
+            statusPollActive = false
+            await statusPoll.catch(() => {})
+          }
           for (const { claim, text } of dependents) {
             const r = reports[String(claim.claim_number)]
             if (!r) {
-              addLog(`⚠️ 청구항 ${claim.claim_number} 보고서 누락`)
+              addLog(`경고: 청구항 ${claim.claim_number} 보고서가 누락되었습니다.`)
               continue
             }
             setReport(r.report_md)
@@ -762,7 +787,7 @@ export default function App() {
       }
     } catch (err) {
       if (err.message === '사용자 취소') {
-        addLog('🛑 사용자가 보고서 생성을 취소했습니다')
+        addLog('사용자가 보고서 생성을 취소했습니다.')
       } else {
         setError(err.message)
         addLog(`오류: ${err.message}`)

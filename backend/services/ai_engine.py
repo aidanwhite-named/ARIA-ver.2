@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 _active_procs: set[subprocess.Popen] = set()
 _active_lock = threading.Lock()
+_CLI_TIMEOUT_SECONDS = 3600
 
 _DEFAULT_MODEL = {
     "claude": "claude-haiku-4-5-20251001",
@@ -43,6 +44,13 @@ _AGY_PROMPT_DIR = Path("uploads") / "_agy_prompts"
 _AGY_TRANSCRIPT_MAX_AGE_SECONDS = 180
 _AGY_TRANSCRIPT_FLUSH_WAIT_SECONDS = 2.0
 _AGY_TRUNCATED_RE = re.compile(r"<truncated\s+\d+\s+bytes>")
+_AGY_META_RESPONSE_PATTERNS = (
+    "i will read the prompt file",
+    "i'll read the prompt file",
+    "read the prompt file to understand the task",
+    "read the complete utf-8 prompt from the file below",
+    "prompt file:",
+)
 
 _cli_cache: dict[str, bool] = {}
 _account_cache: dict[str, str] = {}
@@ -459,6 +467,9 @@ def _is_agy_internal_text(text: str, prompt_marker: str = "") -> bool:
     marker = (prompt_marker or "").strip()[:500]
     if marker and (text == marker or marker in text):
         return True
+    lowered = text.lower()
+    if any(pattern in lowered for pattern in _AGY_META_RESPONSE_PATTERNS):
+        return True
     return False
 
 
@@ -586,8 +597,10 @@ def _read_agy_transcript_response(started_at: float, prompt_marker: str = "") ->
                 if item.get("source") != "MODEL":
                     continue
                 content = item.get("content")
-                if isinstance(content, str) and content.strip():
-                    responses.append(content.strip())
+                if isinstance(content, str):
+                    cleaned = _clean_agy_payload_text(content)
+                    if cleaned and not _is_agy_internal_text(cleaned, prompt_marker):
+                        responses.append(cleaned)
             if responses:
                 response = _restore_agy_truncated_response(path, responses[-1])
                 logger.warning("AGY CLI returned empty stdout; recovered response from %s", path)
@@ -622,7 +635,7 @@ def _build_cmd(
             cmd.extend(["--add-dir", str(prompt_file.parent)])
         if web_search:
             cmd.append("--dangerously-skip-permissions")
-        cmd.extend(["--print-timeout", "10m0s"])
+        cmd.extend(["--print-timeout", "60m0s"])
         cmd.extend(["--print", prompt_arg])
         return cmd, False, None, subprocess.DEVNULL, prompt_file, env
 
@@ -715,10 +728,10 @@ async def _cli_run(
                 _active_procs.add(proc)
             try:
                 try:
-                    stdout_b, stderr_b = proc.communicate(input=stdin_payload, timeout=600)
+                    stdout_b, stderr_b = proc.communicate(input=stdin_payload, timeout=_CLI_TIMEOUT_SECONDS)
                 except subprocess.TimeoutExpired:
                     _kill_proc_tree(proc)
-                    raise RuntimeError(f"{engine} CLI 응답 시간이 초과되었습니다.") from None
+                    raise RuntimeError(f"{engine} CLI response exceeded {_CLI_TIMEOUT_SECONDS // 60} minutes.") from None
             finally:
                 with _active_lock:
                     _active_procs.discard(proc)

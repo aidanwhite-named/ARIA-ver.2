@@ -15,6 +15,21 @@ Set-Location $root
 
 Write-Host "=== ARIA ver.2 Patent Report Generator ===" -ForegroundColor Cyan
 
+# Kill any process already using the required ports
+Write-Host "[0/3] Cleaning up any existing processes on ports $backendPort / $frontendPort..." -ForegroundColor DarkGray
+foreach ($port in @($backendPort, $frontendPort)) {
+    $pids = (netstat -ano | Select-String ":$port\s" | ForEach-Object {
+        ($_ -split '\s+')[-1]
+    } | Select-Object -Unique)
+    foreach ($p in $pids) {
+        if ($p -match '^\d+$' -and $p -ne '0') {
+            Stop-Process -Id ([int]$p) -Force -ErrorAction SilentlyContinue
+            Write-Host "  Stopped PID $p (was using port $port)" -ForegroundColor DarkGray
+        }
+    }
+}
+Start-Sleep -Seconds 1
+
 Write-Host "[1/3] Checking Python dependencies..." -ForegroundColor Yellow
 python -m pip install -r backend/requirements.txt --quiet
 
@@ -59,7 +74,8 @@ if (-not (Test-Path "node_modules")) {
     npm install
 }
 
-$frontend = Start-Process -FilePath "npm" `
+$npmCmd = if ($IsWindows -or $env:OS -like "*Windows*") { "npm.cmd" } else { "npm" }
+$frontend = Start-Process -FilePath $npmCmd `
     -ArgumentList "run", "dev" `
     -WorkingDirectory "$root\frontend" `
     -PassThru -WindowStyle Minimized

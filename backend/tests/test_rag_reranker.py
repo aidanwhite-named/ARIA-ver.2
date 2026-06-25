@@ -24,6 +24,9 @@ class RagRerankerTests(unittest.TestCase):
             "reranker": "not_attempted",
             "fallback_reason": "",
         })
+        rag_retriever._reranker_inference_failed = False
+        rag_retriever._reranker_load_failed = False
+        rag_retriever._reranker_model = None
 
     def test_reranker_uses_best_element_score_per_candidate(self):
         chunks = [

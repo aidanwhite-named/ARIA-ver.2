@@ -720,18 +720,56 @@ class ConventionalSupportPolicyTests(unittest.TestCase):
             "combination_rationale": {"label": "??", "description": "??"},
         }
         phase1_md = (
-            "### [???? (A)] ???: ?? 95%\n\n- ???? ?? ??: primary quote\n\n"
-            "### [???? (B)] ???: ?? 90%\n\n- ???? ?? ??: secondary quote (???? 2)\n\n"
-            "### ?? ?? ??\n\n- ??? ??: ???\n- ???: B? ???? 2? ??\n- ??: ??"
+            "### [구성요소 (A)] 유사도: 동일 95%\n\n- 인용발명 대응 원문: primary quote\n\n"
+            "### [구성요소 (B)] 유사도: 대응 없음 0%\n\n- 인용발명 대응 원문: (인용발명 1에서 해당 구성 확인 불가)\n\n"
+            "### 종합 분석 요약\n\n- 유사점 요약: A는 직접 대응됨\n- 차이점: B는 인용발명 2에서만 확인됨\n- 결론: 검토 완료"
         )
 
         phase2 = asyncio.run(
             _generate_template_b_phase2(phase1_md, claim, matches, docs, chain_info, Settings())
         )
 
-        self.assertIn("(A) ?? (???? 1)", phase2)
+        self.assertIn("(A) 동일 95%", phase2)
+        self.assertIn("primary quote", phase2)
+        self.assertIn("(B) 대응 없음 0%", phase2)
+        self.assertNotIn("(A) ?? (???? 1)", phase2)
         self.assertNotIn("secondary quote (???? 2)", phase2)
         self.assertLess(phase2.index("[구성대비]"), phase2.index("[종합 판단]"))
+
+    def test_combo_phase2_keeps_difference_separate_from_combination_rationale(self):
+        claim = ParsedClaim(
+            claim_number=10,
+            text="claim",
+            elements=[ClaimElement(label="A", text="feature", importance="5")],
+        )
+        docs = [
+            ExtractedDocument(filename="primary.pdf"),
+            ExtractedDocument(filename="secondary.pdf"),
+        ]
+        chain_info = {
+            "total": [0, 1],
+            "doc_name_mapping": {"0": "???? 1", "1": "???? 2"},
+            "combination_rationale": {"label": "?? ???", "description": "?? ??"},
+        }
+        phase1_md = (
+            "### [???? (A)] ???: ?? ?? 80%\n\n"
+            "- ???? ?? ??: primary quote\n\n"
+            "### ?? ?? ??\n\n"
+            "- ??? ??: ?? ??? ???\n"
+            "- ???: [[??? 1]] ??? ?? ??? ???\n"
+            "- ?? ?? ? ??? ??: [??? 1] ???? 2? ??? ??? ??? ????? ??? ???\n"
+            "- ??: ?? ??"
+        )
+
+        phase2 = asyncio.run(
+            _generate_template_b_phase2(phase1_md, claim, [], docs, chain_info, Settings())
+        )
+
+        self.assertIn("[???]", phase2)
+        self.assertIn("[??? 1] ??? ?? ??? ???", phase2)
+        self.assertIn("[?? ??]", phase2)
+        self.assertIn("[??? 1] ???? 2? ??? ??? ??? ????? ??? ???", phase2)
+        self.assertNotIn("[[??? 1]]", phase2)
 
     def test_second_conventional_document_gets_limited_rationale(self):
         chain_data = {

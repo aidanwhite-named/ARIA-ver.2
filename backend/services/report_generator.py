@@ -647,6 +647,7 @@ def _parse_phase1(phase1_md: str) -> dict:
     components: list = []
     summary_similar = ""
     summary_diff = ""
+    summary_combination = ""
     conclusion = ""
 
     # 종합 분석 요약 헤더가 ### 없이(또는 다른 헤더 레벨로) 출력되는 경우를 보정해
@@ -716,9 +717,16 @@ def _parse_phase1(phase1_md: str) -> dict:
                     summary_similar = sim_m.group(1).strip()
                     break
 
-            for _diff_pat in [
+            for _combo_pat in [
                 r'-\s*결합\s*논리(?:\s*및\s*차이점\s*극복)?\s*:\s*(.+?)(?=\n\s*-\s|\Z)',
                 r'-\s*차이점\s*극복\s*:\s*(.+?)(?=\n\s*-\s|\Z)',
+            ]:
+                combo_m = re.search(_combo_pat, sec, re.DOTALL)
+                if combo_m:
+                    summary_combination = combo_m.group(1).strip()
+                    break
+
+            for _diff_pat in [
                 r'-\s*차이점\s*:\s*(.+?)(?=\n\s*-\s|\Z)',
             ]:
                 diff_m = re.search(_diff_pat, sec, re.DOTALL)
@@ -753,8 +761,26 @@ def _parse_phase1(phase1_md: str) -> dict:
         "components": deduped,
         "summary_similar": summary_similar,
         "summary_diff": summary_diff,
+        "summary_combination": summary_combination,
         "conclusion": conclusion,
     }
+
+
+def _normalize_bracketed_labels(text: str) -> str:
+    """Collapse accidental double brackets around report sub-headings like [[??? 1]]."""
+    if not text:
+        return text
+    text = re.sub(
+        r'\[\[\s*((?:차이점|유사점|결합\s*논리)[^\]\n]*?)\s*\]\]',
+        r'[\1]',
+        text,
+    )
+    text = re.sub(
+        r'\[\[\s*((?:차이점|유사점|결합\s*논리)[^\]\n]*?)\s*\]',
+        r'[\1]',
+        text,
+    )
+    return text
 
 
 def _build_phase2_markdown(
@@ -804,7 +830,9 @@ def _build_phase2_markdown(
     similar = data["summary_similar"] or \
         "※ Phase 1 탭의 [종합 분석 요약 — 유사점 요약] 항목을 참고하여 직접 작성하십시오."
     diff = data["summary_diff"] or \
-        "※ Phase 1 탭의 [종합 분석 요약 — 결합 논리 및 차이점 극복] 항목을 참고하여 직접 작성하십시오."
+        "? Phase 1 ?? [?? ?? ?? ? ???] ??? ???? ?? ??????."
+    if is_combo:
+        combination_rationale = data["summary_combination"] or combination_rationale
     conclusion = data["conclusion"] or (
         "※ Phase 1 분석 결과에서 결론 항목을 확인할 수 없습니다. "
         "Phase 1 탭의 종합 분석 요약을 참고하여 결론을 직접 작성하십시오."
@@ -827,7 +855,7 @@ def _build_phase2_markdown(
         diff=diff,
         conclusion=conclusion,
     )
-    return _strip_internal_scoring_notes(rendered)
+    return _normalize_bracketed_labels(_strip_internal_scoring_notes(rendered))
 
 
 async def _generate_template_a_phase2(
@@ -866,7 +894,6 @@ def _make_phase1_b_prompt(
     return _make_phase1_prompt(claim, matches, prior_docs, chain_info, settings, prev_context,
                                combo=True, secondary_matches=secondary_matches)
 
-
 async def _generate_template_b_phase2(
     phase1_md: str,
     claim: ParsedClaim,
@@ -875,7 +902,13 @@ async def _generate_template_b_phase2(
     chain_info: Optional[Dict],
     settings: Settings,
 ) -> str:
-    """Phase 2 조립 (LLM 없음, Template B): Phase 1 파싱 → 마크다운 직접 구성"""
+    """Phase 2 보고서 생성 (LLM 작성, Template B): Phase 1 요약에서 최종 보고서 작성.
+
+    이 함수는 Phase 1의 분석 요약을 받아 최종 독립항 보고서를 작성한다. 작성 기준:
+    1) 구성대비 요약 내용의 구성 2개 인용발명 기반 작성
+    2) 인용발명별 발췌 내용의 정확한 출처 표기
+    3) 각 결합 논리 유형에 따른 진보성 판단 기준 적용.
+    """
     doc_name_mapping = chain_info.get("doc_name_mapping") if chain_info else None
     total_invs = chain_info.get("total", [0, 1]) if chain_info else [0, 1]
     inv1_idx = total_invs[0]
@@ -889,12 +922,6 @@ async def _generate_template_b_phase2(
         else ("인용발명 3" if inv3_idx is not None else "")
     )
     combination_rationale = _combination_rationale_text(chain_info)
-    components_block = _format_component_comparison(
-        matches,
-        prior_docs,
-        primary_idx=inv1_idx,
-        doc_name_mapping=doc_name_mapping,
-    )
     return _build_phase2_markdown(
         phase1_md,
         claim.claim_number,
@@ -903,7 +930,6 @@ async def _generate_template_b_phase2(
         inv3_name,
         is_combo=True,
         combination_rationale=combination_rationale,
-        components_override=components_block,
         settings=settings,
     )
 
@@ -1025,14 +1051,73 @@ def _dependent_parent_context_status(
 def _extract_dependent_conclusion(phase1_md: str) -> str:
     """Extract the explicit Phase 1 conclusion without inventing a verdict."""
     match = re.search(
-        r"(?ms)^\s*-\s*\*{0,2}결론\*{0,2}\s*:\s*(.+?)"
+        r"(?ms)^\s*-\s*\*{0,2}(?:\uacb0\ub860|Conclusion)\*{0,2}\s*:\s*(.+?)"
         r"(?=\n\s*-\s|\n\s*#{1,6}\s|\Z)",
         phase1_md or "",
     )
     return match.group(1).strip() if match else ""
 
 
+def _meaningful_dependent_matches(
+    matches: Optional[List[ElementMatch]],
+    secondary_matches: Optional[List[ElementMatch]] = None,
+) -> List[ElementMatch]:
+    items: List[ElementMatch] = []
+    seen: set[tuple[str, int, str, str]] = set()
+    for match in (matches or []) + (secondary_matches or []):
+        if match.judgment in NO_MATCH_LABELS:
+            continue
+        key = (
+            match.label,
+            int(match.cited_invention_index),
+            match.quote or "",
+            match.similarity_reason or "",
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(match)
+    return items
+
+
+def _dependent_display_chain_info(
+    chain_info: Optional[Dict],
+    matches: Optional[List[ElementMatch]] = None,
+    secondary_matches: Optional[List[ElementMatch]] = None,
+) -> Dict:
+    base = dict(chain_info or {})
+    inherited = list(base.get("inherited", []))
+    added = list(base.get("added", []))
+    total = list(base.get("total", inherited))
+    parent_available = bool(base.get("parent_available", True))
+    evidence_docs: List[int] = []
+    for match in _meaningful_dependent_matches(matches, secondary_matches):
+        doc_idx = int(match.cited_invention_index)
+        if doc_idx not in evidence_docs:
+            evidence_docs.append(doc_idx)
+
+    if total:
+        base["reporting_docs"] = evidence_docs or total
+        return base
+
+    if evidence_docs:
+        reporting_added = evidence_docs[:]
+        reporting_inherited = inherited if parent_available else []
+        reporting_total = reporting_inherited + [
+            idx for idx in reporting_added if idx not in reporting_inherited
+        ]
+        base["inherited"] = reporting_inherited
+        base["added"] = reporting_added
+        base["total"] = reporting_total
+        base["reporting_docs"] = reporting_total
+        return base
+
+    base["reporting_docs"] = total
+    return base
+
+
 async def generate_dependent_report(
+
     claim: ParsedClaim,
     matches: List[ElementMatch],
     prior_docs: List[ExtractedDocument],
@@ -1042,29 +1127,35 @@ async def generate_dependent_report(
     secondary_matches: Optional[List[ElementMatch]] = None,
 ) -> str:
     # 부정불가 자동 전환
+    # 부정불가 자동 전환 처리
     all_no_match = all(m.judgment in NO_MATCH_LABELS for m in matches)
-    coverage_incomplete = bool(
-        chain_info and chain_info.get("coverage_complete") is False
-    )
-    if all_no_match or coverage_incomplete:
+    if all_no_match:
         return await _generate_rejection_impossible_report(claim, matches, prior_docs, settings)
 
+    display_chain = _dependent_display_chain_info(
+        chain_info,
+        matches=matches,
+        secondary_matches=secondary_matches,
+    )
     parent_num = claim.parent_claim or 1
-    inherited_invs = chain_info.get("inherited", [0]) if chain_info else [0]
-    added_invs = chain_info.get("added", []) if chain_info else []
-    total_invs = chain_info.get("total", inherited_invs) if chain_info else inherited_invs
-    mapping = chain_info.get("doc_name_mapping") if chain_info else None
-    parent_available, parent_context_status = _dependent_parent_context_status(claim, chain_info)
+    inherited_invs = display_chain.get("inherited", [0]) if display_chain else [0]
+    added_invs = display_chain.get("added", []) if display_chain else []
+    total_invs = display_chain.get("total", inherited_invs) if display_chain else inherited_invs
+    mapping = display_chain.get("doc_name_mapping") if display_chain else None
+    parent_available, parent_context_status = _dependent_parent_context_status(claim, display_chain)
 
-    inherited_str = format_inv_list(inherited_invs, mapping) if inherited_invs else ("인용발명 1" if parent_available else "없음 (부모항 미제공)")
-    # added가 비어 있으면 상속 문헌이 추가 구성까지 커버한다는 뜻 — 담당도 상속 문헌
-    current_inv_str = format_inv_list(added_invs, mapping) if added_invs else (inherited_str if parent_available else (format_inv_list(total_invs, mapping) if total_invs else "대응 문헌 없음"))
-    final_str = format_inv_list(total_invs, mapping) if total_invs else ("인용발명 1" if parent_available else "대응 문헌 없음")
+    inherited_str = format_inv_list(inherited_invs, mapping) if inherited_invs else ("인용발명 1" if parent_available else "없음 (부모항 없음)")
+    # added가 없을 때 전체 체인 기준 설명을 생성하되 부모항 상속 인용발명도 포함
+    current_inv_str = format_inv_list(added_invs, mapping) if added_invs else (inherited_str if parent_available else (format_inv_list(total_invs, mapping) if total_invs else "추가 문헌 없음"))
+    final_str = format_inv_list(total_invs, mapping) if total_invs else ("인용발명 1" if parent_available else "문헌 없음")
     added_inv_str = format_inv_list(added_invs, mapping) if added_invs else "없음"
-    coverage_status = "모든 추가 구성 대응 확인"
+    if display_chain and display_chain.get("coverage_complete") is False:
+        uncovered = ", ".join(display_chain.get("uncovered_labels", [])) or "미대응 구성"
+        coverage_status = f"일부 미대응 ({uncovered})"
+    else:
+        coverage_status = "추가 구성이 모두 대응되었습니다."
 
-    # 현재 종속항에서 새로 추가된 인용발명의 대응 내용
-    added_doc = None
+        added_doc = None
     if added_invs and added_invs[0] < len(prior_docs):
         added_doc = prior_docs[added_invs[0]]
 
@@ -1098,14 +1189,21 @@ def generate_dependent_phase2(
     claim: ParsedClaim,
     chain_info: Optional[Dict],
     settings: Settings,
+    matches: Optional[List[ElementMatch]] = None,
+    secondary_matches: Optional[List[ElementMatch]] = None,
 ) -> str:
-    """종속항 Phase 2 조립 (LLM 없음): Phase 1 분석문과 체인 정보를 템플릿에 치환한다."""
+    """종속항 Phase 2 보고서 생성 (LLM 작성): Phase 1 분석 요약에서 최종 종속항 보고서 작성."""
+    display_chain = _dependent_display_chain_info(
+        chain_info,
+        matches=matches,
+        secondary_matches=secondary_matches,
+    )
     parent_num = claim.parent_claim or 1
-    inherited_invs = chain_info.get("inherited", [0]) if chain_info else [0]
-    added_invs = chain_info.get("added", []) if chain_info else []
-    total_invs = chain_info.get("total", inherited_invs) if chain_info else inherited_invs
-    mapping = chain_info.get("doc_name_mapping") if chain_info else None
-    parent_available, parent_context_status = _dependent_parent_context_status(claim, chain_info)
+    inherited_invs = display_chain.get("inherited", [0]) if display_chain else [0]
+    added_invs = display_chain.get("added", []) if display_chain else []
+    total_invs = display_chain.get("total", inherited_invs) if display_chain else inherited_invs
+    mapping = display_chain.get("doc_name_mapping") if display_chain else None
+    parent_available, parent_context_status = _dependent_parent_context_status(claim, display_chain)
 
     inherited_str = format_inv_list(inherited_invs, mapping) if inherited_invs else ("인용발명 1" if parent_available else "없음 (부모항 미제공)")
     current_inv_str = format_inv_list(added_invs, mapping) if added_invs else (inherited_str if parent_available else (format_inv_list(total_invs, mapping) if total_invs else "대응 문헌 없음"))
@@ -1138,17 +1236,22 @@ def generate_dependent_phase2(
         analysis = "※ Phase 1 추가 구성 대비 분석 결과를 확인할 수 없습니다."
 
     coverage_incomplete = bool(
-        chain_info and chain_info.get("coverage_complete") is False
+        display_chain and display_chain.get("coverage_complete") is False
     )
     phase1_conclusion = _extract_dependent_conclusion(analysis)
-    if not parent_available:
+    if not parent_available and phase1_conclusion:
+        conclusion = (
+            f"{phase1_conclusion} "
+            f"다만, 부모항 {parent_num}이 확인되지 않아 청구항 전체의 거절 근거 구성 가능 여부는 현재 정보만으로 단정하지 않습니다. 현재 정보만으로 판단할 수 없습니다."
+        )
+    elif not parent_available:
         conclusion = (
             f"청구항 {claim.claim_number}의 추가 기술 특징에 대한 대비 결과는 위와 같으나, "
             f"인용하는 제{parent_num}항이 확인되지 않아 청구항 전체의 거절 근거 구성 가능 여부는 "
             "현재 정보만으로 판단할 수 없습니다."
         )
     elif coverage_incomplete:
-        uncovered = ", ".join(chain_info.get("uncovered_labels", [])) or "일부 추가 구성"
+        uncovered = ", ".join(display_chain.get("uncovered_labels", [])) or "일부 추가 구성"
         conclusion = (
             f"청구항 {claim.claim_number}의 {uncovered}에 대해서는 부모 체인에 새 인용발명 "
             "1개만 추가하는 범위에서 대응 근거가 완성되지 않으므로, 위 인용발명 조합만으로 "
@@ -1156,7 +1259,6 @@ def generate_dependent_phase2(
         )
     elif phase1_conclusion:
         conclusion = phase1_conclusion
-    else:
         conclusion = (
             f"청구항 {claim.claim_number}의 최종 판단은 위 추가 구성 대비 결과와 부모 청구항의 "
             f"판단을 함께 고려하여 검토할 필요가 있습니다. 검토 대상 인용발명 조합은 {final_str}입니다."

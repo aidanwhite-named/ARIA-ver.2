@@ -155,6 +155,41 @@ def _write_json(path: Path, data) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _dependent_batch_status_path(job_id: str) -> Path:
+    return _job_dir(job_id) / "dependent_batch_status.json"
+
+
+def _update_dependent_batch_status(
+    job_id: str,
+    *,
+    state: str,
+    claim_numbers: list[int],
+    stage: str,
+    message: str,
+    started_at: Optional[str] = None,
+    error: str = "",
+    reports_ready: int = 0,
+    completed_at: Optional[str] = None,
+) -> dict:
+    path = _dependent_batch_status_path(job_id)
+    previous = _load_json(path, {})
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    payload = {
+        "job_id": job_id,
+        "state": state,
+        "stage": stage,
+        "message": message,
+        "claim_numbers": claim_numbers,
+        "reports_ready": reports_ready,
+        "started_at": started_at or previous.get("started_at") or now,
+        "updated_at": now,
+        "completed_at": completed_at or previous.get("completed_at") or "",
+        "error": error,
+    }
+    _write_json(path, payload)
+    return payload
+
+
 def _invalidate_claim_derived_artifacts(job_id: str, claim_number: int) -> None:
     """Remove derived data that can no longer match a changed claim."""
     job_dir = _job_dir(job_id)
@@ -578,7 +613,7 @@ async def prepare(job_id: str):
             "manifest": manifest,
         })
 
-    return EventSourceResponse(stream())
+    return EventSourceResponse(stream(), headers={"Content-Type": "text/event-stream; charset=utf-8"})
 
 
 @router.post("/manual_claim/{job_id}")
@@ -624,6 +659,15 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
     async def stream() -> AsyncGenerator[dict, None]:
         try:
             total_start = time.perf_counter()
+
+            def _timing_message(label: str, started_at: float) -> str:
+                return f"[timing] {label}: {_elapsed(started_at)}"
+
+            async def _yield_timing(label: str, started_at: float) -> AsyncGenerator[dict, None]:
+                message = _timing_message(label, started_at)
+                logger.info("Report timing [%s/%s] %s", job_id, claim_number, message)
+                yield _ev("log", message)
+
             job_dir = _job_dir(job_id)
             if not job_dir.exists():
                 yield _ev("error", "작업을 찾을 수 없습니다.")
@@ -637,10 +681,10 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
             same_pairs = _load_json(job_dir / "same_pairs.json", {})
             claim = next((c for c in claims if c.claim_number == claim_number), None)
             if not claim:
-                yield _ev("error", f"청구항 {claim_number}을 찾을 수 없습니다.")
+                yield _ev("error", f"청구항 {claim_number}을(를) 찾을 수 없습니다.")
                 return
             if not prior_docs:
-                yield _ev("error", "준비된 인용발명이 없습니다.")
+                yield _ev("error", "인용발명이 준비되지 않았습니다.")
                 return
 
             cache_reset = reset_incompatible_comparison_caches(
@@ -667,6 +711,8 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                 cached_report = cached.read_text(encoding="utf-8")
                 cached_chain_info = get_claim_chain_info(cached_chain, claim_number)
                 _save_context_entry(job_id, claim_number, claim.text, cached_report)
+                async for event in _yield_timing("cached report return", total_start):
+                    yield event
                 yield _ev("done", {
                     "report_md": cached_report,
                     "claim_number": claim_number,
@@ -677,17 +723,17 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
             yield _ev("start", f"청구항 {claim_number} 보고서 생성을 시작합니다.")
             if settings.use_rag_retrieval:
                 reranker_note = (
-                    f", reranker 상위 {settings.reranker_top_k}개 전달"
-                    if settings.use_reranker else ", reranker 미사용"
+                    f", reranker top {settings.reranker_top_k}"
+                    if settings.use_reranker else ", reranker off"
                 )
                 yield _ev(
                     "log",
-                    f"[RAG] Dense+BM25 후보 {settings.rag_top_k}개 검색{reranker_note}",
+                    f"[RAG] Dense+BM25 top {settings.rag_top_k}{reranker_note}",
                 )
             if cache_reset:
-                yield _ev("log", "[설정 변경] 비교 방식에 맞춰 기존 구성대비 캐시를 갱신합니다.")
+                yield _ev("log", "[cache] incompatible comparison cache reset")
             if not cached_all:
-                start = time.perf_counter()
+                compare_start = time.perf_counter()
                 cached_doc_idxs = get_cached_doc_indices(
                     str(job_dir),
                     claim_number,
@@ -698,7 +744,7 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                 missing_doc_idxs = [i for i in range(len(prior_docs)) if i not in cached_doc_idxs]
                 try:
                     if cached_doc_idxs and missing_doc_idxs:
-                        yield _ev("analyze", f"신규/미대비 인용발명 {len(missing_doc_idxs)}개 추가 대비 중...")
+                        yield _ev("analyze", f"missing comparison docs: {len(missing_doc_idxs)}")
                         await analyze_claim_elements_for_docs(
                             claim.elements, prior_docs, missing_doc_idxs, settings,
                             job_dir=str(job_dir), claim_number=claim_number,
@@ -707,12 +753,12 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                         if compare_mode == "hybrid":
                             yield _ev(
                                 "analyze",
-                                f"인용발명 {len(prior_docs)}개 전체 통합 대비 중 (LLM 1회 호출)...",
+                                f"comparing {len(prior_docs)} prior docs in hybrid mode",
                             )
                         else:
                             yield _ev(
                                 "analyze",
-                                f"인용발명 {len(prior_docs)}개 문헌별 순차 대비 중...",
+                                f"comparing {len(prior_docs)} prior docs in per-doc mode",
                             )
                         compare_fn = analyze_claim_elements if compare_mode == "per_doc" else analyze_claim_elements_hybrid
                         await compare_fn(
@@ -720,7 +766,7 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                             job_dir=str(job_dir), claim_number=claim_number,
                         )
                 except CompareFailed as e:
-                    yield _ev("error", f"구성대비에 실패했습니다: {e}")
+                    yield _ev("error", f"구성요소 대비 분석 실패: {e}")
                     return
                 matches, _ = get_matches_from_cache(
                     claim,
@@ -729,22 +775,26 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                     require_rag=require_rag_cache,
                     comparison_mode=compare_mode,
                 )
-                yield _ev("log", f"[구성대비] {_elapsed(start)}")
+                async for event in _yield_timing("comparison", compare_start):
+                    yield event
             else:
-                yield _ev("log", "[캐시] 구성대비 캐시를 사용합니다.")
+                yield _ev("log", "[cache] using cached comparisons")
 
             if settings.use_rag_retrieval and not cached_all:
                 rag_status = get_rag_runtime_status()
                 yield _ev(
                     "log",
-                    "[RAG 상태] "
+                    "[RAG status] "
                     f"dense={rag_status['dense']}, qdrant={rag_status['qdrant']}, "
                     f"bm25={rag_status['bm25']}, reranker={rag_status['reranker']}",
                 )
                 if rag_status.get("fallback_reason"):
-                    yield _ev("log", f"[RAG 폴백] {rag_status['fallback_reason']}")
+                    yield _ev("log", f"[RAG fallback] {rag_status['fallback_reason']}")
 
+            chain_start = time.perf_counter()
             chain_data = build_citation_chain_from_comparisons(str(job_dir), claims, prior_docs)
+            async for event in _yield_timing("citation chain", chain_start):
+                yield event
             chain_info = get_claim_chain_info(chain_data, claim_number) if chain_data else None
             if chain_info and chain_info.get("total"):
                 matches, _ = get_matches_from_cache(
@@ -771,8 +821,11 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                     )
                     secondary_matches.extend(sec_matches)
 
-            yield _ev("log", "[인용 검증] 원문 단락 DB 기준 문자열 검증 중...")
+            yield _ev("log", "[verify] checking quote text against local DB")
+            verify_start = time.perf_counter()
             verifications = verify_quotes(matches, prior_docs)
+            async for event in _yield_timing("quote verification", verify_start):
+                yield event
             for item in verifications:
                 yield _ev("log", item["message"])
 
@@ -784,7 +837,8 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                     prev_context = [c for c in _load_context(job_id) if c.get("claim_number") == parent_num]
 
             used_inventions = _used_inventions_for(chain_info, prior_docs)
-            yield _ev("generate", "Phase 1 분석 작성 중...")
+            yield _ev("generate", "Phase 1 analysis in progress")
+            phase1_start = time.perf_counter()
             phase1_chunks: list[str] = []
             if claim.claim_type == "independent":
                 async for chunk in generate_independent_phase1_streaming(
@@ -805,24 +859,37 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                 split = raw.find("# [Phase 2]")
                 phase1_body = raw[:split].strip() if split >= 0 else raw
                 phase1_md = _dedupe_phase1_sections(phase1_body)
-            phase1_md = f"### 청구항 {claim_number}\n\n{phase1_md}"
+            phase1_md = f"### claim {claim_number}\n\n{phase1_md}"
+            async for event in _yield_timing("phase1", phase1_start):
+                yield event
             yield _ev("phase1_result", {
                 "phase1_md": phase1_md,
                 "claim_number": claim_number,
                 "used_inventions": used_inventions,
             })
 
-            yield _ev("generate", "Phase 2 보고서 조립 중...")
+            yield _ev("generate", "Phase 2 assembly in progress")
+            phase2_start = time.perf_counter()
             boundary = _phase2_boundary(settings)
             if claim.claim_type == "independent":
                 phase2_body = await generate_independent_phase2(
                     phase1_md, claim, matches, prior_docs, chain_info, settings
                 )
             else:
-                phase2_body = generate_dependent_phase2(phase1_md, claim, chain_info, settings)
+                phase2_body = generate_dependent_phase2(
+                    phase1_md,
+                    claim,
+                    chain_info,
+                    settings,
+                    matches=matches,
+                    secondary_matches=secondary_matches,
+                )
+            async for event in _yield_timing("phase2", phase2_start):
+                yield event
             phase2_md = boundary + "\n\n" + _strip_phase2_marker(phase2_body)
             report_md = phase1_md + "\n\n" + phase2_md
 
+            finalize_start = time.perf_counter()
             rejected_md = build_rejected_inventions_section(claim, prior_docs, chain_info, str(job_dir))
             if rejected_md:
                 report_md += "\n\n" + rejected_md
@@ -833,7 +900,10 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
             _save_report(job_id, claim_number, report_md)
             _save_reference_db(job_id, claim, matches, prior_docs, chain_info, report_md)
             _save_context_entry(job_id, claim_number, claim.text, report_md)
-            yield _ev("log", f"총 소요시간: {_elapsed(total_start)}")
+            async for event in _yield_timing("finalize", finalize_start):
+                yield event
+            async for event in _yield_timing("total", total_start):
+                yield event
             yield _ev("done", {
                 "report_md": report_md,
                 "claim_number": claim_number,
@@ -842,9 +912,9 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
         except Exception as e:
             tb = traceback.format_exc()
             logger.error(f"Report error [{job_id}/{claim_number}]: {tb}")
-            yield _ev("error", f"오류: {e}\n{tb[:500]}")
+            yield _ev("error", f"error: {e}\n{tb[:500]}")
 
-    return EventSourceResponse(stream())
+    return EventSourceResponse(stream(), headers={"Content-Type": "text/event-stream; charset=utf-8"})
 
 
 def _used_inventions_for(chain_info, prior_docs: List[ExtractedDocument]) -> list:
@@ -860,13 +930,29 @@ def _used_inventions_for(chain_info, prior_docs: List[ExtractedDocument]) -> lis
     return [{"name": "인용발명 1", "filename": prior_docs[0].filename}] if prior_docs else []
 
 
-def _assemble_dependent_report(raw: str, claim: ParsedClaim, chain_info, settings) -> str:
+def _assemble_dependent_report(
+    raw: str,
+    claim: ParsedClaim,
+    chain_info,
+    settings,
+    matches=None,
+    secondary_matches=None,
+) -> str:
     body = _strip_agent_tool_calls(raw)
     split = body.find("# [Phase 2]")
     phase1 = body[:split].strip() if split >= 0 else body.strip()
     phase1 = _dedupe_phase1_sections(phase1)
-    phase1_md = f"### 청구항 {claim.claim_number}\n\n{phase1}"
-    phase2_body = generate_dependent_phase2(phase1_md, claim, chain_info, settings)
+    phase1_md = f"### 청구항 {claim.claim_number}
+
+{phase1}"
+    phase2_body = generate_dependent_phase2(
+        phase1_md,
+        claim,
+        chain_info,
+        settings,
+        matches=matches,
+        secondary_matches=secondary_matches,
+    )
     return phase1_md + "\n\n" + _phase2_boundary(settings) + "\n\n" + _strip_phase2_marker(phase2_body)
 
 
@@ -876,197 +962,324 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
     if not job_dir.exists():
         raise HTTPException(status_code=404, detail="작업을 찾을 수 없습니다.")
 
-    settings = _load_settings_with_dir()
-    claims = _load_claims(job_id)
-    prior_docs = _load_prior_docs(job_id)
-    same_pairs = _load_json(job_dir / "same_pairs.json", {})
-    claims_by_num = {c.claim_number: c for c in claims}
-    targets = [
-        claims_by_num[n] for n in req.claim_numbers
-        if n in claims_by_num and claims_by_num[n].claim_type == "dependent"
-    ]
-    if not targets:
-        return {"reports": {}}
-
-    compare_mode = getattr(settings, "comparison_mode", "per_doc")
-    require_rag_cache = bool(getattr(settings, "use_rag_retrieval", False))
-    cached_chain = _load_json(job_dir / "citation_chain.json", {})
-    policy_cache_changed = (
-        not isinstance(cached_chain, dict)
-        or cached_chain.get("policy_version") != CITATION_CHAIN_POLICY_VERSION
+    claim_numbers = sorted({int(n) for n in req.claim_numbers})
+    started_at = time.strftime("%Y-%m-%d %H:%M:%S")
+    _update_dependent_batch_status(
+        job_id,
+        state="running",
+        claim_numbers=claim_numbers,
+        stage="starting",
+        message="종속항 일괄 보고서 생성을 시작합니다.",
+        started_at=started_at,
     )
-    reset_incompatible_comparison_caches(str(job_dir), len(prior_docs), settings)
-    candidate_docs_by_claim: dict[int, list[int]] = {}
 
-    def candidate_docs_for(claim: ParsedClaim) -> list[int]:
-        if claim.claim_number not in candidate_docs_by_claim:
-            candidate_docs_by_claim[claim.claim_number] = select_candidate_doc_indices_for_elements(
-                claim.elements,
+    try:
+        settings = _load_settings_with_dir()
+        claims = _load_claims(job_id)
+        prior_docs = _load_prior_docs(job_id)
+        same_pairs = _load_json(job_dir / "same_pairs.json", {})
+        claims_by_num = {c.claim_number: c for c in claims}
+        targets = [
+            claims_by_num[n] for n in req.claim_numbers
+            if n in claims_by_num and claims_by_num[n].claim_type == "dependent"
+        ]
+        if not targets:
+            _update_dependent_batch_status(
+                job_id,
+                state="completed",
+                claim_numbers=claim_numbers,
+                stage="completed",
+                message="대상 종속항이 없어 빈 결과를 반환합니다.",
+                started_at=started_at,
+                completed_at=time.strftime("%Y-%m-%d %H:%M:%S"),
+            )
+            return {"reports": {}}
+
+        _update_dependent_batch_status(
+            job_id,
+            state="running",
+            claim_numbers=claim_numbers,
+            stage="loaded_targets",
+            message=f"종속항 {len(targets)}개를 일괄 처리 대상으로 불러왔습니다.",
+            started_at=started_at,
+        )
+
+        compare_mode = getattr(settings, "comparison_mode", "per_doc")
+        require_rag_cache = bool(getattr(settings, "use_rag_retrieval", False))
+        cached_chain = _load_json(job_dir / "citation_chain.json", {})
+        policy_cache_changed = (
+            not isinstance(cached_chain, dict)
+            or cached_chain.get("policy_version") != CITATION_CHAIN_POLICY_VERSION
+        )
+        reset_incompatible_comparison_caches(str(job_dir), len(prior_docs), settings)
+        candidate_docs_by_claim: dict[int, list[int]] = {}
+
+        def candidate_docs_for(claim: ParsedClaim) -> list[int]:
+            if claim.claim_number not in candidate_docs_by_claim:
+                candidate_docs_by_claim[claim.claim_number] = select_candidate_doc_indices_for_elements(
+                    claim.elements,
+                    prior_docs,
+                    settings,
+                )
+            return candidate_docs_by_claim[claim.claim_number]
+
+        async def ensure_comparison_cache(claim: ParsedClaim) -> None:
+            if str(claim.claim_number) in same_pairs:
+                return
+            cached_doc_idxs = get_cached_doc_indices(
+                str(job_dir),
+                claim.claim_number,
+                len(prior_docs),
+                require_rag=require_rag_cache,
+                comparison_mode=compare_mode,
+            )
+            target_doc_idxs = candidate_docs_for(claim)
+            missing_doc_idxs = [i for i in target_doc_idxs if i not in cached_doc_idxs]
+            if req.force:
+                missing_doc_idxs = target_doc_idxs[:]
+            if not missing_doc_idxs and not req.force:
+                return
+            if compare_mode == "hybrid" and len(target_doc_idxs) > 1:
+                selected_docs = [prior_docs[i] for i in target_doc_idxs]
+                await analyze_claim_elements_hybrid(
+                    claim.elements, selected_docs, settings,
+                    job_dir=str(job_dir), claim_number=claim.claim_number,
+                    doc_index_map=target_doc_idxs,
+                )
+                return
+            if missing_doc_idxs:
+                await analyze_claim_elements_for_docs(
+                    claim.elements, prior_docs, missing_doc_idxs, settings,
+                    job_dir=str(job_dir), claim_number=claim.claim_number,
+                )
+                return
+            compare_fn = analyze_claim_elements if compare_mode == "per_doc" else analyze_claim_elements_hybrid
+            await compare_fn(
+                claim.elements, prior_docs, settings,
+                job_dir=str(job_dir), claim_number=claim.claim_number,
+            )
+
+        uncached_targets = []
+        for claim in targets:
+            if str(claim.claim_number) in same_pairs:
+                continue
+            _, dep_cached = get_matches_from_cache(
+                claim,
                 prior_docs,
-                settings,
+                str(job_dir),
+                require_rag=require_rag_cache,
+                comparison_mode=compare_mode,
             )
-        return candidate_docs_by_claim[claim.claim_number]
-
-    async def ensure_comparison_cache(claim: ParsedClaim) -> None:
-        if str(claim.claim_number) in same_pairs:
-            return
-        cached_doc_idxs = get_cached_doc_indices(
-            str(job_dir),
-            claim.claim_number,
-            len(prior_docs),
-            require_rag=require_rag_cache,
-            comparison_mode=compare_mode,
-        )
-        target_doc_idxs = candidate_docs_for(claim)
-        missing_doc_idxs = [i for i in target_doc_idxs if i not in cached_doc_idxs]
-        if req.force:
-            missing_doc_idxs = target_doc_idxs[:]
-        if not missing_doc_idxs and not req.force:
-            return
-        if compare_mode == "hybrid" and len(target_doc_idxs) > 1:
-            selected_docs = [prior_docs[i] for i in target_doc_idxs]
-            await analyze_claim_elements_hybrid(
-                claim.elements, selected_docs, settings,
-                job_dir=str(job_dir), claim_number=claim.claim_number,
-                doc_index_map=target_doc_idxs,
+            target_doc_idxs = candidate_docs_for(claim)
+            cached_doc_idxs = get_cached_doc_indices(
+                str(job_dir),
+                claim.claim_number,
+                len(prior_docs),
+                require_rag=require_rag_cache,
+                comparison_mode=compare_mode,
             )
-            return
-        if missing_doc_idxs:
-            await analyze_claim_elements_for_docs(
-                claim.elements, prior_docs, missing_doc_idxs, settings,
-                job_dir=str(job_dir), claim_number=claim.claim_number,
+            target_cached = target_doc_idxs and all(i in cached_doc_idxs for i in target_doc_idxs)
+            if (dep_cached or target_cached) and not req.force:
+                continue
+            uncached_targets.append(claim)
+
+        if uncached_targets:
+            _update_dependent_batch_status(
+                job_id,
+                state="running",
+                claim_numbers=claim_numbers,
+                stage="building_comparison_cache",
+                message=f"종속항 {len(uncached_targets)}개에 대한 비교 캐시를 생성하고 있습니다.",
+                started_at=started_at,
             )
-            return
-        compare_fn = analyze_claim_elements if compare_mode == "per_doc" else analyze_claim_elements_hybrid
-        await compare_fn(
-            claim.elements, prior_docs, settings,
-            job_dir=str(job_dir), claim_number=claim.claim_number,
+            max_parallel = 2 if compare_mode == "hybrid" else 1
+            semaphore = asyncio.Semaphore(max_parallel)
+
+            async def run_limited(claim: ParsedClaim) -> None:
+                async with semaphore:
+                    await ensure_comparison_cache(claim)
+
+            await asyncio.gather(*(run_limited(claim) for claim in uncached_targets))
+        else:
+            _update_dependent_batch_status(
+                job_id,
+                state="running",
+                claim_numbers=claim_numbers,
+                stage="comparison_cache_ready",
+                message="비교 캐시가 이미 준비되어 있습니다.",
+                started_at=started_at,
+            )
+
+        recomputed_claim_numbers = {claim.claim_number for claim in uncached_targets}
+
+        _update_dependent_batch_status(
+            job_id,
+            state="running",
+            claim_numbers=claim_numbers,
+            stage="building_citation_chain",
+            message="인용발명 체인을 다시 계산하고 있습니다.",
+            started_at=started_at,
         )
+        chain_data = build_citation_chain_from_comparisons(str(job_dir), claims, prior_docs)
+        parent_nums: set[int] = set()
+        for claim in targets:
+            parent_nums.update(_parent_chain_nums(claim, claims_by_num))
+        prev_context = _context_for_claims(job_id, parent_nums)
+        batch_items = []
+        results: dict[str, dict] = {}
 
-    uncached_targets = []
-    for claim in targets:
-        if str(claim.claim_number) in same_pairs:
-            continue
-        _, dep_cached = get_matches_from_cache(
-            claim,
-            prior_docs,
-            str(job_dir),
-            require_rag=require_rag_cache,
-            comparison_mode=compare_mode,
-        )
-        target_doc_idxs = candidate_docs_for(claim)
-        cached_doc_idxs = get_cached_doc_indices(
-            str(job_dir),
-            claim.claim_number,
-            len(prior_docs),
-            require_rag=require_rag_cache,
-            comparison_mode=compare_mode,
-        )
-        target_cached = target_doc_idxs and all(i in cached_doc_idxs for i in target_doc_idxs)
-        if (dep_cached or target_cached) and not req.force:
-            continue
-        uncached_targets.append(claim)
-
-    if uncached_targets:
-        # Hybrid batch mode: keep per-claim evidence isolation, but fill comparison
-        # caches for multiple dependent claims concurrently before the single
-        # dependent-report batch call below. CLI-backed LLMs are heavy, so cap the
-        # concurrency instead of launching one process per claim.
-        max_parallel = 2 if compare_mode == "hybrid" else 1
-        semaphore = asyncio.Semaphore(max_parallel)
-
-        async def run_limited(claim: ParsedClaim) -> None:
-            async with semaphore:
-                await ensure_comparison_cache(claim)
-
-        await asyncio.gather(*(run_limited(claim) for claim in uncached_targets))
-
-    recomputed_claim_numbers = {claim.claim_number for claim in uncached_targets}
-
-    chain_data = build_citation_chain_from_comparisons(str(job_dir), claims, prior_docs)
-    parent_nums: set[int] = set()
-    for claim in targets:
-        parent_nums.update(_parent_chain_nums(claim, claims_by_num))
-    prev_context = _context_for_claims(job_id, parent_nums)
-    batch_items = []
-    results: dict[str, dict] = {}
-
-    for claim in targets:
-        cn = claim.claim_number
-        cached = REPORTS_DIR / f"report_{job_id}_claim{cn}.md"
-        if (
-            cached.exists()
-            and not req.force
-            and cn not in recomputed_claim_numbers
-            and not policy_cache_changed
-        ):
-            cached_report = cached.read_text(encoding="utf-8")
-            cached_chain_info = get_claim_chain_info(chain_data, cn)
-            _save_context_entry(job_id, claim.claim_number, claim.text, cached_report)
-            results[str(cn)] = {
-                "report_md": cached_report,
-                "used_inventions": _used_inventions_for(cached_chain_info, prior_docs),
-            }
-            continue
-        matches, _ = get_matches_from_cache(
-            claim,
-            prior_docs,
-            str(job_dir),
-            require_rag=require_rag_cache,
-            comparison_mode=compare_mode,
-        )
-        chain_info = get_claim_chain_info(chain_data, cn) if chain_data else None
-        if chain_info and chain_info.get("total"):
+        for claim in targets:
+            cn = claim.claim_number
+            cached = REPORTS_DIR / f"report_{job_id}_claim{cn}.md"
+            if (
+                cached.exists()
+                and not req.force
+                and cn not in recomputed_claim_numbers
+                and not policy_cache_changed
+            ):
+                cached_report = cached.read_text(encoding="utf-8")
+                cached_chain_info = get_claim_chain_info(chain_data, cn)
+                _save_context_entry(job_id, claim.claim_number, claim.text, cached_report)
+                results[str(cn)] = {
+                    "report_md": cached_report,
+                    "used_inventions": _used_inventions_for(cached_chain_info, prior_docs),
+                }
+                continue
             matches, _ = get_matches_from_cache(
                 claim,
                 prior_docs,
                 str(job_dir),
-                allowed_docs=chain_info["total"],
                 require_rag=require_rag_cache,
                 comparison_mode=compare_mode,
             )
-        secondary_matches = None
-        total_refs = chain_info.get("total", []) if chain_info else []
-        if len(total_refs) > 1:
-            secondary_matches = []
-            for sec_idx in total_refs[1:]:
-                sec, _ = get_matches_from_cache(
+            chain_info = get_claim_chain_info(chain_data, cn) if chain_data else None
+            if chain_info and chain_info.get("total"):
+                matches, _ = get_matches_from_cache(
                     claim,
                     prior_docs,
                     str(job_dir),
-                    allowed_docs=[sec_idx],
+                    allowed_docs=chain_info["total"],
                     require_rag=require_rag_cache,
                     comparison_mode=compare_mode,
                 )
-                secondary_matches.extend(sec)
-        batch_items.append((claim, matches, chain_info, secondary_matches))
+            secondary_matches = None
+            total_refs = chain_info.get("total", []) if chain_info else []
+            if len(total_refs) > 1:
+                secondary_matches = []
+                for sec_idx in total_refs[1:]:
+                    sec, _ = get_matches_from_cache(
+                        claim,
+                        prior_docs,
+                        str(job_dir),
+                        allowed_docs=[sec_idx],
+                        require_rag=require_rag_cache,
+                        comparison_mode=compare_mode,
+                    )
+                    secondary_matches.extend(sec)
+            batch_items.append((claim, matches, chain_info, secondary_matches))
 
-    if batch_items:
-        combined = await generate_dependent_reports_batch(
-            batch_items, prior_docs, settings, prev_context=prev_context if req.use_context else None
-        )
-        combined = _strip_agent_tool_calls(combined)
-        parts = _BATCH_SPLIT_RE.split(combined)
-        chunks: dict[int, str] = {}
-        for i in range(1, len(parts) - 1, 2):
-            chunks[int(parts[i])] = parts[i + 1].strip()
-        for claim, matches, chain_info, secondary in batch_items:
-            raw = chunks.get(claim.claim_number)
-            if not raw:
-                raw = await generate_dependent_report(
-                    claim, matches, prior_docs, chain_info, settings,
-                    prev_context=prev_context if req.use_context else None,
+        if batch_items:
+            _update_dependent_batch_status(
+                job_id,
+                state="running",
+                claim_numbers=claim_numbers,
+                stage="waiting_for_batch_llm",
+                message=f"종속항 {len(batch_items)}개에 대한 LLM 일괄 보고서를 생성하고 있습니다.",
+                started_at=started_at,
+                reports_ready=len(results),
+            )
+            combined = await generate_dependent_reports_batch(
+                batch_items, prior_docs, settings, prev_context=prev_context if req.use_context else None
+            )
+            combined = _strip_agent_tool_calls(combined)
+            parts = _BATCH_SPLIT_RE.split(combined)
+            chunks: dict[int, str] = {}
+            for i in range(1, len(parts) - 1, 2):
+                chunks[int(parts[i])] = parts[i + 1].strip()
+            for claim, matches, chain_info, secondary in batch_items:
+                raw = chunks.get(claim.claim_number)
+                if not raw:
+                    _update_dependent_batch_status(
+                        job_id,
+                        state="running",
+                        claim_numbers=claim_numbers,
+                        stage="fallback_single_report",
+                        message=f"청구항 {claim.claim_number} 배치 결과가 없어 단건 보고서로 재시도합니다.",
+                        started_at=started_at,
+                        reports_ready=len(results),
+                    )
+                    raw = await generate_dependent_report(
+                        claim, matches, prior_docs, chain_info, settings,
+                        prev_context=prev_context if req.use_context else None,
+                        secondary_matches=secondary,
+                    )
+                report_md = _assemble_dependent_report(
+                    raw,
+                    claim,
+                    chain_info,
+                    settings,
+                    matches=matches,
                     secondary_matches=secondary,
                 )
-            report_md = _assemble_dependent_report(raw, claim, chain_info, settings)
-            _save_report(job_id, claim.claim_number, report_md)
-            _save_reference_db(job_id, claim, matches, prior_docs, chain_info, report_md)
-            _save_context_entry(job_id, claim.claim_number, claim.text, report_md)
-            results[str(claim.claim_number)] = {
-                "report_md": report_md,
-                "used_inventions": _used_inventions_for(chain_info, prior_docs),
-            }
-    return {"reports": results}
+                _save_report(job_id, claim.claim_number, report_md)
+                _save_reference_db(job_id, claim, matches, prior_docs, chain_info, report_md)
+                _save_context_entry(job_id, claim.claim_number, claim.text, report_md)
+                results[str(claim.claim_number)] = {
+                    "report_md": report_md,
+                    "used_inventions": _used_inventions_for(chain_info, prior_docs),
+                }
+                _update_dependent_batch_status(
+                    job_id,
+                    state="running",
+                    claim_numbers=claim_numbers,
+                    stage="saving_reports",
+                    message=f"청구항 {claim.claim_number} 보고서를 저장했습니다.",
+                    started_at=started_at,
+                    reports_ready=len(results),
+                )
+
+        _update_dependent_batch_status(
+            job_id,
+            state="completed",
+            claim_numbers=claim_numbers,
+            stage="completed",
+            message=f"종속항 보고서 {len(results)}개 생성을 완료했습니다.",
+            started_at=started_at,
+            reports_ready=len(results),
+            completed_at=time.strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        return {"reports": results}
+    except Exception as exc:
+        logger.exception("Dependent batch report failed for %s", job_id)
+        _update_dependent_batch_status(
+            job_id,
+            state="failed",
+            claim_numbers=claim_numbers,
+            stage="failed",
+            message="종속항 일괄 보고서 생성 중 오류가 발생했습니다.",
+            started_at=started_at,
+            error=str(exc),
+        )
+        raise
+
+
+@router.get("/report_batch_dependent_status/{job_id}")
+async def report_batch_dependent_status(job_id: str):
+    job_dir = _job_dir(job_id)
+    if not job_dir.exists():
+        raise HTTPException(status_code=404, detail="작업을 찾을 수 없습니다.")
+    return _load_json(_dependent_batch_status_path(job_id), {
+        "job_id": job_id,
+        "state": "idle",
+        "stage": "idle",
+        "message": "종속항 일괄 보고서 작업을 아직 시작하지 않았습니다.",
+        "claim_numbers": [],
+        "reports_ready": 0,
+        "started_at": "",
+        "updated_at": "",
+        "completed_at": "",
+        "error": "",
+    })
 
 
 @router.post("/chat/{job_id}/{claim_number}")
