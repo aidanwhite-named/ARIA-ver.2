@@ -883,8 +883,8 @@ class ConventionalSupportPolicyTests(unittest.TestCase):
 
         self.assertIn("[차이점]", phase2)
         self.assertIn("[차이점 1] 추가 구성 확인 필요", phase2)
-        self.assertIn("[결합 논리]", phase2)
-        self.assertIn("[차이점 1] 인용발명 2의 보조 구성이 추가로 필요함", phase2)
+        self.assertNotIn("[결합 논리]", phase2)
+        self.assertNotIn("인용발명 2의 보조 구성이 추가로 필요함", phase2)
         self.assertNotIn("[[차이점 1]]", phase2)
 
     def test_second_conventional_document_gets_limited_rationale(self):
@@ -1049,10 +1049,127 @@ class RejectedInventionsSectionTests(unittest.TestCase):
 
         self.assertIn("## 관련도 A 인용발명", result)
         self.assertIn("인용발명 2", result)
-        self.assertIn("청구항 1과의 유사한 점", result)
-        self.assertIn("차량 본체에 센서를 배치하는 구성은 청구항과 동일합니다.", result)
-        self.assertIn("controller transmits a control signal", result)
-        self.assertIn("청구항의 (C) 구성은 이 인용발명에서 직접 확인되지 않아 최종 채택에서 제외되었습니다.", result)
+        self.assertIn("(A) 차량 본체에 센서를 배치하는 구성은 청구항과 동일합니다. (sensor arranged on a vehicle body [0001])", result)
+        self.assertIn("(B) 제어 신호를 생성하는 점은 유사하지만 세부 제어 방식은 다릅니다. (controller transmits a control signal [0002])", result)
+        self.assertIn("차이점: (C) 구성은 이 인용발명에서 직접 확인되지 않아 최종 채택에서 제외되었습니다.", result)
+
+    def test_rejected_inventions_section_groups_remaining_docs_under_single_a_heading(self):
+        claim = ParsedClaim(
+            claim_number=1,
+            claim_type="independent",
+            text="청구항 1. 장치.",
+            elements=[
+                ClaimElement(label="A", text="sensor module", importance="5"),
+            ],
+        )
+        docs = [
+            ExtractedDocument(filename="primary.pdf"),
+            ExtractedDocument(filename="secondary.pdf"),
+            ExtractedDocument(filename="tertiary.pdf"),
+        ]
+        chain_info = {
+            "total": [0],
+            "doc_name_mapping": {"0": "인용발명 1", "1": "인용발명 2", "2": "인용발명 3"},
+        }
+        cache1 = {
+            "1": [
+                {
+                    "label": "A",
+                    "found": True,
+                    "quote": "sensor arrangement",
+                    "chunk_id": "[0001]",
+                    "judgment": "동일",
+                    "similarity_reason": "센서 배치 구성이 청구항과 동일합니다.",
+                }
+            ]
+        }
+        cache2 = {
+            "1": [
+                {
+                    "label": "A",
+                    "found": True,
+                    "quote": "auxiliary sensor layout",
+                    "chunk_id": "[0002]",
+                    "judgment": "실질적 동일",
+                    "similarity_reason": "보조 센서 배치 구성이 청구항과 실질적으로 동일합니다.",
+                }
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            (Path(temp_dir) / "comparisons_1.json").write_text(
+                json.dumps(cache1, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            (Path(temp_dir) / "comparisons_2.json").write_text(
+                json.dumps(cache2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            result = build_rejected_inventions_section(claim, docs, chain_info, temp_dir)
+
+        self.assertEqual(result.count("## 관련도 A 인용발명"), 1)
+        self.assertNotIn("## 관련도 B 인용발명", result)
+        self.assertNotIn("## 관련도 C 인용발명", result)
+        self.assertIn("**인용발명 2** (secondary.pdf)", result)
+        self.assertIn("**인용발명 3** (tertiary.pdf)", result)
+        self.assertEqual(result.count("**인용발명 "), 2)
+
+    def test_rejected_inventions_section_groups_multiple_missing_labels_into_one_difference_line(self):
+        claim = ParsedClaim(
+            claim_number=1,
+            claim_type="independent",
+            text="청구항 1. 장치.",
+            elements=[
+                ClaimElement(label="A", text="sensor module", importance="5"),
+                ClaimElement(label="B", text="controller", importance="4"),
+                ClaimElement(label="C", text="display", importance="3"),
+            ],
+        )
+        docs = [
+            ExtractedDocument(filename="primary.pdf"),
+            ExtractedDocument(filename="secondary.pdf"),
+        ]
+        chain_info = {
+            "total": [0],
+            "doc_name_mapping": {"0": "인용발명 1", "1": "인용발명 2"},
+        }
+        cache = {
+            "1": [
+                {
+                    "label": "A",
+                    "found": True,
+                    "quote": "sensor arrangement",
+                    "chunk_id": "[0001]",
+                    "judgment": "동일",
+                    "similarity_reason": "센서 배치 구성이 청구항과 동일합니다.",
+                },
+                {
+                    "label": "B",
+                    "found": False,
+                    "quote": "",
+                    "chunk_id": "",
+                    "judgment": "대응 없음",
+                    "similarity_reason": "",
+                },
+                {
+                    "label": "C",
+                    "found": False,
+                    "quote": "",
+                    "chunk_id": "",
+                    "judgment": "대응 없음",
+                    "similarity_reason": "",
+                },
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            (Path(temp_dir) / "comparisons_1.json").write_text(
+                json.dumps(cache, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            result = build_rejected_inventions_section(claim, docs, chain_info, temp_dir)
+
+        self.assertIn("차이점: (B), (C) 구성은 이 인용발명에서 직접 확인되지 않아 최종 채택에서 제외되었습니다.", result)
 
 
 class DependentCitationChainPolicyTests(unittest.TestCase):

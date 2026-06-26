@@ -151,10 +151,6 @@ ${components}
 
 ${similar}
 
-[결합 논리]
-
-${combination_rationale}
-
 [차이점]
 
 ${diff}
@@ -829,10 +825,7 @@ def _build_phase2_markdown(
     diff = data["summary_diff"] or \
         "※ Phase 1 탭의 [종합 분석 요약 — 차이점 요약] 항목을 참고하여 직접 작성하십시오."
     if is_combo:
-        combination_rationale = data["summary_combination"] or combination_rationale
-        if _looks_like_difference_detail(combination_rationale):
-            diff = f"{combination_rationale}\n\n{diff}".strip()
-            combination_rationale = ""
+        combination_rationale = ""
     conclusion = data["conclusion"] or (
         "※ Phase 1 분석 결과에서 결론 항목을 확인할 수 없습니다. "
         "Phase 1 탭의 종합 분석 요약을 참고하여 결론을 직접 작성하십시오."
@@ -843,9 +836,6 @@ def _build_phase2_markdown(
         tmpl = load_prompt("format_phase2_combo.txt", DEFAULT_PHASE2_FORMAT_COMBO)
     else:
         tmpl = load_prompt("format_phase2_single.txt", DEFAULT_PHASE2_FORMAT_SINGLE)
-
-    if is_combo and combination_rationale and "${combination_rationale}" not in tmpl:
-        diff = f"{combination_rationale}\n\n{diff}".strip()
 
     rendered = Template(tmpl).safe_substitute(
         inv_header=inv_header,
@@ -1407,25 +1397,15 @@ def build_rejected_inventions_section(
 
     def _format_similarity_line(item: Dict) -> str:
         label = (item.get("label") or "").strip()
-        claim_text = label_to_text.get(label)
         reason = (item.get("similarity_reason") or "").strip()
         judgment = (item.get("judgment") or "대응 없음").strip()
-        parts = [f"({label})"]
-        if claim_text:
-            parts.append(claim_text)
-        if reason:
-            parts.append(reason)
-        else:
-            parts.append(f"이 인용발명에서는 청구항과 {judgment} 수준으로 대응됩니다.")
-        return " ".join(parts)
-
-    def _format_difference_line(item: Dict) -> str:
-        label = (item.get("label") or "").strip()
-        prefix = f"청구항의 ({label}) 구성"
-        return prefix + "은 이 인용발명에서 직접 확인되지 않아 최종 채택에서 제외되었습니다."
+        body = reason or f"이 인용발명에서는 청구항과 {judgment} 수준으로 대응됩니다."
+        quote = _format_quote(item)
+        if quote and quote != "(직접 인용 가능한 대응 원문 없음)":
+            return f"({label}) {body} ({quote})"
+        return f"({label}) {body}"
 
     blocks = []
-    section_letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     for doc_idx in range(len(prior_docs)):
         if doc_idx in used:
             continue
@@ -1439,13 +1419,8 @@ def build_rejected_inventions_section(
         similar_items = [it for it in items if (it.get("judgment") or "").strip() not in NO_MATCH_LABELS]
         different_items = [it for it in items if (it.get("judgment") or "").strip() in NO_MATCH_LABELS]
 
-        letter = section_letters[len(blocks)] if len(blocks) < len(section_letters) else str(len(blocks) + 1)
         block_lines = [
-            f"## 관련도 {letter} 인용발명",
-            "",
             f"**{inv_name}** ({prior_docs[doc_idx].filename})",
-            "",
-            f"청구항 {claim.claim_number}과의 유사한 점",
         ]
         if similar_items:
             for item in similar_items:
@@ -1453,21 +1428,16 @@ def build_rejected_inventions_section(
         else:
             block_lines.append("- 청구항과 직접 대응되는 구성은 확인되지 않았습니다.")
 
-        block_lines.extend(["", "관련 발췌"])
-        if similar_items:
-            for item in similar_items:
-                label = (item.get("label") or "").strip()
-                judgment = (item.get("judgment") or "대응 없음").strip()
-                block_lines.append(f"- ({label}) {judgment}: {_format_quote(item)}")
-        else:
-            block_lines.append("- 발췌할 직접 대응 구절이 없습니다.")
-
-        block_lines.extend(["", "차이점 및 채택 제외 이유"])
         if different_items:
-            for item in different_items:
-                block_lines.append(f"- {_format_difference_line(item)}")
+            labels = ", ".join(f"({(item.get('label') or '').strip()})" for item in different_items if (item.get("label") or "").strip())
+            if labels:
+                block_lines.append(
+                    f"- 차이점: {labels} 구성은 이 인용발명에서 직접 확인되지 않아 최종 채택에서 제외되었습니다."
+                )
+            else:
+                block_lines.append("- 차이점: 직접 확인되지 않는 구성이 있어 최종 채택에서 제외되었습니다.")
         else:
-            block_lines.append("- 일부 유사한 구성이 있으나 주된 거절근거를 완성할 정도로 핵심 차이점이 해소되지는 않았습니다.")
+            block_lines.append("- 차이점: 일부 유사한 구성이 있으나 주된 거절근거를 완성할 정도로 핵심 차이점이 해소되지는 않았습니다.")
 
         blocks.append("\n".join(block_lines))
 
@@ -1477,7 +1447,7 @@ def build_rejected_inventions_section(
         "아래 인용발명도 청구항 구성요소와 대비하였으나 주된 거절근거로 채택되지는 않았습니다. "
         "다만 유사한 구성과 발췌, 최종 채택에서 제외된 차이점을 함께 정리합니다."
     )
-    return intro + "\n\n" + "\n\n".join(blocks)
+    return intro + "\n\n## 관련도 A 인용발명\n\n" + "\n\n".join(blocks)
 
 
 async def parse_manual_claim_locally(

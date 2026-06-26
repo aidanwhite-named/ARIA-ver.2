@@ -12,10 +12,6 @@ ${components}
 
 ${similar}
 
-[결합 논리]
-
-${combination_rationale}
-
 [차이점]
 
 ${diff}
