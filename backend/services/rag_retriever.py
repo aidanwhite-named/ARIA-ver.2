@@ -36,6 +36,9 @@ _model_load_failed = False  # 모델 로드 실패 시 폴백 방지를 위한 �
 _reranker_model = None
 _reranker_load_failed = False
 _reranker_inference_failed = False
+_qdrant_handle_cache = {}
+_query_embedding_cache: Dict[str, np.ndarray] = {}
+_QUERY_EMBEDDING_CACHE_LIMIT = 256
 _runtime_status = {
     "dense": "not_attempted",
     "qdrant": "not_attempted",
@@ -80,7 +83,7 @@ def _get_reranker_model():
         tokenizer = getattr(_reranker_model, "tokenizer", None)
         if tokenizer is not None and not hasattr(tokenizer, "prepare_for_model"):
             raise RuntimeError(
-                "?? ??? transformers/FlagEmbedding ????? reranker tokenizer.prepare_for_model? ???? ????"
+                "현재 설치된 transformers/FlagEmbedding 조합에서는 reranker tokenizer.prepare_for_model을 지원하지 않습니다"
             )
         _runtime_status["reranker"] = "ready"
         logger.info("BGE reranker 모델 로드 완료")
@@ -304,6 +307,23 @@ def _build_dense_embeddings(
     return (vecs / norms).astype(np.float32)
 
 
+def _cached_query_embedding(query: str, model) -> Optional[np.ndarray]:
+    query = (query or "").strip()
+    if not query:
+        return None
+    cached = _query_embedding_cache.get(query)
+    if cached is not None:
+        return cached
+
+    embedding = _build_dense_embeddings([query], model)[0]
+    if len(_query_embedding_cache) >= _QUERY_EMBEDDING_CACHE_LIMIT:
+        oldest_key = next(iter(_query_embedding_cache), None)
+        if oldest_key is not None:
+            _query_embedding_cache.pop(oldest_key, None)
+    _query_embedding_cache[query] = embedding
+    return embedding
+
+
 def get_or_build_dense_index(
     doc: ExtractedDocument,
     chunks: List[_SearchChunk],
@@ -402,6 +422,18 @@ def build_qdrant_index(
     case_id = case_dir.name
     qdrant_dir.mkdir(parents=True, exist_ok=True)
     collection = _qdrant_collection_name(doc)
+    cache_key = (str(qdrant_dir.resolve()), collection, len(chunks))
+    cached_handle = _qdrant_handle_cache.get(cache_key)
+    if cached_handle is not None:
+        try:
+            client = cached_handle[0]
+            count = client.count(collection_name=collection, exact=True).count
+            if count == len(chunks):
+                _runtime_status["qdrant"] = "active"
+                return cached_handle
+        except Exception:
+            _qdrant_handle_cache.pop(cache_key, None)
+
     try:
         client = QdrantClient(path=str(qdrant_dir))
         expected_count = len(chunks)
@@ -409,8 +441,10 @@ def build_qdrant_index(
             try:
                 count = client.count(collection_name=collection, exact=True).count
                 if count == expected_count:
+                    handle = (client, collection, model)
+                    _qdrant_handle_cache[cache_key] = handle
                     _runtime_status["qdrant"] = "active"
-                    return client, collection, model
+                    return handle
             except Exception:
                 pass
             client.delete_collection(collection_name=collection)
@@ -440,8 +474,10 @@ def build_qdrant_index(
         ]
         client.upsert(collection_name=collection, points=points)
         logger.info(f"Qdrant: {doc.filename} 컬렉션 생성 완료 ({len(points)} chunks)")
+        handle = (client, collection, model)
+        _qdrant_handle_cache[cache_key] = handle
         _runtime_status["qdrant"] = "active"
-        return client, collection, model
+        return handle
     except Exception as e:
         logger.warning(f"Qdrant 로컬 인덱스 준비 실패, dense 검색 비활성화: {e}")
         _runtime_status["qdrant"] = "failed"
@@ -467,7 +503,10 @@ def _qdrant_search(query: str, qdrant_handle, case_id: str, limit: int) -> List[
         return []
     client, collection, model = qdrant_handle
     try:
-        q_emb = _build_dense_embeddings([query], model)[0].tolist()
+        q_emb_arr = _cached_query_embedding(query, model)
+        if q_emb_arr is None:
+            return []
+        q_emb = q_emb_arr.tolist()
         q_filter = _case_filter(case_id)
         try:
             result = client.query_points(
@@ -493,6 +532,8 @@ def _qdrant_search(query: str, qdrant_handle, case_id: str, limit: int) -> List[
 
 def _close_qdrant(qdrant_handle) -> None:
     if qdrant_handle is None:
+        return
+    if any(handle is qdrant_handle for handle in _qdrant_handle_cache.values()):
         return
     try:
         qdrant_handle[0].close()

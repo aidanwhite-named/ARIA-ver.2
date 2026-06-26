@@ -26,7 +26,6 @@ logger = logging.getLogger(__name__)
 
 NO_MATCH_LABELS = {"대응 없음"}
 
-
 def _extract_first_json_object(text: str) -> Optional[Dict]:
     """Return the first complete JSON object without greedy brace matching."""
     cleaned = re.sub(r"```(?:json)?", "", (text or "").strip()).replace("```", "").strip()
@@ -227,15 +226,6 @@ def _phase1_format_text(combo: bool = False) -> str:
 def _build_system(settings: Settings, claim_type: str = "independent") -> str:
     """claim_type: 'independent' | 'combo' | 'dependent'"""
     system = load_prompt("system_report_base.txt", _BASE_SYSTEM)
-
-    if claim_type == "combo":
-        fmt = load_prompt("format_phase1_combo.txt", DEFAULT_PHASE1_FORMAT_COMBO)
-    elif claim_type == "independent":
-        fmt = load_prompt("format_phase1_independent.txt", DEFAULT_PHASE1_FORMAT)
-    else:  # dependent
-        fmt = load_prompt("format_phase1_dependent.txt", DEFAULT_PHASE1_FORMAT_DEPENDENT)
-    system += f"\n\n[출력 형식 템플릿]\n{fmt}"
-
     return system
 
 
@@ -767,7 +757,7 @@ def _parse_phase1(phase1_md: str) -> dict:
 
 
 def _normalize_bracketed_labels(text: str) -> str:
-    """Collapse accidental double brackets around report sub-headings like [[??? 1]]."""
+    """Collapse accidental double brackets around report sub-headings like [[차이점 1]]."""
     if not text:
         return text
     text = re.sub(
@@ -781,6 +771,13 @@ def _normalize_bracketed_labels(text: str) -> str:
         text,
     )
     return text
+
+
+def _looks_like_difference_detail(text: str) -> bool:
+    """Bracketed [차이점 n] detail blocks belong in the difference section."""
+    if not text:
+        return False
+    return bool(re.match(r'^\s*\[차이점(?:\s*\d+)?\]', text))
 
 
 def _build_phase2_markdown(
@@ -830,9 +827,12 @@ def _build_phase2_markdown(
     similar = data["summary_similar"] or \
         "※ Phase 1 탭의 [종합 분석 요약 — 유사점 요약] 항목을 참고하여 직접 작성하십시오."
     diff = data["summary_diff"] or \
-        "? Phase 1 ?? [?? ?? ?? ? ???] ??? ???? ?? ??????."
+        "※ Phase 1 탭의 [종합 분석 요약 — 차이점 요약] 항목을 참고하여 직접 작성하십시오."
     if is_combo:
         combination_rationale = data["summary_combination"] or combination_rationale
+        if _looks_like_difference_detail(combination_rationale):
+            diff = f"{combination_rationale}\n\n{diff}".strip()
+            combination_rationale = ""
     conclusion = data["conclusion"] or (
         "※ Phase 1 분석 결과에서 결론 항목을 확인할 수 없습니다. "
         "Phase 1 탭의 종합 분석 요약을 참고하여 결론을 직접 작성하십시오."
@@ -1392,7 +1392,40 @@ def build_rejected_inventions_section(
         else None
     )
 
+    label_to_text = {
+        str(getattr(elem, "label", "")).strip(): getattr(elem, "text", "").strip()
+        for elem in (claim.elements or [])
+        if getattr(elem, "label", None)
+    }
+
+    def _format_quote(item: Dict) -> str:
+        quote = (item.get("quote") or "").strip()
+        chunk_id = (item.get("chunk_id") or "").strip()
+        if quote and chunk_id:
+            return f"{quote} {chunk_id}"
+        return quote or "(직접 인용 가능한 대응 원문 없음)"
+
+    def _format_similarity_line(item: Dict) -> str:
+        label = (item.get("label") or "").strip()
+        claim_text = label_to_text.get(label)
+        reason = (item.get("similarity_reason") or "").strip()
+        judgment = (item.get("judgment") or "대응 없음").strip()
+        parts = [f"({label})"]
+        if claim_text:
+            parts.append(claim_text)
+        if reason:
+            parts.append(reason)
+        else:
+            parts.append(f"이 인용발명에서는 청구항과 {judgment} 수준으로 대응됩니다.")
+        return " ".join(parts)
+
+    def _format_difference_line(item: Dict) -> str:
+        label = (item.get("label") or "").strip()
+        prefix = f"청구항의 ({label}) 구성"
+        return prefix + "은 이 인용발명에서 직접 확인되지 않아 최종 채택에서 제외되었습니다."
+
     blocks = []
+    section_letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     for doc_idx in range(len(prior_docs)):
         if doc_idx in used:
             continue
@@ -1403,24 +1436,48 @@ def build_rejected_inventions_section(
         if not items:
             continue  # 이 인용발명을 해당 청구항과 대비한 기록이 없음 → 생략
         inv_name = doc_name_mapping.get(str(doc_idx), f"인용발명 {doc_idx + 1}")
-        judged = " · ".join(
-            f"({it.get('label', '')}) {it.get('judgment', '대응 없음')}" for it in items
-        )
-        has_corr = any(it.get("judgment") not in NO_MATCH_LABELS for it in items)
-        note = (
-            "주인용발명이 개시하지 못한 구성요소를 보완하지 못해 채택되지 않았습니다."
-            if has_corr
-            else "청구항의 어떤 구성요소도 개시하지 않아 채택되지 않았습니다."
-        )
-        blocks.append(f"**{inv_name}** ({prior_docs[doc_idx].filename})\n{judged}\n→ {note}")
+        similar_items = [it for it in items if (it.get("judgment") or "").strip() not in NO_MATCH_LABELS]
+        different_items = [it for it in items if (it.get("judgment") or "").strip() in NO_MATCH_LABELS]
+
+        letter = section_letters[len(blocks)] if len(blocks) < len(section_letters) else str(len(blocks) + 1)
+        block_lines = [
+            f"## 관련도 {letter} 인용발명",
+            "",
+            f"**{inv_name}** ({prior_docs[doc_idx].filename})",
+            "",
+            f"청구항 {claim.claim_number}과의 유사한 점",
+        ]
+        if similar_items:
+            for item in similar_items:
+                block_lines.append(f"- {_format_similarity_line(item)}")
+        else:
+            block_lines.append("- 청구항과 직접 대응되는 구성은 확인되지 않았습니다.")
+
+        block_lines.extend(["", "관련 발췌"])
+        if similar_items:
+            for item in similar_items:
+                label = (item.get("label") or "").strip()
+                judgment = (item.get("judgment") or "대응 없음").strip()
+                block_lines.append(f"- ({label}) {judgment}: {_format_quote(item)}")
+        else:
+            block_lines.append("- 발췌할 직접 대응 구절이 없습니다.")
+
+        block_lines.extend(["", "차이점 및 채택 제외 이유"])
+        if different_items:
+            for item in different_items:
+                block_lines.append(f"- {_format_difference_line(item)}")
+        else:
+            block_lines.append("- 일부 유사한 구성이 있으나 주된 거절근거를 완성할 정도로 핵심 차이점이 해소되지는 않았습니다.")
+
+        blocks.append("\n".join(block_lines))
 
     if not blocks:
         return ""
-    return (
-        "## 그 외 검토한 인용발명\n\n"
-        "아래 인용발명도 청구항 구성요소와 대비하였으나 주된 거절근거로 채택되지 않았습니다.\n\n"
-        + "\n\n".join(blocks)
+    intro = (
+        "아래 인용발명도 청구항 구성요소와 대비하였으나 주된 거절근거로 채택되지는 않았습니다. "
+        "다만 유사한 구성과 발췌, 최종 채택에서 제외된 차이점을 함께 정리합니다."
     )
+    return intro + "\n\n" + "\n\n".join(blocks)
 
 
 async def parse_manual_claim_locally(
@@ -1817,4 +1874,3 @@ def _format_component_comparison(
                 lines.append(f"(단락 {chunk_display})")
         lines.append("")
     return "\n".join(lines)
-

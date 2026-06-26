@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 
 from backend.models.schemas import (
     ClaimElement,
+    ChatMessage,
     ElementMatch,
     ExtractedDocument,
     ManualClaimRequest,
@@ -45,11 +46,13 @@ from backend.services.reference_store import (
     save_case_artifacts_sqlite,
     save_reference_entries_sqlite,
 )
+from backend.services import gap_search
 from backend.services.report_generator import (
     _build_phase2_markdown,
     _generate_template_b_phase2,
     _extract_first_json_object,
     _make_phase1_prompt,
+    build_rejected_inventions_section,
     generate_dependent_phase2,
     parse_manual_claim_locally,
 )
@@ -239,6 +242,119 @@ class ComparisonParsingTests(unittest.TestCase):
             _extract_first_json_object(response),
             {"purpose": "p", "effects": "e"},
         )
+
+    def test_chat_gap_search_trigger_detects_missing_feature_search_intent(self):
+        messages = [
+            ChatMessage(
+                role="user",
+                content="보고서 작성 후 구성대비에 대응없는 구성들을 포함하는 발명을 검색해줄래?",
+            )
+        ]
+
+        self.assertTrue(analyze_router._should_run_gap_search_from_chat(messages))
+
+    def test_chat_gap_search_trigger_ignores_general_question(self):
+        messages = [
+            ChatMessage(
+                role="user",
+                content="구성 C가 왜 대응 없음으로 판단되었는지 설명해줘.",
+            )
+        ]
+
+        self.assertFalse(analyze_router._should_run_gap_search_from_chat(messages))
+
+    def test_gap_search_verification_merge_keeps_verified_documents(self):
+        search_result = {
+            "results": [
+                {
+                    "label": "C",
+                    "documents": [
+                        {"number": "US123", "title": "doc1", "relevance": "high"},
+                        {"number": "US456", "title": "doc2", "relevance": "medium"},
+                    ],
+                }
+            ]
+        }
+        verification = {
+            "results": [
+                {
+                    "label": "C",
+                    "documents": [
+                        {
+                            "number": "US123",
+                            "verification_status": "direct",
+                            "confidence": "high",
+                            "reason": "직접 개시",
+                            "quote": "example quote",
+                        },
+                        {
+                            "number": "US456",
+                            "verification_status": "unsupported",
+                            "confidence": "low",
+                            "reason": "불충분",
+                            "quote": "",
+                        },
+                    ],
+                }
+            ]
+        }
+
+        merged = gap_search._merge_verification(search_result, verification)
+
+        docs = merged["results"][0]["documents"]
+        self.assertEqual(len(docs), 1)
+        self.assertEqual(docs[0]["number"], "US123")
+        self.assertEqual(docs[0]["verification_status"], "direct")
+
+    def test_gap_search_http_fallback_returns_patent_candidates(self):
+        claim = ParsedClaim(
+            claim_number=1,
+            text="test claim",
+            elements=[ClaimElement(label="C", text="센서 신호를 보정하는 처리부", importance="5")],
+            preamble="센서 제어 장치",
+        )
+        gap_result = {
+            "uncovered": [
+                {
+                    "label": "C",
+                    "text": "센서 신호를 보정하는 처리부",
+                    "importance": "5",
+                    "best_judgment": "없음",
+                    "best_doc": "",
+                }
+            ]
+        }
+
+        async def fake_call_ai(*args, **kwargs):
+            raise RuntimeError("web search tool unavailable")
+
+        async def fake_search_target_documents(target, field_text):
+            return (
+                ["site:patents.google.com sensor correction patent"],
+                [
+                    {
+                        "title": "Example patent",
+                        "number": "US1234567A",
+                        "url": "https://patents.google.com/patent/US1234567A/en",
+                        "summary": "fallback result",
+                        "relevance": "medium",
+                        "source": "http_fallback",
+                    }
+                ],
+            )
+
+        with patch.object(gap_search, "call_ai", side_effect=fake_call_ai), patch.object(
+            gap_search,
+            "_search_target_documents",
+            side_effect=fake_search_target_documents,
+        ):
+            result = __import__("asyncio").run(
+                gap_search.web_search_gap_documents(claim, gap_result, Settings())
+            )
+
+        self.assertTrue(result["fallback_used"])
+        self.assertEqual(result["results"][0]["label"], "C")
+        self.assertEqual(result["results"][0]["documents"][0]["number"], "US1234567A")
 
 
     def test_missing_parent_reference_keeps_only_features_after_dependency_phrase(self):
@@ -711,13 +827,13 @@ class ConventionalSupportPolicyTests(unittest.TestCase):
             ExtractedDocument(filename="secondary.pdf"),
         ]
         matches = [
-            ElementMatch(label="A", cited_invention_index=0, judgment="??", quote="primary quote", chunk_id="[0001]"),
-            ElementMatch(label="B", cited_invention_index=1, judgment="??", quote="secondary quote", chunk_id="[0002]"),
+            ElementMatch(label="A", cited_invention_index=0, judgment="동일", quote="primary quote", chunk_id="[0001]"),
+            ElementMatch(label="B", cited_invention_index=1, judgment="대응 없음", quote="secondary quote", chunk_id="[0002]"),
         ]
         chain_info = {
             "total": [0, 1],
-            "doc_name_mapping": {"0": "???? 1", "1": "???? 2"},
-            "combination_rationale": {"label": "??", "description": "??"},
+            "doc_name_mapping": {"0": "인용발명 1", "1": "인용발명 2"},
+            "combination_rationale": {"label": "결합", "description": "보조 문헌"},
         }
         phase1_md = (
             "### [구성요소 (A)] 유사도: 동일 95%\n\n- 인용발명 대응 원문: primary quote\n\n"
@@ -732,8 +848,8 @@ class ConventionalSupportPolicyTests(unittest.TestCase):
         self.assertIn("(A) 동일 95%", phase2)
         self.assertIn("primary quote", phase2)
         self.assertIn("(B) 대응 없음 0%", phase2)
-        self.assertNotIn("(A) ?? (???? 1)", phase2)
-        self.assertNotIn("secondary quote (???? 2)", phase2)
+        self.assertNotIn("(A) 동일 (인용발명 1)", phase2)
+        self.assertNotIn("secondary quote (인용발명 2)", phase2)
         self.assertLess(phase2.index("[구성대비]"), phase2.index("[종합 판단]"))
 
     def test_combo_phase2_keeps_difference_separate_from_combination_rationale(self):
@@ -748,28 +864,28 @@ class ConventionalSupportPolicyTests(unittest.TestCase):
         ]
         chain_info = {
             "total": [0, 1],
-            "doc_name_mapping": {"0": "???? 1", "1": "???? 2"},
-            "combination_rationale": {"label": "?? ???", "description": "?? ??"},
+            "doc_name_mapping": {"0": "인용발명 1", "1": "인용발명 2"},
+            "combination_rationale": {"label": "결합 논리", "description": "보조 설명"},
         }
         phase1_md = (
-            "### [???? (A)] ???: ?? ?? 80%\n\n"
-            "- ???? ?? ??: primary quote\n\n"
-            "### ?? ?? ??\n\n"
-            "- ??? ??: ?? ??? ???\n"
-            "- ???: [[??? 1]] ??? ?? ??? ???\n"
-            "- ?? ?? ? ??? ??: [??? 1] ???? 2? ??? ??? ??? ????? ??? ???\n"
-            "- ??: ?? ??"
+            "### [구성요소 (A)] 유사도: 일부 유사 80%\n\n"
+            "- 인용발명 대응 원문: primary quote\n\n"
+            "### 종합 분석 요약\n\n"
+            "- 유사점 요약: 일부 구성이 대응됨\n"
+            "- 차이점: [[차이점 1]] 추가 구성 확인 필요\n"
+            "- 결합 논리 및 차이점 요약: [차이점 1] 인용발명 2의 보조 구성이 추가로 필요함\n"
+            "- 결론: 검토 필요"
         )
 
         phase2 = asyncio.run(
             _generate_template_b_phase2(phase1_md, claim, [], docs, chain_info, Settings())
         )
 
-        self.assertIn("[???]", phase2)
-        self.assertIn("[??? 1] ??? ?? ??? ???", phase2)
-        self.assertIn("[?? ??]", phase2)
-        self.assertIn("[??? 1] ???? 2? ??? ??? ??? ????? ??? ???", phase2)
-        self.assertNotIn("[[??? 1]]", phase2)
+        self.assertIn("[차이점]", phase2)
+        self.assertIn("[차이점 1] 추가 구성 확인 필요", phase2)
+        self.assertIn("[결합 논리]", phase2)
+        self.assertIn("[차이점 1] 인용발명 2의 보조 구성이 추가로 필요함", phase2)
+        self.assertNotIn("[[차이점 1]]", phase2)
 
     def test_second_conventional_document_gets_limited_rationale(self):
         chain_data = {
@@ -874,6 +990,69 @@ class ConventionalSupportPolicyTests(unittest.TestCase):
         self.assertEqual(result["chains"]["1"]["total"], [result["primary_inv_idx"]])
         self.assertEqual(result["combination_rationale_type"], "insufficient_support")
         self.assertEqual(result["confidence"]["1"]["uncovered_labels"], ["D"])
+
+
+class RejectedInventionsSectionTests(unittest.TestCase):
+    def test_rejected_inventions_are_rendered_as_related_a_summary(self):
+        claim = ParsedClaim(
+            claim_number=1,
+            text="vehicle claim",
+            elements=[
+                ClaimElement(label="A", text="sensor module", importance="5"),
+                ClaimElement(label="B", text="control unit", importance="4"),
+                ClaimElement(label="C", text="display", importance="3"),
+            ],
+        )
+        docs = [
+            ExtractedDocument(filename="primary.pdf"),
+            ExtractedDocument(filename="related-a.pdf"),
+        ]
+        chain_info = {
+            "total": [0],
+            "doc_name_mapping": {"0": "인용발명 1", "1": "인용발명 2"},
+        }
+        cache = {
+            "1": [
+                {
+                    "label": "A",
+                    "found": True,
+                    "quote": "sensor arranged on a vehicle body",
+                    "chunk_id": "[0001]",
+                    "judgment": "동일",
+                    "similarity_reason": "차량 본체에 센서를 배치하는 구성은 청구항과 동일합니다.",
+                },
+                {
+                    "label": "B",
+                    "found": True,
+                    "quote": "controller transmits a control signal",
+                    "chunk_id": "[0002]",
+                    "judgment": "일부 유사",
+                    "similarity_reason": "제어 신호를 생성하는 점은 유사하지만 세부 제어 방식은 다릅니다.",
+                },
+                {
+                    "label": "C",
+                    "found": False,
+                    "quote": "",
+                    "chunk_id": "",
+                    "judgment": "대응 없음",
+                    "similarity_reason": "",
+                },
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            (Path(temp_dir) / "comparisons_1.json").write_text(
+                json.dumps(cache, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            result = build_rejected_inventions_section(claim, docs, chain_info, temp_dir)
+
+        self.assertIn("## 관련도 A 인용발명", result)
+        self.assertIn("인용발명 2", result)
+        self.assertIn("청구항 1과의 유사한 점", result)
+        self.assertIn("차량 본체에 센서를 배치하는 구성은 청구항과 동일합니다.", result)
+        self.assertIn("controller transmits a control signal", result)
+        self.assertIn("청구항의 (C) 구성은 이 인용발명에서 직접 확인되지 않아 최종 채택에서 제외되었습니다.", result)
 
 
 class DependentCitationChainPolicyTests(unittest.TestCase):

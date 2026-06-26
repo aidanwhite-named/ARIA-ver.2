@@ -200,11 +200,6 @@ export async function enhanceClaim(jobId, claimNumber) {
 }
 
 // 키워드 추출 (LLM 없음, 즉시)
-export async function getKeywords(jobId, claimNumber) {
-  const res = await fetch(`${BASE}/analyze/keywords/${jobId}/${claimNumber}`)
-  if (!res.ok) throw new Error(await res.text())
-  return res.json()
-}
 
 // 보완문서 검색 — 인용발명 미커버 구성요소 조회 (LLM 없음, 즉시)
 export async function getGapElements(jobId, claimNumber) {

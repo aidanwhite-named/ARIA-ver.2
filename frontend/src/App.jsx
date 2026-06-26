@@ -2,7 +2,7 @@ import { useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeRaw from 'rehype-raw'
-import { addManualClaim, streamPrepare, streamReport, reportBatchDependent, getDependentBatchStatus, uploadFiles, getContextInfo, clearContext, checkJobStatus, detectCategory, getKeywords, deleteJob, cancelGeneration } from './api/client'
+import { addManualClaim, streamPrepare, streamReport, reportBatchDependent, getDependentBatchStatus, uploadFiles, getContextInfo, clearContext, checkJobStatus, detectCategory, deleteJob, cancelGeneration } from './api/client'
 import ClaimAnalysisWindow from './components/ClaimAnalysisWindow'
 
 import FilePanel from './components/FilePanel'
@@ -189,8 +189,9 @@ function Phase1ListItem({ children }) {
 
 function ReportParagraph({ children }) {
   const text = extractText(children)
-  if (/^\[(구성대비|구성요소|종합 판단|유사점|결합 논리|차이점|결론)\]$/.test(text.trim())) {
-    const isMajor = /^\[(구성대비|종합 판단)\]$/.test(text.trim())
+  const trimmed = text.trim()
+  if (/^\[(구성대비|구성요소|종합 판단|유사점|결합 논리|차이점|결론)\]$/.test(trimmed)) {
+    const isMajor = /^\[(구성대비|종합 판단)\]$/.test(trimmed)
     return (
       <p className={
         isMajor
@@ -200,6 +201,9 @@ function ReportParagraph({ children }) {
         {children}
       </p>
     )
+  }
+  if (/^\[(차이점|결합 논리)\s*\d+\]$/.test(trimmed)) {
+    return <p className="mt-4 mb-1 text-sm font-semibold text-slate-700">{children}</p>
   }
   const match = text.match(/^\([A-J](?:-\d+)?\)(?:\s*(?:및|,)\s*\([A-J](?:-\d+)?\))*\s+(동일|실질적 동일|일부 차이|일부 유사|차이|대응 없음)/)
   if (match) {
@@ -217,6 +221,22 @@ function ReportParagraph({ children }) {
 function preprocessReport(md) {
   // CLI 에이전트가 새어 보낸 도구 호출 줄(update_topic(...) 등) 제거 — 캐시·히스토리 구보고서까지 정리
   md = md.replace(/^[ \t]*[a-z][a-z0-9_]*\([a-z_]+\s*=\s*['"].*\)[ \t]*-*[ \t]*$/gm, '')
+  md = md.replace(
+    /^-\s*(유사점 요약|차이점|결합 논리 및 차이점 극복)\s*:\s*(.+)$/gm,
+    (_, label, body) => {
+      const heading =
+        label === '유사점 요약'
+          ? '[유사점]'
+          : label === '차이점'
+            ? '[차이점]'
+            : '[결합 논리]'
+      return `${heading}\n\n${body.trim()}`
+    }
+  )
+  md = md.replace(
+    /([^\n])\n(-\s*(유사점 요약|차이점|결합 논리 및 차이점 극복)\s*:)/g,
+    '$1\n\n$2'
+  )
   const lines = md.split('\n')
   const result = []
   for (let i = 0; i < lines.length; i++) {
@@ -470,9 +490,6 @@ export default function App() {
   const [showClaimAnalysis, setShowClaimAnalysis] = useState(false)
 
   // 키워드 상태
-  const [keywords, setKeywords] = useState([])            // 현재 탭의 로컬 키워드
-  const [keywordsClaimNum, setKeywordsClaimNum] = useState(null) // 키워드가 로드된 청구항 번호
-
   // 히스토리
   const [history, setHistory] = useState(loadHistory)
   const [showHistory, setShowHistory] = useState(false)
@@ -498,8 +515,6 @@ export default function App() {
     setContextClaims([])
     setUseCtx(true)
     setError('')
-    setKeywords([])
-    setKeywordsClaimNum(null)
   }
 
   // 히스토리 저장
@@ -557,8 +572,6 @@ export default function App() {
       setContextClaims([])
       setUseCtx(true)
       setError('')
-      setKeywords([])
-      setKeywordsClaimNum(null)
       addLog('[현재 작업 삭제] 서버에 저장된 현재 작업 데이터를 삭제했습니다.')
     } catch (e) {
       addLog(`[오류] 현재 작업 삭제 실패: ${e.message}`)
@@ -673,6 +686,14 @@ export default function App() {
             onDone: async data => {
               setReport(data.report_md)
               setUsedInventions(data.used_inventions || [])
+              if (data.timings) {
+                const order = ['comparison', 'citation chain', 'quote verification', 'phase1', 'phase2', 'finalize', 'total']
+                const summary = order
+                  .filter(key => data.timings[key] != null)
+                  .map(key => `${key} ${Number(data.timings[key]).toFixed(1)}s`)
+                  .join(' | ')
+                if (summary) addLog(`[timing] ${summary}`)
+              }
               setAllReports(prev => ({
                 ...prev,
                 [claim.claim_number]: {
@@ -694,13 +715,6 @@ export default function App() {
                 setContextClaims(ctx.context_claims || [])
                 setUseCtx(true)
               } catch (_) {}
-              if (registered.length === 1 || registered[0].claim.claim_number === claim.claim_number) {
-                try {
-                  const kwResult = await getKeywords(jobId, claim.claim_number)
-                  setKeywords(kwResult.keywords || [])
-                  setKeywordsClaimNum(claim.claim_number)
-                } catch (_) {}
-              }
               resolve()
             },
             onError: err => reject(new Error(err)),
@@ -1065,9 +1079,6 @@ export default function App() {
                       {key === 'phase2' && phase2Loading && (
                         <span className="ml-1 inline-block w-3 h-3 border border-blue-400 border-t-transparent rounded-full animate-spin align-middle" />
                       )}
-                      {key === 'keywords' && keywords.length > 0 && reportTab !== 'keywords' && (
-                        <span className="ml-1.5 inline-flex items-center justify-center w-4 h-4 bg-violet-100 text-violet-600 text-[10px] font-bold rounded-full">{keywords.length > 9 ? '9+' : keywords.length}</span>
-                      )}
                     </button>
                   )
                 })}
@@ -1090,7 +1101,7 @@ export default function App() {
               <div className="flex-1 overflow-hidden relative">
                 <KeywordPanel
                   jobId={jobId}
-                  claimNumber={activeClaimNumView || keywordsClaimNum || claimNumber}
+                  claimNumber={activeClaimNumView || claimNumber}
                   isVisible={reportTab === 'keywords'}
                 />
               </div>

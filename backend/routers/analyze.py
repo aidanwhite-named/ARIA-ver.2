@@ -1,8 +1,8 @@
 """
-분석 파이프라인 라우터.
+인용발명 라우터 모듈
 
-RAG는 후보 문헌/단락을 찾는 용도로만 사용하고, 최종 인용문은
-파싱된 원문 단락 DB에서 다시 조회한 original_text를 기준으로 검증한다.
+RAG 기반 인용발명 텍스트/파일은 필요할 때만 사용하고, 이전 사용횟수는
+생성된 후 파일 DB에서 다시 조회해 original_text를 기준으로 비교한다.
 """
 from __future__ import annotations
 
@@ -54,7 +54,6 @@ from backend.services.citation_extractor import (
     verify_quotes,
 )
 from backend.services.gap_search import find_uncovered_elements, web_search_gap_documents
-from backend.services.keyword_extractor import extract_local_keywords
 from backend.services.prompt_loader import load_prompt, render_prompt
 from backend.services.reference_store import (
     save_case_artifacts_sqlite,
@@ -97,6 +96,56 @@ def _ev(event: str, data: str | dict) -> dict:
 
 def _elapsed(start: float) -> str:
     return f"{time.perf_counter() - start:.1f}s"
+
+
+async def _await_with_log_heartbeat(coro, emit_log, *, label: str, interval: float = 15.0):
+    """Keep the UI warm while a long-running awaitable is in progress."""
+    task = asyncio.create_task(coro)
+    started = time.perf_counter()
+    try:
+        while not task.done():
+            try:
+                return await asyncio.wait_for(task, timeout=interval)
+            except asyncio.TimeoutError:
+                await emit_log(f"{label} 진행 중... ({_elapsed(started)})")
+        return await task
+    finally:
+        if not task.done():
+            task.cancel()
+
+
+async def _await_with_batch_status_heartbeat(
+    coro,
+    *,
+    job_id: str,
+    claim_numbers: list[int],
+    started_at: str,
+    stage: str,
+    message_builder,
+    reports_ready_getter,
+    interval: float = 15.0,
+):
+    """Refresh polled batch status while a long-running awaitable is in progress."""
+    task = asyncio.create_task(coro)
+    started = time.perf_counter()
+    try:
+        while not task.done():
+            try:
+                return await asyncio.wait_for(task, timeout=interval)
+            except asyncio.TimeoutError:
+                _update_dependent_batch_status(
+                    job_id,
+                    state="running",
+                    claim_numbers=claim_numbers,
+                    stage=stage,
+                    message=message_builder(_elapsed(started)),
+                    started_at=started_at,
+                    reports_ready=reports_ready_getter(),
+                )
+        return await task
+    finally:
+        if not task.done():
+            task.cancel()
 
 
 def _phase2_boundary(settings) -> str:
@@ -153,6 +202,10 @@ def _load_json(path: Path, default):
 def _write_json(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _report_timing_path(job_id: str, claim_number: int) -> Path:
+    return _case_dir(job_id) / "reports" / f"claim{claim_number}_timing.json"
 
 
 def _dependent_batch_status_path(job_id: str) -> Path:
@@ -327,11 +380,11 @@ def _format_gap_search_result_for_chat(result: Optional[dict], max_chars: int = 
             lines.append(f"  검색어: {', '.join(str(q) for q in queries[:4])}")
         docs = target.get("documents") or []
         if not docs:
-            lines.append("  후보 문헌: 없음")
+            lines.append("  인용 문헌: 없음")
             continue
         for doc in docs[:3]:
             title = doc.get("title") or doc.get("url") or "제목 없음"
-            lines.append(f"  후보: {title} {doc.get('number', '')} ({doc.get('relevance', '')})".strip())
+            lines.append(f"  인용: {title} {doc.get('number', '')} ({doc.get('relevance', '')})".strip())
             if doc.get("url"):
                 lines.append(f"  URL: {doc['url']}")
             if doc.get("summary"):
@@ -341,13 +394,52 @@ def _format_gap_search_result_for_chat(result: Optional[dict], max_chars: int = 
     return "\n".join(lines).strip()[:max_chars]
 
 
+def _format_uncovered_elements_for_chat(gap_result: Optional[dict], max_chars: int = 2500) -> str:
+    if not gap_result or not gap_result.get("analyzed"):
+        return ""
+    uncovered = gap_result.get("uncovered") or []
+    if not uncovered:
+        return "모든 구성요소가 기존 인용발명에서 대응되었습니다."
+
+    lines: list[str] = []
+    for item in uncovered[:6]:
+        label = item.get("label", "")
+        text = item.get("text", "")
+        judgment = item.get("best_judgment", "")
+        best_doc = item.get("best_doc", "")
+        tail = f" / 현재 최고 판정: {judgment}" if judgment else ""
+        if best_doc:
+            tail += f" / 근거 문헌: {best_doc}"
+        lines.append(f"- ({label}) {text}{tail}")
+    return "\n".join(lines).strip()[:max_chars]
+
+
+def _should_run_gap_search_from_chat(messages) -> bool:
+    latest_user = next((m.content for m in reversed(messages) if m.role == "user"), "")
+    if not latest_user:
+        return False
+
+    text = latest_user.lower()
+    search_terms = ("검색", "찾아", "웹검색", "search", "find", "look up")
+    gap_terms = (
+        "대응없는", "대응 없는", "미대응", "보완문헌", "보완문서",
+        "누락", "빠진", "커버 안", "cover", "uncovered", "missing",
+    )
+    invention_terms = ("인용발명", "발명", "문헌", "특허", "prior art", "reference")
+    return (
+        any(term in text for term in search_terms)
+        and any(term in text for term in gap_terms)
+        and any(term in text for term in invention_terms)
+    )
+
+
 def _save_case_artifacts(job_id: str, docs: List[ExtractedDocument], manifest: list[dict]) -> None:
     case_dir = _ensure_case_dirs(job_id)
     _write_json(case_dir / "case_metadata.json", {
         "case_id": job_id,
         "prior_count": len(docs),
         "created_or_updated": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "scope": "이 사건 폴더의 선행발명만 검색·판단 대상으로 사용",
+        "scope": "업로드된 파일의 대응관계만 해당 케이스 한정으로 사용",
         "manifest": manifest,
     })
     _write_json(case_dir / "parsed" / "prior_docs.json", [d.model_dump() for d in docs])
@@ -560,7 +652,7 @@ async def prepare(job_id: str):
         manifest: list[dict] = []
         for idx, pdf_path in enumerate(pdfs):
             try:
-                yield _ev("extract_prior", f"{pdf_path.name} 텍스트 추출 중...")
+                yield _ev("extract_prior", f"{pdf_path.name} 텍스트 추출 중..")
                 sha = _file_sha256(pdf_path)
                 cache_path = _doc_cache_path(sha)
                 if cache_path.exists():
@@ -584,7 +676,7 @@ async def prepare(job_id: str):
                             for chunk in (doc.group_chunks or [])
                         ],
                     })
-                    yield _ev("extract_prior", f"{pdf_path.name} 캐시 재사용")
+                    yield _ev("extract_prior", f"{pdf_path.name} 로드 완료")
                 else:
                     doc = pdf_extractor.extract(str(pdf_path), idx)
                     _write_json(cache_path, doc.model_dump())
@@ -599,9 +691,9 @@ async def prepare(job_id: str):
                     "paragraph_chunk_count": len(doc.paragraph_chunks),
                     "group_chunk_count": len(doc.group_chunks),
                 })
-                yield _ev("extract_prior_done", f"{pdf_path.name}: 단락 {manifest[-1]['paragraph_count']}개")
+                yield _ev("extract_prior_done", f"{pdf_path.name}: 추출 {manifest[-1]['paragraph_count']}개")
             except Exception as e:
-                yield _ev("error", f"{pdf_path.name} 파싱 실패: {e}")
+                yield _ev("error", f"{pdf_path.name} 추출 실패: {e}")
                 return
 
         _write_json(job_dir / "prior_docs.json", [d.model_dump() for d in docs])
@@ -659,11 +751,13 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
     async def stream() -> AsyncGenerator[dict, None]:
         try:
             total_start = time.perf_counter()
+            timing_data: dict[str, float] = {}
 
             def _timing_message(label: str, started_at: float) -> str:
                 return f"[timing] {label}: {_elapsed(started_at)}"
 
             async def _yield_timing(label: str, started_at: float) -> AsyncGenerator[dict, None]:
+                timing_data[label] = round(time.perf_counter() - started_at, 3)
                 message = _timing_message(label, started_at)
                 logger.info("Report timing [%s/%s] %s", job_id, claim_number, message)
                 yield _ev("log", message)
@@ -681,7 +775,7 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
             same_pairs = _load_json(job_dir / "same_pairs.json", {})
             claim = next((c for c in claims if c.claim_number == claim_number), None)
             if not claim:
-                yield _ev("error", f"청구항 {claim_number}을(를) 찾을 수 없습니다.")
+                yield _ev("error", f"청구항 {claim_number}를 찾을 수 없습니다.")
                 return
             if not prior_docs:
                 yield _ev("error", "인용발명이 준비되지 않았습니다.")
@@ -720,7 +814,7 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                 })
                 return
 
-            yield _ev("start", f"청구항 {claim_number} 보고서 생성을 시작합니다.")
+            yield _ev("start", f"청구항 {claim_number} 보고서 작성을 시작합니다.")
             if settings.use_rag_retrieval:
                 reranker_note = (
                     f", reranker top {settings.reranker_top_k}"
@@ -766,7 +860,7 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                             job_dir=str(job_dir), claim_number=claim_number,
                         )
                 except CompareFailed as e:
-                    yield _ev("error", f"구성요소 대비 분석 실패: {e}")
+                    yield _ev("error", f"구성요소 비교 분석 실패: {e}")
                     return
                 matches, _ = get_matches_from_cache(
                     claim,
@@ -850,11 +944,22 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                     yield _ev("stream_chunk", chunk)
                 phase1_md = _dedupe_phase1_sections(_strip_agent_tool_calls("".join(phase1_chunks)))
             else:
-                raw = await generate_dependent_report(
-                    claim, matches, prior_docs, chain_info, settings,
-                    prev_context=prev_context,
-                    secondary_matches=secondary_matches,
+                async def _emit_progress(message: str) -> None:
+                    yield_event = _ev("log", message)
+                    nonlocal_yield_events.append(yield_event)
+
+                nonlocal_yield_events: list[dict] = []
+                raw = await _await_with_log_heartbeat(
+                    generate_dependent_report(
+                        claim, matches, prior_docs, chain_info, settings,
+                        prev_context=prev_context,
+                        secondary_matches=secondary_matches,
+                    ),
+                    _emit_progress,
+                    label=f"청구항 {claim_number} Phase 1 작성",
                 )
+                for event in nonlocal_yield_events:
+                    yield event
                 raw = _strip_agent_tool_calls(raw)
                 split = raw.find("# [Phase 2]")
                 phase1_body = raw[:split].strip() if split >= 0 else raw
@@ -904,10 +1009,19 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                 yield event
             async for event in _yield_timing("total", total_start):
                 yield event
+            _write_json(
+                _report_timing_path(job_id, claim_number),
+                {
+                    "job_id": job_id,
+                    "claim_number": claim_number,
+                    "timings": timing_data,
+                },
+            )
             yield _ev("done", {
                 "report_md": report_md,
                 "claim_number": claim_number,
                 "used_inventions": used_inventions,
+                "timings": timing_data,
             })
         except Exception as e:
             tb = traceback.format_exc()
@@ -942,9 +1056,7 @@ def _assemble_dependent_report(
     split = body.find("# [Phase 2]")
     phase1 = body[:split].strip() if split >= 0 else body.strip()
     phase1 = _dedupe_phase1_sections(phase1)
-    phase1_md = f"### 청구항 {claim.claim_number}
-
-{phase1}"
+    phase1_md = f"### 청구항 {claim.claim_number}\n\n{phase1}"
     phase2_body = generate_dependent_phase2(
         phase1_md,
         claim,
@@ -969,7 +1081,7 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
         state="running",
         claim_numbers=claim_numbers,
         stage="starting",
-        message="종속항 일괄 보고서 생성을 시작합니다.",
+        message="종속항 배치 보고서를 생성을 시작합니다.",
         started_at=started_at,
     )
 
@@ -1000,7 +1112,7 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
             state="running",
             claim_numbers=claim_numbers,
             stage="loaded_targets",
-            message=f"종속항 {len(targets)}개를 일괄 처리 대상으로 불러왔습니다.",
+            message=f"종속항 {len(targets)}개를 배치 처리 대상으로 불러왔습니다.",
             started_at=started_at,
         )
 
@@ -1089,7 +1201,7 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
                 state="running",
                 claim_numbers=claim_numbers,
                 stage="building_comparison_cache",
-                message=f"종속항 {len(uncached_targets)}개에 대한 비교 캐시를 생성하고 있습니다.",
+                message=f"종속항 {len(uncached_targets)}개에 대해 비교 캐시를 생성하고 있습니다.",
                 started_at=started_at,
             )
             max_parallel = 2 if compare_mode == "hybrid" else 1
@@ -1184,12 +1296,25 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
                 state="running",
                 claim_numbers=claim_numbers,
                 stage="waiting_for_batch_llm",
-                message=f"종속항 {len(batch_items)}개에 대한 LLM 일괄 보고서를 생성하고 있습니다.",
+                message=f"종속항 {len(batch_items)}개에 대해 LLM 배치 보고서를 생성하고 있습니다.",
                 started_at=started_at,
                 reports_ready=len(results),
             )
-            combined = await generate_dependent_reports_batch(
-                batch_items, prior_docs, settings, prev_context=prev_context if req.use_context else None
+            combined = await _await_with_batch_status_heartbeat(
+                generate_dependent_reports_batch(
+                    batch_items,
+                    prior_docs,
+                    settings,
+                    prev_context=prev_context if req.use_context else None,
+                ),
+                job_id=job_id,
+                claim_numbers=claim_numbers,
+                started_at=started_at,
+                stage="waiting_for_batch_llm",
+                message_builder=lambda elapsed: (
+                    f"종속항 {len(batch_items)}개에 대한 LLM 배치 보고서를 생성 중입니다. ({elapsed})"
+                ),
+                reports_ready_getter=lambda: len(results),
             )
             combined = _strip_agent_tool_calls(combined)
             parts = _BATCH_SPLIT_RE.split(combined)
@@ -1204,14 +1329,28 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
                         state="running",
                         claim_numbers=claim_numbers,
                         stage="fallback_single_report",
-                        message=f"청구항 {claim.claim_number} 배치 결과가 없어 단건 보고서로 재시도합니다.",
+                        message=f"청구항 {claim.claim_number} 배치 결과가 없어 단건 보고서로 대체합니다.",
                         started_at=started_at,
                         reports_ready=len(results),
                     )
-                    raw = await generate_dependent_report(
-                        claim, matches, prior_docs, chain_info, settings,
-                        prev_context=prev_context if req.use_context else None,
-                        secondary_matches=secondary,
+                    raw = await _await_with_batch_status_heartbeat(
+                        generate_dependent_report(
+                            claim,
+                            matches,
+                            prior_docs,
+                            chain_info,
+                            settings,
+                            prev_context=prev_context if req.use_context else None,
+                            secondary_matches=secondary,
+                        ),
+                        job_id=job_id,
+                        claim_numbers=claim_numbers,
+                        started_at=started_at,
+                        stage="fallback_single_report",
+                        message_builder=lambda elapsed, cn=claim.claim_number: (
+                            f"청구항 {cn} 단건 보고서를 생성 중입니다. ({elapsed})"
+                        ),
+                        reports_ready_getter=lambda: len(results),
                     )
                 report_md = _assemble_dependent_report(
                     raw,
@@ -1233,7 +1372,7 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
                     state="running",
                     claim_numbers=claim_numbers,
                     stage="saving_reports",
-                    message=f"청구항 {claim.claim_number} 보고서를 저장했습니다.",
+                    message=f"청구항 {claim.claim_number} 보고서가 저장되었습니다.",
                     started_at=started_at,
                     reports_ready=len(results),
                 )
@@ -1256,7 +1395,7 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
             state="failed",
             claim_numbers=claim_numbers,
             stage="failed",
-            message="종속항 일괄 보고서 생성 중 오류가 발생했습니다.",
+            message="종속항 배치 보고서 생성 중 오류가 발생했습니다.",
             started_at=started_at,
             error=str(exc),
         )
@@ -1272,7 +1411,7 @@ async def report_batch_dependent_status(job_id: str):
         "job_id": job_id,
         "state": "idle",
         "stage": "idle",
-        "message": "종속항 일괄 보고서 작업을 아직 시작하지 않았습니다.",
+        "message": "종속항 배치 보고서 작업을 아직 시작하지 않았습니다.",
         "claim_numbers": [],
         "reports_ready": 0,
         "started_at": "",
@@ -1288,27 +1427,48 @@ async def chat_about_report(job_id: str, claim_number: int, req: ChatRequest):
     if not job_dir.exists():
         raise HTTPException(status_code=404, detail="작업을 찾을 수 없습니다.")
     if not req.messages:
-        raise HTTPException(status_code=400, detail="질문 내용을 입력하세요.")
+        raise HTTPException(status_code=400, detail="대화 메시지를 입력해주세요.")
 
     settings = _load_settings_with_dir()
     claim = next((c for c in _load_claims(job_id) if c.claim_number == claim_number), None)
     claim_text = claim.text if claim else ""
+    prior_docs = _load_prior_docs(job_id) if claim else []
     if req.web_search:
         evidence_rule = (
-            "보고서와 저장된 검색 결과를 우선 근거로 답하고, 부족한 경우에만 웹검색 도구로 보완하세요. "
-            "웹검색으로 확인한 문헌은 실제 제목/번호/URL 등 확인 가능한 정보만 언급하세요. "
+            "보고서에 있는 인용 결과를 주로 활용하되, 불충분한 경우에는 웹검색으로 보완하세요. "
+            "웹검색으로 확인한 문헌은 실제 제목/번호/URL 등을 확인할 수 있는 정보를 포함하세요. "
         )
     else:
-        evidence_rule = "보고서와 저장된 검색 결과만 근거로 답하세요. "
+        evidence_rule = "보고서에 있는 인용 결과만 활용해 답변하세요. "
     system = (
-        "당신은 특허 분석 보조자입니다. "
+        "당신은 특허 분석 보조원입니다. "
         f"{evidence_rule}"
         "인용문을 새로 만들지 말고, 근거가 없으면 없다고 답하세요.\n\n"
         f"[청구항 {claim_number}]\n{claim_text}\n\n[보고서]\n{req.report_md}"
     )
-    gap_context = _format_gap_search_result_for_chat(_load_gap_search_result(job_dir, claim_number))
+    gap_summary = None
+    if claim and prior_docs:
+        gap_summary = find_uncovered_elements(str(job_dir), claim, [d.filename for d in prior_docs])
+        uncovered_context = _format_uncovered_elements_for_chat(gap_summary)
+        if uncovered_context:
+            system += f"\n\n[구성대비 미대응 구성요소]\n{uncovered_context}"
+
+    gap_result = _load_gap_search_result(job_dir, claim_number)
+    if (
+        req.web_search
+        and claim
+        and gap_summary
+        and gap_summary.get("analyzed")
+        and gap_summary.get("uncovered")
+        and not gap_result
+        and _should_run_gap_search_from_chat(req.messages)
+    ):
+        gap_result = await web_search_gap_documents(claim, gap_summary, settings)
+        _save_gap_search_result(job_dir, claim_number, gap_result)
+
+    gap_context = _format_gap_search_result_for_chat(gap_result)
     if gap_context:
-        system += f"\n\n[저장된 보완문서 검색 결과]\n{gap_context}"
+        system += f"\n\n[인용 보완문서 인용 결과]\n{gap_context}"
     lines = []
     for msg in req.messages[-8:]:
         speaker = "사용자" if msg.role == "user" else "어시스턴트"
@@ -1477,7 +1637,7 @@ async def enhance_claim(job_id: str, claim_number: int):
     claims = _load_json(job_dir / "claims.json", [])
     claim_data = next((c for c in claims if int(c.get("claim_number", -1)) == claim_number), None)
     if not claim_data:
-        raise HTTPException(status_code=404, detail=f"청구항 {claim_number}을 찾을 수 없습니다.")
+        raise HTTPException(status_code=404, detail=f"청구항 {claim_number}를 찾을 수 없습니다.")
     enhanced = await enhance_claim_parsing_with_llm(ParsedClaim(**claim_data), settings)
     enhanced_data = enhanced.model_dump()
     updated = [enhanced_data if c.get("claim_number") == claim_number else c for c in claims]
@@ -1488,21 +1648,13 @@ async def enhance_claim(job_id: str, claim_number: int):
     return enhanced_data
 
 
-@router.get("/keywords/{job_id}/{claim_number}")
-async def get_keywords(job_id: str, claim_number: int):
-    claim = next((c for c in _load_claims(job_id) if c.claim_number == claim_number), None)
-    if not claim:
-        raise HTTPException(status_code=404, detail=f"청구항 {claim_number}을 찾을 수 없습니다.")
-    return extract_local_keywords(claim)
-
-
 def _load_claim_for_gap(job_id: str, claim_number: int):
     job_dir = _job_dir(job_id)
     if not job_dir.exists():
         raise HTTPException(status_code=404, detail="작업을 찾을 수 없습니다.")
     claim = next((c for c in _load_claims(job_id) if c.claim_number == claim_number), None)
     if not claim:
-        raise HTTPException(status_code=404, detail=f"청구항 {claim_number}을 찾을 수 없습니다.")
+        raise HTTPException(status_code=404, detail=f"청구항 {claim_number}를 찾을 수 없습니다.")
     doc_filenames = [d.filename for d in _load_prior_docs(job_id)]
     return job_dir, claim, doc_filenames
 
@@ -1518,9 +1670,9 @@ async def web_search_gap(job_id: str, claim_number: int):
     job_dir, claim, doc_filenames = _load_claim_for_gap(job_id, claim_number)
     gap = find_uncovered_elements(str(job_dir), claim, doc_filenames)
     if not gap["analyzed"]:
-        raise HTTPException(status_code=400, detail="구성대비 분석을 먼저 실행하세요.")
+        raise HTTPException(status_code=400, detail="구성요소 비교 인용발명을 먼저 실행해주세요.")
     if not gap["uncovered"]:
-        return {"claim_number": claim_number, "results": [], "message": "보완 검색이 필요한 미커버 구성요소가 없습니다."}
+        return {"claim_number": claim_number, "results": [], "message": "보완 검색이 필요한 미대응 구성요소가 없습니다."}
     result = await web_search_gap_documents(claim, gap, _load_settings_with_dir())
     _save_gap_search_result(job_dir, claim_number, result)
     return result

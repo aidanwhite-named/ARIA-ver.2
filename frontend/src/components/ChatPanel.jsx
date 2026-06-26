@@ -10,6 +10,11 @@ export default function ChatPanel({ open, onClose, jobId, claimNumber, reportMd 
   const [error, setError] = useState('')
   const [webSearch, setWebSearch] = useState(false)
   const scrollRef = useRef(null)
+  const helpExamples = [
+    '구성 (C)가 왜 대응 없음인지 설명해줘',
+    '인용발명 2보다 인용발명 1을 우선 본 이유를 설명해줘',
+  ]
+  const searchHint = '미대응 구성 검색은 키워드 탭의 보완문서 웹검색 버튼이 더 빠르고 안정적입니다.'
 
   // 청구항 전환 시 대화 초기화
   useEffect(() => {
@@ -71,6 +76,9 @@ export default function ChatPanel({ open, onClose, jobId, claimNumber, reportMd 
 
       {/* 메시지 영역 */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
+        <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] text-slate-500 leading-relaxed">
+          보고서 설명과 근거 확인용 채팅입니다. {searchHint}
+        </div>
         {messages.length === 0 && !loading && (
           <div className="text-xs text-slate-400 leading-relaxed mt-4">
             이 청구항의 Phase 1 분석에 대해 궁금한 점을 물어보세요.<br />
