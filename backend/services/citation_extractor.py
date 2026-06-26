@@ -95,6 +95,48 @@ def _rag_hits_for_doc(
     )
 
 
+def _expand_rag_hits_with_neighbors(
+    hits: List[Dict],
+    doc: ExtractedDocument,
+    settings: Optional[Settings],
+) -> Dict[str, str]:
+    """선택 문단의 앞뒤 문단을 함께 붙여 기능 문맥 손실을 줄인다."""
+    if not hits:
+        return {}
+
+    try:
+        neighbor_count = int(getattr(settings, "rag_context_neighbors", 1) or 0)
+    except (TypeError, ValueError):
+        neighbor_count = 1
+    neighbor_count = max(0, min(neighbor_count, 2))
+
+    chunks = _doc_chunks(doc)
+    if not chunks:
+        return {}
+
+    order_lookup = {
+        str(chunk_id).strip("[]"): idx
+        for idx, (chunk_id, _text) in enumerate(chunks)
+    }
+    selected_orders: set[int] = set()
+
+    for hit in hits:
+        para_no = str(hit.get("paragraph_no") or "").strip("[]")
+        para_id = str(hit.get("paragraph_id") or "").strip("[]")
+        idx = order_lookup.get(para_no or para_id)
+        if idx is None:
+            continue
+        start = max(0, idx - neighbor_count)
+        end = min(len(chunks), idx + neighbor_count + 1)
+        selected_orders.update(range(start, end))
+
+    selected: Dict[str, str] = {}
+    for idx in sorted(selected_orders):
+        chunk_id, text = chunks[idx]
+        selected[str(chunk_id)] = text
+    return selected
+
+
 def select_candidate_doc_indices_for_elements(
     elements: List[ClaimElement],
     prior_docs: List[ExtractedDocument],
@@ -212,11 +254,13 @@ def _build_doc_text(
     if _rag_enabled(settings) and elements:
         hits = _rag_hits_for_doc(doc, elements, settings)
         if hits:
-            selected = {hit["paragraph_id"]: hit["original_text"] for hit in hits}
+            selected = _expand_rag_hits_with_neighbors(hits, doc, settings)
+            if not selected:
+                selected = {hit["paragraph_id"]: hit["original_text"] for hit in hits}
             rag_text = format_rag_doc_text(selected)
             logger.info(
                 f"{doc.filename}: full text too long ({len(full_text)} chars); "
-                f"RAG selected {len(selected)} paragraphs ({len(rag_text)} chars)"
+                f"RAG selected {len(selected)} paragraphs including neighbors ({len(rag_text)} chars)"
             )
             return rag_text[:hard_limit]
         logger.warning(f"{doc.filename}: RAG returned no hits; using keyword context fallback")
