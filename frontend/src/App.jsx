@@ -421,6 +421,11 @@ function preprocessReport(md) {
         const current = lines[i]
         const trimmed = current.trim()
         if (!trimmed) {
+          if (label === '차이점') {
+            bodyLines.push('')
+            i += 1
+            continue
+          }
           i += 1
           break
         }
@@ -428,7 +433,7 @@ function preprocessReport(md) {
           fieldRe.test(current) ||
           /^#{1,6}\s/.test(trimmed) ||
           sectionHeaderRe.test(trimmed) ||
-          /^\([A-J](?:-\d+)?\)\s/.test(trimmed) ||
+          (label !== '차이점' && /^\([A-J](?:-\d+)?\)\s/.test(trimmed)) ||
           /^-\s*(유사점 요약|차이점|결론)\s*:/.test(trimmed)
         ) {
           break
