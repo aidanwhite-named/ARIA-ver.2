@@ -21,6 +21,7 @@ if sys.stderr and sys.stderr.encoding != 'utf-8':
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from backend.routers import analyze, settings as settings_router
+from backend.paths import REPORTS_DIR, UPLOADS_DIR
 
 app = FastAPI(title="ARIA ver.2 특허 신규성/진보성 판단 보고서 생성기", version="2.0.0")
 
@@ -32,8 +33,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-os.makedirs("uploads", exist_ok=True)
-os.makedirs("reports", exist_ok=True)
+os.makedirs(UPLOADS_DIR, exist_ok=True)
+os.makedirs(REPORTS_DIR, exist_ok=True)
 
 app.include_router(analyze.router, prefix="/analyze", tags=["analyze"])
 app.include_router(settings_router.router, prefix="/settings", tags=["settings"])

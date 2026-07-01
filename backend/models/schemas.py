@@ -95,6 +95,12 @@ class ClaimElement(BaseModel):
     parent_label: Optional[str] = None  # e.g. "A" for A-1
 
 
+class EvidenceSpan(BaseModel):
+    limitation: str = ""
+    quote: str = ""
+    chunk_id: str = ""
+
+
 class ParsedClaim(BaseModel):
     claim_number: int
     claim_type: str = "independent"  # "independent" | "dependent"
@@ -114,6 +120,7 @@ class ElementMatch(BaseModel):
     judgment: str = "대응 없음"
     cited_invention_index: int = 0
     similarity_reason: str = ""
+    evidence: List[EvidenceSpan] = Field(default_factory=list)
 
 
 class ManualClaimRequest(BaseModel):

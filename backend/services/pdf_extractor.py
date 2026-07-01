@@ -22,12 +22,15 @@ from backend.models.schemas import (
 
 logger = logging.getLogger(__name__)
 
-# 단락번호 패턴: [0001], 【0001】 등 0으로 시작하는 4자리만 인식.
-# 0 시작 제한으로 논문의 인용 연도(2024)·도면부호(1706) 오인식을 막는다.
-# (PDF 추출 시 (0146]처럼 괄호 짝이 깨지는 경우가 있어 여닫기 혼용은 허용)
+# 단락번호 패턴:
+# - 일반 특허: [0001], 【0001】, (0001)
+# - WO/PCT 일부 문헌: [1], [2]처럼 1~3자리 번호
+# - OCR 오류: [6[, [91 처럼 닫는 괄호가 깨진 경우
 _PARA_PATTERN = re.compile(r"[\[【\(]\s*(0\d{3})\s*[\]】\)]")
+_SHORT_PARA_PATTERN = re.compile(r"[\[【\(]\s*([1-9]\d{0,2})\s*[\]】\)\[]?")
 # OCR 텍스트 레이어에서 대괄호가 유실되는 경우([0006] → "0006 FIG. ...")가 있어,
 # 괄호 매칭이 전무하면 줄 시작의 맨숫자 단락번호로 재시도한다.
+# bare 폴백은 기존처럼 0 시작 4자리만 허용해 과검출을 막는다.
 _PARA_PATTERN_BARE = re.compile(r"^\s*(0\d{3})(?:\.|\s|$)")
 # 청구항 섹션 시작 패턴 (한국 특허 다양한 포맷 모두 지원)
 _KR_CLAIMS_START = re.compile(
@@ -299,6 +302,11 @@ def _extract_paragraphs(text: str) -> Dict[str, str]:
     """[XXXX] 단락번호 기준으로 텍스트를 분리하여 dict 반환"""
     paragraphs = _split_paragraphs(text, _PARA_PATTERN)
     if not paragraphs:
+        short_start = _find_dense_short_paragraph_start(text)
+        if short_start is not None:
+            short_text = _rewrite_dense_short_paragraph_markers(text[short_start:])
+            paragraphs = _split_paragraphs(short_text, _SHORT_PARA_PATTERN)
+    if not paragraphs:
         bare = _split_paragraphs(text, _PARA_PATTERN_BARE)
         # 숫자 데이터 줄을 단락번호로 오인하지 않도록 충분히 많을 때만 채택
         if len(bare) >= 5:
@@ -328,6 +336,68 @@ def _split_paragraphs(text: str, pattern: re.Pattern) -> Dict[str, str]:
         paragraphs[current_key] = "\n".join(current_buf).strip()
 
     return paragraphs
+
+
+def _normalize_short_marker(raw_marker: str, prev_num: Optional[int], next_num: Optional[int]) -> Optional[int]:
+    try:
+        value = int(raw_marker)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0:
+        return None
+    if prev_num is not None and next_num is not None and value > 9:
+        trimmed = int(str(value)[:-1]) if len(str(value)) > 1 else value
+        if trimmed == prev_num + 1 and trimmed == next_num - 1:
+            return trimmed
+    return value
+
+
+def _find_dense_short_paragraph_start(text: str) -> Optional[int]:
+    matches = list(re.finditer(r"^[ \t]*[\[【\(]\s*([1-9]\d{0,2})\s*[\]】\)\[]?[ \t]*$", text or "", re.MULTILINE))
+    if len(matches) < 5:
+        return None
+    normalized: List[tuple[int, int]] = []
+    raw_values = [m.group(1) for m in matches]
+    for idx, match in enumerate(matches):
+        prev_num = int(raw_values[idx - 1]) if idx > 0 and raw_values[idx - 1].isdigit() else None
+        next_num = int(raw_values[idx + 1]) if idx + 1 < len(raw_values) and raw_values[idx + 1].isdigit() else None
+        value = _normalize_short_marker(raw_values[idx], prev_num, next_num)
+        if value is not None:
+            normalized.append((match.start(), value))
+    consecutive = 1
+    run_start = 0
+    for idx in range(1, len(normalized)):
+        if normalized[idx][1] == normalized[idx - 1][1] + 1:
+            consecutive += 1
+            if consecutive >= 5:
+                return normalized[run_start][0]
+        else:
+            consecutive = 1
+            run_start = idx
+    return None
+
+
+def _rewrite_dense_short_paragraph_markers(text: str) -> str:
+    lines = text.splitlines()
+    marker_indexes: List[int] = []
+    raw_values: List[str] = []
+    for idx, line in enumerate(lines):
+        match = re.match(r"^[ \t]*[\[【\(]\s*([1-9]\d{0,2})\s*[\]】\)\[]?[ \t]*$", line)
+        if match:
+            marker_indexes.append(idx)
+            raw_values.append(match.group(1))
+
+    replacements: Dict[int, int] = {}
+    for idx, line_index in enumerate(marker_indexes):
+        prev_num = int(raw_values[idx - 1]) if idx > 0 and raw_values[idx - 1].isdigit() else None
+        next_num = int(raw_values[idx + 1]) if idx + 1 < len(raw_values) and raw_values[idx + 1].isdigit() else None
+        value = _normalize_short_marker(raw_values[idx], prev_num, next_num)
+        if value is not None:
+            replacements[line_index] = value
+
+    for line_index, value in replacements.items():
+        lines[line_index] = f"[{value}]"
+    return "\n".join(lines)
 
 
 def _extract_claims(text: str, doc_type: str) -> Dict[str, str]:

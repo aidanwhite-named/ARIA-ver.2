@@ -16,18 +16,21 @@ ${docs_block}
 3. 각 구성요소는 기능 단위의 하위 요소로 나누어 coverage를 먼저 보고, 그 다음 기능적 동일성과 개시 구체성을 반영해 judgment를 정하십시오.
 4. 직접 완전 일치가 아니어도 하위 요소의 상당 부분이 대응되고 수행 기능이 실질적으로 같으면 `일부 유사` 이상으로 평가할 수 있습니다.
 5. 반대로 용어가 유사해도 제어 로직, 모드 판단, 알고리즘, 구체 절차가 빠져 있으면 그 차이를 감점 요소로 반영하십시오.
-6. quote는 해당 doc_index 본문에 있는 원문을 그대로 복사하고, 직접 관련된 핵심 문장 1~2개(최대 350자)만 인용하십시오.
+6. quote는 해당 doc_index 본문에 있는 대표 근거 원문을 그대로 복사하고, 직접 관련된 핵심 문장 1~2개(최대 350자)만 인용하십시오. 외국어(일본어·중국어·영어 등) 문헌의 quote는 원문 그대로 복사하십시오.
 7. chunk_id는 quote가 나온 [0000] 문단번호 또는 [P페이지-청크] 값을 적으십시오.
 8. 관련 근거가 전혀 없을 때만 found=false, judgment="대응 없음", quote="", chunk_id=""로 적습니다.
 9. 관련 문단이 있으면 무엇이 같고 무엇이 다른지에 따라 "동일", "실질적 동일", "일부 차이", "일부 유사", "차이" 중 하나를 선택하십시오.
 10. 특정 결론을 목표로 하지 말고, 각 문헌의 실제 기재 강도에 맞춰 판단하십시오.
 11. 판단_이유는 240자 이내의 1~2문장으로 작성하되, coverage, 기능적 동일성, 개시 구체성, 핵심 차이를 짧게 반영하십시오.
 12. 출력 항목 수는 `인용발명 수 × 구성요소 수`와 정확히 같아야 하며, 각 doc_index/label 조합을 한 번씩만 출력하십시오.
-13. 객체 필드명은 label, doc_index, found, quote, chunk_id, judgment, 판단_이유만 사용하십시오.
+13. 구성요소 안에 여러 하위 제한이 있으면 evidence 배열에 하위 제한별 근거 문단을 최대 5개까지 나누어 적으십시오. 여러 문단 조합이 더 정확하면 대표 quote 하나보다 evidence를 우선 충실히 작성하십시오.
+14. evidence 각 항목은 limitation, quote, chunk_id만 사용합니다.
+15. 객체 필드명은 label, doc_index, found, quote, chunk_id, judgment, 판단_이유, evidence만 사용하십시오.
+
 
 출력은 JSON 배열만 사용하십시오.
 [
-  {"label":"A","doc_index":0,"found":true,"quote":"원문","chunk_id":"[0036]","judgment":"실질적 동일","판단_이유":"..."},
-  {"label":"B","doc_index":0,"found":true,"quote":"원문","chunk_id":"[0112]","judgment":"일부 유사","판단_이유":"..."},
-  {"label":"A","doc_index":1,"found":false,"quote":"","chunk_id":"","judgment":"대응 없음","판단_이유":"..."}
+  {"label":"A","doc_index":0,"found":true,"quote":"원문","chunk_id":"[0036]","judgment":"실질적 동일","판단_이유":"...","evidence":[{"limitation":"하위 제한","quote":"원문","chunk_id":"[0036]"}]},
+  {"label":"B","doc_index":0,"found":true,"quote":"원문","chunk_id":"[0112]","judgment":"일부 유사","판단_이유":"...","evidence":[{"limitation":"하위 제한","quote":"원문","chunk_id":"[0112]"}]},
+  {"label":"A","doc_index":1,"found":false,"quote":"","chunk_id":"","judgment":"대응 없음","판단_이유":"...","evidence":[]}
 ]

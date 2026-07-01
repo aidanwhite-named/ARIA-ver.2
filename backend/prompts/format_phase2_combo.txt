@@ -2,8 +2,6 @@ ${inv_header}
 
 [구성대비]
 
-[구성요소]
-
 ${components}
 
 [종합 판단]

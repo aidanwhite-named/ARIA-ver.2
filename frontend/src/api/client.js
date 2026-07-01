@@ -181,6 +181,12 @@ export async function deleteJob(jobId) {
   return res.json()
 }
 
+export async function deleteAllJobs() {
+  const res = await fetch(`${BASE}/analyze/jobs`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 export async function getClaimTree(jobId) {
   const res = await fetch(`${BASE}/analyze/claim_tree/${jobId}`)
   if (!res.ok) throw new Error(await res.text())

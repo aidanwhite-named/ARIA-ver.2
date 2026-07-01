@@ -14,6 +14,7 @@ $env:PYTHONIOENCODING = "utf-8"
 Set-Location $root
 
 Write-Host "=== ARIA ver.2 Patent Report Generator ===" -ForegroundColor Cyan
+Write-Host "  ARIA ports : backend $backendPort / frontend $frontendPort" -ForegroundColor DarkGray
 
 # Kill any process already using the required ports
 Write-Host "[0/3] Cleaning up any existing processes on ports $backendPort / $frontendPort..." -ForegroundColor DarkGray

@@ -32,6 +32,7 @@ from backend.models.schemas import (
     ManualClaimRequest,
     ParsedClaim,
 )
+from backend.paths import CASES_DIR, REPORTS_DIR, UPLOADS_DIR
 from backend.routers.settings import _load as load_settings
 from backend.services.rag_retriever import get_rag_runtime_status
 from backend.services import pdf_extractor
@@ -74,19 +75,18 @@ from backend.services.report_generator import (
     generate_independent_phase1_streaming,
     generate_independent_phase2,
     parse_manual_claim_locally,
+    sanitize_report_status_icons,
 )
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-UPLOADS_DIR = Path("uploads")
-REPORTS_DIR = Path("reports")
-CASES_DIR = Path("cases")
 DOC_CACHE_DIR = UPLOADS_DIR / "_doc_cache"
 for _dir in (UPLOADS_DIR, REPORTS_DIR, CASES_DIR, DOC_CACHE_DIR):
     _dir.mkdir(exist_ok=True)
 
 _PHASE2_MARKER_RE = re.compile(r"^\s*#\s*\[Phase\s*2\][^\n]*\n+", re.IGNORECASE)
+_PHASE2_BOUNDARY_RE = re.compile(r"(?im)^\s*#\s*\[Phase\s*2\]")
 _BATCH_SPLIT_RE = re.compile(r"(?m)^\s*===\s*청구항\s*(\d+)\s*===\s*$")
 
 
@@ -131,7 +131,7 @@ async def _await_with_batch_status_heartbeat(
     try:
         while not task.done():
             try:
-                return await asyncio.wait_for(task, timeout=interval)
+                return await asyncio.wait_for(asyncio.shield(task), timeout=interval)
             except asyncio.TimeoutError:
                 _update_dependent_batch_status(
                     job_id,
@@ -155,6 +155,11 @@ def _phase2_boundary(settings) -> str:
 
 def _strip_phase2_marker(body: str) -> str:
     return _PHASE2_MARKER_RE.sub("", body.lstrip(), count=1).lstrip()
+
+
+def _find_phase2_boundary(body: str) -> int:
+    match = _PHASE2_BOUNDARY_RE.search(body or "")
+    return match.start() if match else -1
 
 
 def _load_settings_with_dir():
@@ -202,6 +207,36 @@ def _load_json(path: Path, default):
 def _write_json(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _ordered_pdf_paths(job_dir: Path) -> list[Path]:
+    """Return uploaded PDFs in the original upload order when possible.
+
+    Falling back to filename order keeps backward compatibility for old jobs
+    that do not have an upload manifest.
+    """
+    pdf_dir = job_dir / "pdfs"
+    manifest = _load_json(job_dir / "upload_manifest.json", {})
+    files = manifest.get("files") if isinstance(manifest, dict) else None
+    ordered: list[Path] = []
+    seen: set[Path] = set()
+
+    if isinstance(files, list):
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            filename = Path(str(item.get("filename", "")).strip()).name
+            if not filename:
+                continue
+            path = pdf_dir / filename
+            if path.exists() and path not in seen:
+                ordered.append(path)
+                seen.add(path)
+
+    for path in sorted(pdf_dir.glob("*.pdf")):
+        if path not in seen:
+            ordered.append(path)
+    return ordered
 
 
 def _report_timing_path(job_id: str, claim_number: int) -> Path:
@@ -305,9 +340,15 @@ def _load_context(job_id: str) -> list:
 
 def _save_context_entry(job_id: str, claim_number: int, claim_text: str, report_md: str) -> None:
     context = [c for c in _load_context(job_id) if c.get("claim_number") != claim_number]
-    marker = "# [Phase 2]"
-    idx = report_md.find(marker)
-    phase2 = report_md[idx:idx + 4000] if idx >= 0 else report_md[-4000:]
+    idx = _find_phase2_boundary(report_md)
+    if idx >= 0:
+        tail = report_md[idx:]
+        rejected_marker = "\n## 관련도 A 인용발명"
+        rejected_idx = tail.find(rejected_marker)
+        phase2 = tail[:rejected_idx] if rejected_idx >= 0 else tail
+        phase2 = phase2[:4000]
+    else:
+        phase2 = report_md[-4000:]
     context.append({
         "claim_number": claim_number,
         "claim_text_preview": claim_text[:200],
@@ -456,6 +497,7 @@ def _save_case_artifacts(job_id: str, docs: List[ExtractedDocument], manifest: l
 
 
 def _save_report(job_id: str, claim_number: int, md: str) -> None:
+    md = sanitize_report_status_icons(md)
     path = REPORTS_DIR / f"report_{job_id}_claim{claim_number}.md"
     path.write_text(md, encoding="utf-8")
     case_report = _ensure_case_dirs(job_id) / "reports" / f"claim{claim_number}.md"
@@ -643,7 +685,7 @@ async def prepare(job_id: str):
         if not job_dir.exists():
             yield _ev("error", "작업을 찾을 수 없습니다.")
             return
-        pdfs = sorted((job_dir / "pdfs").glob("*.pdf"))
+        pdfs = _ordered_pdf_paths(job_dir)
         if not pdfs:
             yield _ev("error", "업로드된 PDF가 없습니다.")
             return
@@ -802,7 +844,7 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                 and cached_all
                 and policy_cache_current
             ):
-                cached_report = cached.read_text(encoding="utf-8")
+                cached_report = sanitize_report_status_icons(cached.read_text(encoding="utf-8"))
                 cached_chain_info = get_claim_chain_info(cached_chain, claim_number)
                 _save_context_entry(job_id, claim_number, claim.text, cached_report)
                 async for event in _yield_timing("cached report return", total_start):
@@ -847,7 +889,7 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                         if compare_mode == "hybrid":
                             yield _ev(
                                 "analyze",
-                                f"comparing {len(prior_docs)} prior docs in hybrid mode",
+                                f"comparing {len(prior_docs)} prior docs in integrated mode",
                             )
                         else:
                             yield _ev(
@@ -940,9 +982,10 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                     prev_context=prev_context,
                     secondary_matches=secondary_matches,
                 ):
-                    phase1_chunks.append(chunk)
-                    yield _ev("stream_chunk", chunk)
-                phase1_md = _dedupe_phase1_sections(_strip_agent_tool_calls("".join(phase1_chunks)))
+                    clean_chunk = sanitize_report_status_icons(chunk)
+                    phase1_chunks.append(clean_chunk)
+                    yield _ev("stream_chunk", clean_chunk)
+                phase1_md = sanitize_report_status_icons(_dedupe_phase1_sections(_strip_agent_tool_calls("".join(phase1_chunks))))
             else:
                 async def _emit_progress(message: str) -> None:
                     yield_event = _ev("log", message)
@@ -960,10 +1003,10 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                 )
                 for event in nonlocal_yield_events:
                     yield event
-                raw = _strip_agent_tool_calls(raw)
-                split = raw.find("# [Phase 2]")
+                raw = sanitize_report_status_icons(_strip_agent_tool_calls(raw))
+                split = _find_phase2_boundary(raw)
                 phase1_body = raw[:split].strip() if split >= 0 else raw
-                phase1_md = _dedupe_phase1_sections(phase1_body)
+                phase1_md = sanitize_report_status_icons(_dedupe_phase1_sections(phase1_body))
             phase1_md = f"### claim {claim_number}\n\n{phase1_md}"
             async for event in _yield_timing("phase1", phase1_start):
                 yield event
@@ -992,15 +1035,15 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
             async for event in _yield_timing("phase2", phase2_start):
                 yield event
             phase2_md = boundary + "\n\n" + _strip_phase2_marker(phase2_body)
-            report_md = phase1_md + "\n\n" + phase2_md
+            report_md = sanitize_report_status_icons(phase1_md + "\n\n" + phase2_md)
+            rejected_section = build_rejected_inventions_section(claim, prior_docs, chain_info, str(job_dir))
+            if rejected_section:
+                report_md = sanitize_report_status_icons(report_md + "\n\n" + rejected_section)
 
             finalize_start = time.perf_counter()
-            rejected_md = build_rejected_inventions_section(claim, prior_docs, chain_info, str(job_dir))
-            if rejected_md:
-                report_md += "\n\n" + rejected_md
             same_claims_for_this = [int(k) for k, v in same_pairs.items() if v == claim_number]
             if same_claims_for_this:
-                report_md = generate_category_same_report(claim_number, same_claims_for_this, report_md)
+                report_md = sanitize_report_status_icons(generate_category_same_report(claim_number, same_claims_for_this, report_md))
 
             _save_report(job_id, claim_number, report_md)
             _save_reference_db(job_id, claim, matches, prior_docs, chain_info, report_md)
@@ -1053,7 +1096,7 @@ def _assemble_dependent_report(
     secondary_matches=None,
 ) -> str:
     body = _strip_agent_tool_calls(raw)
-    split = body.find("# [Phase 2]")
+    split = _find_phase2_boundary(body)
     phase1 = body[:split].strip() if split >= 0 else body.strip()
     phase1 = _dedupe_phase1_sections(phase1)
     phase1_md = f"### 청구항 {claim.claim_number}\n\n{phase1}"
@@ -1249,7 +1292,7 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
                 and cn not in recomputed_claim_numbers
                 and not policy_cache_changed
             ):
-                cached_report = cached.read_text(encoding="utf-8")
+                cached_report = sanitize_report_status_icons(cached.read_text(encoding="utf-8"))
                 cached_chain_info = get_claim_chain_info(chain_data, cn)
                 _save_context_entry(job_id, claim.claim_number, claim.text, cached_report)
                 results[str(cn)] = {
@@ -1316,7 +1359,7 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
                 ),
                 reports_ready_getter=lambda: len(results),
             )
-            combined = _strip_agent_tool_calls(combined)
+            combined = sanitize_report_status_icons(_strip_agent_tool_calls(combined))
             parts = _BATCH_SPLIT_RE.split(combined)
             chunks: dict[int, str] = {}
             for i in range(1, len(parts) - 1, 2):
@@ -1352,6 +1395,7 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
                         ),
                         reports_ready_getter=lambda: len(results),
                     )
+                raw = sanitize_report_status_icons(raw)
                 report_md = _assemble_dependent_report(
                     raw,
                     claim,
@@ -1360,6 +1404,10 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
                     matches=matches,
                     secondary_matches=secondary,
                 )
+                report_md = sanitize_report_status_icons(report_md)
+                rejected_section = build_rejected_inventions_section(claim, prior_docs, chain_info, str(job_dir))
+                if rejected_section:
+                    report_md = sanitize_report_status_icons(report_md + "\n\n" + rejected_section)
                 _save_report(job_id, claim.claim_number, report_md)
                 _save_reference_db(job_id, claim, matches, prior_docs, chain_info, report_md)
                 _save_context_entry(job_id, claim.claim_number, claim.text, report_md)
@@ -1597,6 +1645,50 @@ async def delete_job(job_id: str):
         path.unlink(missing_ok=True)
     _remove_reference_entries_for_job(job_id)
     return {"ok": True}
+
+
+@router.delete("/jobs")
+async def delete_all_jobs():
+    removed = {
+        "uploads": 0,
+        "cases": 0,
+        "reports": 0,
+        "doc_cache": 0,
+    }
+
+    for path in UPLOADS_DIR.iterdir():
+        if path.name.startswith("_"):
+            continue
+        if path.is_dir():
+            _rmtree_with_retry(path)
+            removed["uploads"] += 1
+        elif path.is_file():
+            path.unlink(missing_ok=True)
+
+    for path in CASES_DIR.iterdir():
+        if path.is_dir():
+            _rmtree_with_retry(path)
+            removed["cases"] += 1
+        elif path.is_file():
+            path.unlink(missing_ok=True)
+
+    for path in REPORTS_DIR.iterdir():
+        if path.is_file():
+            path.unlink(missing_ok=True)
+            removed["reports"] += 1
+        elif path.is_dir():
+            _rmtree_with_retry(path)
+            removed["reports"] += 1
+
+    for path in DOC_CACHE_DIR.iterdir():
+        if path.is_file():
+            path.unlink(missing_ok=True)
+            removed["doc_cache"] += 1
+        elif path.is_dir():
+            _rmtree_with_retry(path)
+            removed["doc_cache"] += 1
+
+    return {"ok": True, "removed": removed}
 
 
 @router.get("/claim_tree/{job_id}")

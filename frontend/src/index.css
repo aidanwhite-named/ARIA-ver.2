@@ -48,6 +48,58 @@ body {
   @apply bg-gray-100 p-4 rounded-lg text-sm overflow-x-auto my-3;
 }
 
+.report-content .phase1-field {
+  @apply my-2 rounded-md border-l-4 px-3 py-2 text-sm leading-relaxed;
+}
+.report-content .phase1-field-label {
+  @apply block text-xs font-bold;
+}
+.report-content .phase1-field-body {
+  @apply mt-1 block text-slate-800;
+}
+.report-content .phase1-field-claim {
+  @apply border-indigo-300 bg-indigo-50/50 text-indigo-950;
+}
+.report-content .phase1-field-claim .phase1-field-label {
+  @apply text-indigo-700;
+}
+.report-content .phase1-field-quote {
+  @apply border-teal-400 bg-teal-50/50 text-teal-950;
+}
+.report-content .phase1-field-quote .phase1-field-label {
+  @apply text-teal-700;
+}
+.report-content .phase1-field-summary {
+  @apply border-sky-300 bg-sky-50/50 text-sky-950;
+}
+.report-content .phase1-field-summary .phase1-field-label {
+  @apply text-sky-700;
+}
+.phase1-report-content .phase1-field-summary {
+  display: none;
+}
+.phase1-report-content .phase1-component-heading {
+  display: none;
+}
+.report-content .phase1-field-reason {
+  @apply border-violet-300 bg-violet-50/50 text-violet-950;
+}
+.report-content .phase1-field-reason .phase1-field-label {
+  @apply text-violet-700;
+}
+.report-content .phase1-field-diff {
+  @apply border-rose-300 bg-rose-50/50 text-rose-950;
+}
+.report-content .phase1-field-diff .phase1-field-label {
+  @apply text-rose-700;
+}
+.report-content .phase1-field-similar {
+  @apply border-green-300 bg-green-50/50 text-green-950;
+}
+.report-content .phase1-field-similar .phase1-field-label {
+  @apply text-green-700;
+}
+
 /* 구성요소 섹션 강조 */
 .report-content strong {
   @apply font-semibold text-gray-900;

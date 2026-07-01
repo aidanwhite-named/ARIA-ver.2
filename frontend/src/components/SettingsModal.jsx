@@ -3,16 +3,42 @@ import { getModels, getSettings, saveSettings, getEngineStatus } from '../api/cl
 
 const ENGINES = ['claude', 'openai', 'agy']
 const ENGINE_LABEL = { claude: 'Claude', openai: 'OpenAI Codex', agy: 'AGY CLI' }
+const DEFAULT_SETTINGS = {
+  engine: 'claude',
+  comparison_mode: 'per_doc',
+  model_parser: 'claude-haiku-4-5-20251001',
+  model_compare: 'claude-sonnet-4-6',
+  model_report: 'claude-haiku-4-5-20251001',
+  use_rag_retrieval: true,
+  rag_top_k: 20,
+  use_reranker: true,
+  reranker_top_k: 10,
+}
+const DEFAULT_MODELS = {
+  claude: ['claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'],
+  openai: ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini'],
+  agy: ['gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemini-3.1-pro-preview'],
+}
 
 export default function SettingsModal({ onClose }) {
   const [settings, setSettings] = useState(null)
-  const [models, setModels] = useState({ claude: [], openai: [], agy: [] })
+  const [models, setModels] = useState(DEFAULT_MODELS)
   const [status, setStatus] = useState({ label: '확인 중...', account_label: '' })
+  const [error, setError] = useState('')
   const [saved, setSaved] = useState(false)
 
   useEffect(() => {
-    Promise.all([getSettings(), getModels(), getEngineStatus()]).then(
-      ([s, m, st]) => {
+    Promise.allSettled([getSettings(), getModels(), getEngineStatus()]).then(
+      ([settingsResult, modelsResult, statusResult]) => {
+        const s = settingsResult.status === 'fulfilled' ? settingsResult.value : DEFAULT_SETTINGS
+        const m = modelsResult.status === 'fulfilled' ? modelsResult.value : DEFAULT_MODELS
+        const st = statusResult.status === 'fulfilled'
+          ? statusResult.value
+          : { status: 'server_error', label: '백엔드 연결 실패', account_label: '' }
+        const failed = [settingsResult, modelsResult, statusResult].some(result => result.status === 'rejected')
+        if (failed) {
+          setError('백엔드 서버(127.0.0.1:8200)에 연결할 수 없습니다. start.ps1로 백엔드와 프론트를 함께 실행했는지 확인해 주세요.')
+        }
         const validModels = m[s.engine] || []
         const first = validModels[0] || ''
         const sanitized = { ...s }
@@ -67,11 +93,16 @@ export default function SettingsModal({ onClose }) {
   }
 
   async function handleSave() {
-    await saveSettings(settings)
-    const st = await getEngineStatus()
-    setStatus(st)
-    setSaved(true)
-    setTimeout(() => setSaved(false), 2000)
+    try {
+      await saveSettings(settings)
+      const st = await getEngineStatus()
+      setStatus(st)
+      setError('')
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2000)
+    } catch (_) {
+      setError('설정 저장 실패: 백엔드 서버(127.0.0.1:8200)에 연결할 수 없습니다.')
+    }
   }
 
   if (!settings) {
@@ -96,6 +127,12 @@ export default function SettingsModal({ onClose }) {
 
         <div className="flex-1 overflow-y-auto p-5 space-y-5">
           <>
+              {error && (
+                <div className="rounded border border-red-200 bg-red-50 px-3 py-2 text-xs leading-relaxed text-red-700">
+                  {error}
+                </div>
+              )}
+
               <div>
                 <label className="text-xs font-medium text-gray-600 block mb-2">엔진 선택</label>
                 <div className="flex gap-3">
@@ -167,13 +204,13 @@ export default function SettingsModal({ onClose }) {
                   {[
                     {
                       value: 'per_doc',
-                      title: '문헌별 순차 대비',
-                      description: '인용발명마다 LLM을 1회씩 호출해 개별적으로 정밀 대비합니다.',
+                      title: 'Per-doc 비교',
+                      description: '인용발명마다 LLM을 따로 호출해 순차적으로 비교합니다.',
                     },
                     {
                       value: 'hybrid',
-                      title: '전체 통합 대비 (LLM 1회)',
-                      description: '모든 인용발명을 한 프롬프트에 모아 청구항별로 한 번에 대비합니다.',
+                      title: '통합 비교',
+                      description: '모든 인용발명을 한 번의 큰 프롬프트로 묶어 동시에 비교합니다.',
                     },
                   ].map(option => {
                     const selected = settings.comparison_mode === option.value
@@ -206,7 +243,7 @@ export default function SettingsModal({ onClose }) {
                 </div>
                 {settings.comparison_mode === 'hybrid' && (
                   <div className="mt-2 rounded bg-amber-50 px-2.5 py-2 text-[10px] leading-relaxed text-amber-700">
-                    입력 한도를 넘는 경우에도 모든 문헌을 포함하되, 각 문헌의 관련 문단을 자동으로 압축해 한 프롬프트로 전송합니다.
+                    통합 비교는 모든 문헌을 한 번에 보내므로 문헌 수와 본문 길이가 크면 응답 시간이 길어질 수 있습니다.
                   </div>
                 )}
               </div>
@@ -216,7 +253,7 @@ export default function SettingsModal({ onClose }) {
                   <div>
                     <div className="text-xs font-semibold text-purple-800">RAG 단락 필터링</div>
                     <div className="text-[10px] text-purple-600 mt-0.5">
-                      BGE-M3 Dense + BM25 Hybrid 검색으로 구성요소별 관련 단락만 골라 LLM 입력 토큰을 줄입니다.
+                      BGE-M3 Dense + BM25 Hybrid 검색으로 먼저 후보 단락을 고르고, 필요하면 reranker로 다시 정렬해 LLM 입력 토큰을 줄입니다.
                     </div>
                   </div>
                   <label className="relative inline-flex items-center cursor-pointer ml-3 shrink-0">
@@ -244,7 +281,7 @@ export default function SettingsModal({ onClose }) {
                     </div>
                     <div>
                       <div className="flex items-center justify-between mb-1">
-                        <label className="text-xs font-medium text-gray-600">최대 선택 단락 수</label>
+                        <label className="text-xs font-medium text-gray-600">1차 후보 단락 수</label>
                         <span className="text-xs font-bold text-purple-700">{settings.rag_top_k ?? 20}개</span>
                       </div>
                       <input
@@ -261,12 +298,15 @@ export default function SettingsModal({ onClose }) {
                         <span>20개 권장</span>
                         <span>30개</span>
                       </div>
+                      <div className="mt-1 text-[10px] text-gray-500">
+                        Dense+BM25 검색으로 먼저 뽑아 둘 후보 문단 수입니다.
+                      </div>
                     </div>
                     <div className="rounded border border-gray-200 p-2.5 space-y-2">
                       <label className="flex items-center justify-between gap-3 cursor-pointer">
                         <span>
                           <span className="block text-xs font-medium text-gray-700">BGE reranker 사용</span>
-                          <span className="block text-[10px] text-gray-500">추가 LLM 호출 없이 후보 문단을 로컬에서 재정렬합니다.</span>
+                          <span className="block text-[10px] text-gray-500">추가 LLM 호출 없이 1차 후보 문단의 우선순위를 로컬에서 다시 매깁니다.</span>
                         </span>
                         <input
                           type="checkbox"
@@ -276,16 +316,21 @@ export default function SettingsModal({ onClose }) {
                         />
                       </label>
                       {settings.use_reranker && (
-                        <label className="flex items-center justify-between gap-3 text-xs text-gray-600">
-                          LLM에 전달할 문단 수
-                          <select
-                            value={settings.reranker_top_k ?? 10}
-                            onChange={e => set('reranker_top_k', parseInt(e.target.value))}
-                            className="rounded border bg-white px-2 py-1"
-                          >
-                            {[5, 8, 10, 12, 15].map(value => <option key={value} value={value}>{value}개</option>)}
-                          </select>
-                        </label>
+                        <>
+                          <label className="flex items-center justify-between gap-3 text-xs text-gray-600">
+                            reranker 후 최종 전달 문단 수
+                            <select
+                              value={settings.reranker_top_k ?? 10}
+                              onChange={e => set('reranker_top_k', parseInt(e.target.value))}
+                              className="rounded border bg-white px-2 py-1"
+                            >
+                              {[5, 8, 10, 12, 15].map(value => <option key={value} value={value}>{value}개</option>)}
+                            </select>
+                          </label>
+                          <div className="text-[10px] text-gray-500">
+                            위 1차 후보 중 reranker가 다시 추린 뒤 실제로 LLM에 넣는 문단 수입니다.
+                          </div>
+                        </>
                       )}
                     </div>
                   </div>

@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from backend.models.schemas import ClaimElement, ElementMatch, ExtractedDocument, ParsedClaim, Settings
+from backend.models.schemas import ClaimElement, ElementMatch, EvidenceSpan, ExtractedDocument, ParsedClaim, Settings
 from backend.services.ai_engine import call_ai
 from backend.services.prompt_loader import load_prompt, render_prompt
 from backend.services.rag_retriever import format_rag_doc_text, retrieve_with_metadata
@@ -43,7 +43,7 @@ _ENGINE_BUDGETS = {
 _DEFAULT_BUDGET = (45_000, 60_000, 55_000, 5_000)
 _CHUNK_SIZE = 1_200
 _CACHE_META_KEY = "_meta"
-_CACHE_SCHEMA_VERSION = 3
+_CACHE_SCHEMA_VERSION = 4
 _DEFAULT_DEPENDENT_CANDIDATE_DOC_LIMIT = 3
 _JUDGMENT_RANK = {
     "동일": 5,
@@ -85,7 +85,7 @@ def _rag_hits_for_doc(
     resolved_top_k = max(1, min(resolved_top_k, 50))
     top_k_per_element = max(3, min(8, resolved_top_k // max(1, len(elements)) + 2))
     return retrieve_with_metadata(
-        elements,
+        _retrieval_query_elements(elements),
         doc,
         Path(getattr(settings, "rag_uploads_dir", "uploads") or "uploads"),
         top_k=resolved_top_k,
@@ -93,6 +93,59 @@ def _rag_hits_for_doc(
         use_reranker=bool(getattr(settings, "use_reranker", False)),
         reranker_top_k=int(getattr(settings, "reranker_top_k", 10) or 10),
     )
+
+
+_RETRIEVAL_QUERY_EXPANSIONS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        ("인밴드", "in-band"),
+        " in-band communication magnetic field communication enhanced in-band",
+    ),
+    (
+        ("아웃밴드", "out-band", "out of band", "대역외"),
+        " out-band out-of-band communication carrier BLE Bluetooth NFC RFID Zigbee Wi-Fi",
+    ),
+    (
+        ("혼용", "함께", "동시에", "hybrid", "mixed"),
+        " mixed mode hybrid mode shared mode simultaneous together both combination",
+    ),
+    (
+        ("모드", "mode"),
+        " mode communication mode power transmission mode",
+    ),
+    (
+        ("표시", "나타내", "지시", "indicat"),
+        " indicate indicator indication information representing identifying",
+    ),
+    (
+        ("제1값", "제2값", "제3값", "값", "value"),
+        " first value second value third value value code bit flag identifier ID 0 1 2 3",
+    ),
+    (
+        ("특정 요청", "srq", "specific request", "요청 패킷"),
+        " SRQ specific request packet request message response message",
+    ),
+    (
+        ("패킷", "packet", "메시지", "message"),
+        " packet message data packet control packet configuration packet",
+    ),
+)
+
+
+def _retrieval_query_elements(elements: List[ClaimElement]) -> List[ClaimElement]:
+    """Broaden short Korean claim phrases before RAG lookup without changing comparison labels."""
+    expanded: list[ClaimElement] = []
+    for elem in elements or []:
+        text = getattr(elem, "text", "") or ""
+        lowered = text.lower()
+        additions: list[str] = []
+        for triggers, expansion in _RETRIEVAL_QUERY_EXPANSIONS:
+            if any(trigger.lower() in lowered for trigger in triggers):
+                additions.append(expansion)
+        if additions:
+            expanded.append(elem.model_copy(update={"text": text + " " + " ".join(additions)}))
+        else:
+            expanded.append(elem)
+    return expanded
 
 
 def _expand_rag_hits_with_neighbors(
@@ -143,50 +196,18 @@ def select_candidate_doc_indices_for_elements(
     settings: Settings,
     max_docs: Optional[int] = None,
 ) -> List[int]:
-    """Pick a small set of prior documents for dependent-claim comparison.
+    """Return prior documents that must be compared for a dependent claim.
 
-    The expensive LLM comparison should not run as claim_count * doc_count when
-    dependent claims only add a few limitations. This function uses the same
-    local RAG signal as the comparison prompt builder to route each dependent
-    claim to the most relevant documents first. If RAG is disabled or cannot
-    produce any candidates, it falls back to all documents so accuracy wins over
-    speed in uncertain cases.
+    Dependent-claim citation chains are selected from the comparison cache. If a
+    document is skipped here, it cannot later be chosen as the newly added
+    rejection reference for that dependent claim. Therefore dependent claims
+    compare against every uploaded prior document; RAG may still compact each
+    document's text inside the comparison prompt, but it must not route whole
+    documents out of the candidate set.
     """
     if not prior_docs:
         return []
-    if not _rag_enabled(settings) or len(prior_docs) <= 3:
-        return list(range(len(prior_docs)))
-
-    try:
-        configured_limit = int(
-            max_docs
-            or getattr(settings, "dependent_candidate_doc_limit", 0)
-            or _DEFAULT_DEPENDENT_CANDIDATE_DOC_LIMIT
-        )
-    except (TypeError, ValueError):
-        configured_limit = _DEFAULT_DEPENDENT_CANDIDATE_DOC_LIMIT
-    limit = max(1, min(configured_limit, len(prior_docs)))
-
-    scored_docs: list[tuple[float, int, int]] = []
-    for doc_idx, doc in enumerate(prior_docs):
-        hits = _rag_hits_for_doc(doc, elements, settings, top_k=getattr(settings, "rag_top_k", 20))
-        if not hits:
-            continue
-        score = sum(float(hit.get("score", 0.0) or 0.0) for hit in hits)
-        scored_docs.append((score, len(hits), doc_idx))
-
-    if not scored_docs:
-        logger.info("Dependent candidate routing: no RAG hits; comparing all documents")
-        return list(range(len(prior_docs)))
-
-    scored_docs.sort(key=lambda item: (-item[0], -item[1], item[2]))
-    selected = [doc_idx for _score, _count, doc_idx in scored_docs[:limit]]
-    logger.info(
-        "Dependent candidate routing: selected docs %s from scores %s",
-        selected,
-        [(doc_idx, round(score, 4), count) for score, count, doc_idx in scored_docs[:limit]],
-    )
-    return selected
+    return list(range(len(prior_docs)))
 
 # quote(인용문) 길이가 너무 길면 LLM에게 전달할 인용문 앞부분과 뒷부분만 남기고
 # 중간부분을 생략한다. 이 길이를 넘으면 앞뒤로 잘라내고 줄임표(...)가
@@ -208,6 +229,37 @@ def _shorten_quote(quote: str) -> str:
     return f"{head}{_ELLIPSIS}{tail}"
 
 
+def _normalize_evidence(raw_evidence: object, fallback_quote: str = "", fallback_chunk_id: str = "") -> list[dict]:
+    """Normalize optional multi-paragraph evidence while preserving legacy quote behavior."""
+    evidence: list[dict] = []
+    if isinstance(raw_evidence, list):
+        for item in raw_evidence:
+            if not isinstance(item, dict):
+                continue
+            quote = _shorten_quote(str(item.get("quote", "") or ""))
+            if not quote:
+                continue
+            evidence.append({
+                "limitation": str(item.get("limitation", "") or "").strip(),
+                "quote": quote,
+                "chunk_id": str(item.get("chunk_id", "") or "").strip(),
+            })
+            if len(evidence) >= 5:
+                break
+
+    if not evidence and fallback_quote:
+        evidence.append({
+            "limitation": "대표 근거",
+            "quote": fallback_quote,
+            "chunk_id": str(fallback_chunk_id or "").strip(),
+        })
+    return evidence
+
+
+def _evidence_spans(raw_evidence: object) -> list[EvidenceSpan]:
+    return [EvidenceSpan(**item) for item in _normalize_evidence(raw_evidence)]
+
+
 def normalize_label(label: str) -> str:
     """구성요소 레이블을 알파벳 대문자 + 선택적 숫자(-숫자 형태)로 정규화한다.
 
@@ -219,6 +271,31 @@ def normalize_label(label: str) -> str:
         return (label or "").strip().upper()
     base = m.group(1).upper()
     return f"{base}-{m.group(2)}" if m.group(2) else base
+
+
+_COMPARISON_LABELS = tuple("ABCDEFGHIJ")
+
+
+def _comparison_safe_elements(elements: List[ClaimElement]) -> List[ClaimElement]:
+    """Return elements with unique labels suitable for comparison prompts."""
+    safe_elements: List[ClaimElement] = []
+    used: set[str] = set()
+    auto_idx = 0
+
+    for elem in elements:
+        label = normalize_label(elem.label)
+        if not re.fullmatch(r"[A-J](?:-\d+)?", label or "") or label in used:
+            while auto_idx < len(_COMPARISON_LABELS) and _COMPARISON_LABELS[auto_idx] in used:
+                auto_idx += 1
+            label = _COMPARISON_LABELS[auto_idx] if auto_idx < len(_COMPARISON_LABELS) else f"X{len(used) + 1}"
+            auto_idx += 1
+        used.add(label)
+        if label != elem.label:
+            safe_elements.append(elem.model_copy(update={"label": label}))
+        else:
+            safe_elements.append(elem)
+
+    return safe_elements
 
 
 def _build_doc_text(
@@ -633,7 +710,8 @@ def get_matches_from_cache(
         else:
             doc_results.append([])
 
-    return _select_best_matches(claim.elements, doc_results, num_docs, allowed_docs), cached_doc_count == num_docs
+    elements = _comparison_safe_elements(claim.elements)
+    return _select_best_matches(elements, doc_results, num_docs, allowed_docs), cached_doc_count == num_docs
 
 
 def get_cached_doc_indices(
@@ -666,6 +744,7 @@ async def analyze_claim_elements_for_docs(
     This is used when a refreshed job reuses comparison cache for unchanged PDFs and
     only newly added PDFs need an extra LLM comparison.
     """
+    elements = _comparison_safe_elements(elements)
     for doc_idx in doc_indices:
         if doc_idx < 0 or doc_idx >= len(prior_docs):
             continue
@@ -690,6 +769,7 @@ async def analyze_claim_elements(
     claim_number: Optional[int] = None,
 ) -> List[ElementMatch]:
     """구성요소를 인용발명별로 비교하고 필요하면 comparisons_{doc_idx}.json에 캐시한다."""
+    elements = _comparison_safe_elements(elements)
     num_docs = len(prior_docs)
     doc_results = []
     for doc_idx in range(num_docs):
@@ -721,6 +801,7 @@ async def analyze_claim_elements_hybrid(
     Citation-chain scoring depends on comparisons_{doc_idx}.json representing
     each document's own coverage, not only the globally best document per element.
     """
+    elements = _comparison_safe_elements(elements)
     num_docs = len(prior_docs)
     original_doc_indices = doc_index_map or list(range(num_docs))
     if num_docs <= 1:
@@ -782,6 +863,7 @@ async def analyze_claim_elements_hybrid(
                 "quote": item.get("quote", ""),
                 "chunk_id": item.get("chunk_id", ""),
                 "판단_이유": item.get("판단_이유", item.get("similarity_reason", "")),
+                "evidence": item.get("evidence", []),
             })
 
     if job_dir is not None and claim_number is not None:
@@ -953,6 +1035,7 @@ def _select_best_matches(
                 judgment=best_match.get("judgment", "대응 없음"),
                 cited_invention_index=best_doc_idx,
                 similarity_reason=best_match.get("판단_이유", best_match.get("similarity_reason", "")),
+                evidence=_evidence_spans(best_match.get("evidence", [])),
             ))
         else:
             matches.append(ElementMatch(
@@ -1057,6 +1140,7 @@ def _parse_json_array(
             continue
 
         quote = _shorten_quote(str(item.get("quote", "") or ""))
+        evidence = _normalize_evidence(item.get("evidence", []), quote, item.get("chunk_id", ""))
         found_value = item.get("found", False)
         if isinstance(found_value, str):
             found = found_value.strip().lower() in {"true", "1", "yes"}
@@ -1079,6 +1163,7 @@ def _parse_json_array(
             "chunk_id": str(item.get("chunk_id", "") or ""),
             "judgment": judgment,
             "판단_이유": str(item.get("판단_이유", item.get("similarity_reason", "")) or ""),
+            "evidence": evidence if found else [],
         })
         if doc_idx is not None:
             normalized_item["doc_index"] = doc_idx

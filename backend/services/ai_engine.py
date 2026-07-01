@@ -18,6 +18,7 @@ import time
 from typing import AsyncGenerator
 
 from backend.models.schemas import Settings
+from backend.paths import UPLOADS_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,7 @@ _BENIGN_STDERR_PATTERNS = (
 )
 
 _AGY_ARG_PROMPT_LIMIT = 12_000
-_AGY_PROMPT_DIR = Path("uploads") / "_agy_prompts"
+_AGY_PROMPT_DIR = UPLOADS_DIR / "_agy_prompts"
 _AGY_TRANSCRIPT_MAX_AGE_SECONDS = 180
 _AGY_TRANSCRIPT_FLUSH_WAIT_SECONDS = 2.0
 _AGY_TRUNCATED_RE = re.compile(r"<truncated\s+\d+\s+bytes>")
@@ -739,10 +740,10 @@ async def _cli_run(
             stderr = _decode(stderr_b or b"").strip()
             if engine == "agy" and proc.returncode == 0 and not stdout:
                 stdout = _read_agy_transcript_response(started_at, prompt_marker)
-            return proc.returncode, stdout, stderr
+            return proc.returncode, stdout, stderr, started_at, prompt_marker
 
         try:
-            returncode, stdout, stderr = _run_once()
+            returncode, stdout, stderr, started_at, prompt_marker = _run_once()
             stderr_for_user = _clean_cli_stderr(stderr)
 
             if returncode == 0 and stdout:
@@ -750,6 +751,12 @@ async def _cli_run(
 
             if returncode == 0 and not stdout:
                 raise RuntimeError(_format_empty_response_error(engine, stderr, returncode))
+
+            if engine == "agy":
+                recovered = _read_agy_transcript_response(started_at, prompt_marker)
+                if recovered:
+                    logger.warning("AGY CLI returned rc=%s but recovered response from stored conversation.", returncode)
+                    return recovered
 
             logger.error("%s CLI failed with rc=%s:\n%s", engine, returncode, stderr)
             if engine == "agy" and _is_gemini_unsupported_client_error(stderr_for_user or stderr):

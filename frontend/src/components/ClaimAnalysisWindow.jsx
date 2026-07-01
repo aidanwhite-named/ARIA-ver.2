@@ -117,15 +117,51 @@ function PurposeSection({ jobId, purposeEffects, onUpdate }) {
   )
 }
 
+function buildSameClaimGroups(claims, samePairs) {
+  const knownNums = new Set((claims || []).map(c => Number(c.claim_number)))
+  const pairs = samePairs || {}
+
+  function resolveRoot(num) {
+    const seen = new Set()
+    let current = Number(num)
+
+    while (pairs[String(current)] !== undefined) {
+      if (seen.has(current)) return Math.min(...seen)
+      seen.add(current)
+      current = Number(pairs[String(current)])
+    }
+
+    return current
+  }
+
+  const byRoot = {}
+  Object.entries(pairs).forEach(([child, parent]) => {
+    const childNum = Number(child)
+    const rootNum = resolveRoot(parent)
+    if (!knownNums.has(childNum) && !knownNums.has(rootNum)) return
+    if (!byRoot[rootNum]) byRoot[rootNum] = new Set([rootNum])
+    byRoot[rootNum].add(childNum)
+  })
+
+  return Object.entries(byRoot)
+    .map(([root, nums]) => ({
+      root: Number(root),
+      claims: Array.from(nums).sort((a, b) => a - b),
+    }))
+    .filter(group => group.claims.length > 1)
+    .sort((a, b) => a.root - b.root)
+}
+
 // ─── 단일 청구항 카드 ────────────────────────────────────────────────────────
-function ClaimCard({ claim, samePairs, jobId, onClaimUpdate, groupColor }) {
+function ClaimCard({ claim, samePairs, sameGroups, jobId, onClaimUpdate, groupColor }) {
   const [expanded, setExpanded] = useState(true)
   const [enhancing, setEnhancing] = useState(false)
   const [error, setError] = useState('')
 
   const num = claim.claim_number
   const isIndependent = claim.claim_type === 'independent'
-  const sameAs = samePairs?.[String(num)]  // 이 청구항이 동일한 원본 청구항 번호
+  const sameGroup = sameGroups?.find(group => group.claims.includes(num))
+  const sameAs = sameGroup && sameGroup.root !== num ? sameGroup.root : samePairs?.[String(num)]
   const isFallback = claim.split_method === 'fallback'
 
   async function handleEnhance() {
@@ -255,22 +291,47 @@ function ClaimTree({ claims, samePairs, jobId, onClaimUpdate }) {
     'border-orange-400', 'border-pink-400', 'border-teal-400',
   ]
   const colorMap = {}
-  let colorIdx = 0
-  const groupRoots = new Set(Object.values(samePairs || {}))
-  groupRoots.forEach(rootNum => {
-    colorMap[rootNum] = GROUP_COLORS[colorIdx % GROUP_COLORS.length]
-    colorIdx++
-  })
-  Object.entries(samePairs || {}).forEach(([k, v]) => {
-    colorMap[parseInt(k)] = colorMap[v]
+  const sameGroups = buildSameClaimGroups(claims, samePairs)
+  sameGroups.forEach((group, idx) => {
+    const color = GROUP_COLORS[idx % GROUP_COLORS.length]
+    group.claims.forEach(num => {
+      colorMap[num] = color
+    })
   })
 
   const independents = claims.filter(c => c.claim_type === 'independent')
   const dependentsOf = (num) => claims.filter(c => c.parent_claim === num)
+  const groupedMembers = new Set(sameGroups.flatMap(group => group.claims.filter(num => num !== group.root)))
+  const claimByNumber = new Map(claims.map(claim => [claim.claim_number, claim]))
+
+  function groupedClaimsFor(num) {
+    const group = sameGroups.find(item => item.root === num)
+    if (!group) return []
+    return group.claims
+      .filter(claimNum => claimNum !== num)
+      .map(claimNum => claimByNumber.get(claimNum))
+      .filter(Boolean)
+  }
 
   function renderClaim(claim, depth = 0) {
     const num = claim.claim_number
+    if (groupedMembers.has(num)) return null
     const children = dependentsOf(num)
+    const groupedClaims = groupedClaimsFor(num)
+    const renderRelatedClaims = () => groupedClaims.map(groupedClaim => (
+      <div key={`same-${groupedClaim.claim_number}`} className="ml-4 border-l-2 border-purple-100 pl-3">
+        <ClaimCard
+          claim={groupedClaim}
+          samePairs={samePairs}
+          sameGroups={sameGroups}
+          jobId={jobId}
+          onClaimUpdate={onClaimUpdate}
+          groupColor={colorMap[groupedClaim.claim_number]}
+        />
+        {dependentsOf(groupedClaim.claim_number).map(child => renderClaim(child, depth + 1))}
+      </div>
+    ))
+
     return (
       <div key={num} style={{ paddingLeft: depth > 0 ? 24 : 0 }}>
         {depth > 0 && (
@@ -278,10 +339,12 @@ function ClaimTree({ claims, samePairs, jobId, onClaimUpdate }) {
             <ClaimCard
               claim={claim}
               samePairs={samePairs}
+              sameGroups={sameGroups}
               jobId={jobId}
               onClaimUpdate={onClaimUpdate}
               groupColor={colorMap[num]}
             />
+            {groupedClaims.length > 0 && renderRelatedClaims()}
             {children.map(child => renderClaim(child, depth + 1))}
           </div>
         )}
@@ -290,10 +353,12 @@ function ClaimTree({ claims, samePairs, jobId, onClaimUpdate }) {
             <ClaimCard
               claim={claim}
               samePairs={samePairs}
+              sameGroups={sameGroups}
               jobId={jobId}
               onClaimUpdate={onClaimUpdate}
               groupColor={colorMap[num]}
             />
+            {groupedClaims.length > 0 && renderRelatedClaims()}
             {children.length > 0 && (
               <div className="ml-4">
                 {children.map(child => renderClaim(child, depth + 1))}
@@ -351,6 +416,7 @@ export default function ClaimAnalysisWindow({ jobId, onClose }) {
 
   const totalClaims = treeData?.claims?.length ?? 0
   const independentCount = treeData?.claims?.filter(c => c.claim_type === 'independent').length ?? 0
+  const sameGroups = buildSameClaimGroups(treeData?.claims || [], treeData?.same_pairs || {})
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-gray-50" style={{ fontFamily: 'inherit' }}>
@@ -412,11 +478,13 @@ export default function ClaimAnalysisWindow({ jobId, onClose }) {
               />
 
               {/* same_pairs 안내 */}
-              {Object.keys(treeData.same_pairs || {}).length > 0 && (
+              {sameGroups.length > 0 && (
                 <div className="bg-purple-50 border border-purple-200 rounded-xl p-4 mb-5 text-sm text-purple-700">
                   <strong>카테고리 동일 청구항:</strong>{' '}
-                  {Object.entries(treeData.same_pairs).map(([k, v]) => (
-                    <span key={k} className="mr-3">제{k}항 ↔ 제{v}항</span>
+                  {sameGroups.map(group => (
+                    <span key={group.root} className="mr-3">
+                      {group.claims.map(num => `제${num}항`).join(', ')}
+                    </span>
                   ))}
                 </div>
               )}

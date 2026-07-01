@@ -2,7 +2,7 @@ import { useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeRaw from 'rehype-raw'
-import { addManualClaim, streamPrepare, streamReport, reportBatchDependent, getDependentBatchStatus, uploadFiles, getContextInfo, clearContext, checkJobStatus, detectCategory, deleteJob, cancelGeneration } from './api/client'
+import { addManualClaim, streamPrepare, streamReport, reportBatchDependent, getDependentBatchStatus, uploadFiles, getContextInfo, clearContext, checkJobStatus, detectCategory, deleteJob, deleteAllJobs, cancelGeneration } from './api/client'
 import ClaimAnalysisWindow from './components/ClaimAnalysisWindow'
 
 import FilePanel from './components/FilePanel'
@@ -66,34 +66,43 @@ function AriaEmblem() {
 // ── Phase 2 판정 라벨 색상 ────────────────────────────────────────────────────
 const JUDGMENT_COLORS = {
   '동일':       'text-green-700 border-green-500 bg-green-50',
-  '실질적 동일': 'text-blue-700 border-blue-400 bg-blue-50',
-  '일부 차이':  'text-orange-700 border-orange-400 bg-orange-50',
-  '일부 유사':  'text-amber-700 border-amber-400 bg-amber-50',
+  '실질적동일': 'text-blue-700 border-blue-400 bg-blue-50',
+  '일부차이':   'text-orange-700 border-orange-400 bg-orange-50',
+  '일부유사':   'text-amber-700 border-amber-400 bg-amber-50',
   '차이':       'text-gray-500 border-gray-300 bg-gray-50',
-  '대응 없음':  'text-gray-400 border-gray-200 bg-gray-50',
 }
 
 // ── Phase 1 유사도 배지 스타일 ───────────────────────────────────────────────
 const SIMILARITY_STYLES = {
-  '동일':           { badge: 'bg-green-100 text-green-800 border border-green-300',   emoji: '🟢' },
-  '실질적 동일':    { badge: 'bg-blue-100 text-blue-800 border border-blue-300',      emoji: '🔵' },
-  '일부 차이':      { badge: 'bg-orange-100 text-orange-800 border border-orange-300', emoji: '🟠' },
-  '일부 유사':      { badge: 'bg-amber-100 text-amber-700 border border-amber-300',   emoji: '🟡' },
-  '차이·대응 없음': { badge: 'bg-gray-100 text-gray-600 border border-gray-300',      emoji: '⚪' },
-  '차이':           { badge: 'bg-gray-100 text-gray-600 border border-gray-300',      emoji: '⚪' },
-  '대응 없음':      { badge: 'bg-gray-100 text-gray-500 border border-gray-300',      emoji: '⚪' },
+  '동일':           { badge: 'bg-green-100 text-green-800 border border-green-300' },
+  '실질적동일':     { badge: 'bg-orange-100 text-orange-800 border border-orange-300' },
+  '일부차이':       { badge: 'bg-amber-100 text-amber-700 border border-amber-300' },
+  '일부유사':       { badge: 'bg-green-100 text-green-800 border border-green-300' },
+  '차이':           { badge: 'bg-gray-100 text-gray-700 border border-gray-300' },
+}
+
+function normalizeReportStatusIcons(text) {
+  return String(text || '')
+    .replace(/[🔵🟠🟢🟡⚪🔴\uFFFD�]+/g, '')
+    .replace(/(^|\r?\n)\s*[�\uFFFD]+\s*(?=최종 보고서)/g, '$1')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/[ \t]+(\r?\n)/g, '$1')
+    .replace(/\uFFFD/g, '')
+}
+
+function sanitizeReportText(text) {
+  return normalizeReportStatusIcons(text)
 }
 
 // ── Phase 1 필드 라벨 스타일 ─────────────────────────────────────────────────
 const FIELD_LABEL_STYLES = [
-  { re: /^청구항 구성\s*:/,              cls: 'border-l-2 border-indigo-300 pl-2 text-indigo-900' },
-  { re: /^인용발명 대응 부분 요약\s*:/,  cls: 'border-l-2 border-sky-300 pl-2 text-sky-900' },
-  { re: /^인용발명\s*대응 원문\s*:/,     cls: 'border-l-2 border-teal-400 pl-2 text-teal-900 font-medium' },
-  { re: /^판단 이유\s*:/,               cls: 'border-l-2 border-violet-300 pl-2 text-violet-900' },
-  { re: /^판단 근거\s*:/,               cls: 'border-l-2 border-violet-400 pl-2 text-violet-900 font-medium' },
-  { re: /^차이점\s*:/,                  cls: 'border-l-2 border-rose-300 pl-2 text-rose-900' },
-  { re: /^유사점 요약\s*:/,             cls: 'border-l-2 border-green-300 pl-2 text-green-900' },
-  { re: /^결합 논리/,                   cls: 'border-l-2 border-orange-300 pl-2 text-orange-900' },
+  { re: /^(청구항 구성)\s*:/,              cls: 'border-indigo-300 bg-indigo-50/50 text-indigo-950', labelCls: 'text-indigo-700' },
+  { re: /^(인용발명 대응 부분 요약)\s*:/,  cls: 'border-sky-300 bg-sky-50/50 text-sky-950', labelCls: 'text-sky-700' },
+  { re: /^(인용발명\s*대응 원문)\s*:/,     cls: 'border-teal-400 bg-teal-50/50 text-teal-950', labelCls: 'text-teal-700' },
+  { re: /^(판단 이유)\s*:/,               cls: 'border-violet-300 bg-violet-50/50 text-violet-950', labelCls: 'text-violet-700' },
+  { re: /^(판단 근거)\s*:/,               cls: 'border-violet-400 bg-violet-50/50 text-violet-950', labelCls: 'text-violet-700' },
+  { re: /^(차이점)\s*:/,                  cls: 'border-rose-300 bg-rose-50/50 text-rose-950', labelCls: 'text-rose-700' },
+  { re: /^(유사점 요약)\s*:/,             cls: 'border-green-300 bg-green-50/50 text-green-950', labelCls: 'text-green-700' },
 ]
 
 function extractText(children) {
@@ -106,12 +115,10 @@ function extractText(children) {
 // ── 유사도 단계별 행 색상 (배경 + 왼쪽 테두리) ──────────────────────────────
 const SIMILARITY_ROW_COLORS = {
   '동일':           'bg-green-50  border-l-4 border-green-500',
-  '실질적 동일':    'bg-blue-50   border-l-4 border-blue-500',
-  '일부 차이':      'bg-orange-50 border-l-4 border-orange-500',
-  '일부 유사':      'bg-amber-50  border-l-4 border-amber-400',
-  '차이·대응 없음': 'bg-gray-50   border-l-4 border-gray-400',
-  '차이':           'bg-gray-50   border-l-4 border-gray-400',
-  '대응 없음':      'bg-gray-50   border-l-4 border-gray-300',
+  '실질적동일':     'bg-orange-50 border-l-4 border-orange-500',
+  '일부차이':       'bg-amber-50  border-l-4 border-amber-400',
+  '일부유사':       'bg-green-50  border-l-4 border-green-500',
+  '차이':           'bg-red-50    border-l-4 border-red-400',
 }
 
 // ── Phase 1 커스텀 렌더러 ────────────────────────────────────────────────────
@@ -136,11 +143,10 @@ function Phase1H3({ children }) {
     )
   }
 
-  // [구성요소 (X)] 또는 [추가 구성 (X)] 헤더 — 파란 원형 배지 없이 텍스트만 표시
-  const m = text.match(/(?:구성요소|추가\s*구성)\s*\(\s*([A-J](?:-\d+)?)\s*\)/)
+  const m = text.match(/^\[(구성요소|추가\s*구성)(?:\s*\(\s*([A-J](?:-\d+)?)\s*\))?\]$/)
   if (m) {
     return (
-      <h3 className="mt-7 mb-2 text-sm font-semibold text-gray-800">
+      <h3 className="phase1-component-heading mt-7 mb-2 text-sm font-semibold text-gray-800">
         {children}
       </h3>
     )
@@ -153,89 +159,400 @@ function Phase1ListItem({ children }) {
   const text = extractText(children)
 
   // 유사도 라인 감지 — 이모지·기존 바탕색 지시 잔재도 흡수
-  const simMatch = text.match(
-    /^유사도\s*:\s*(?:[🟠🟢🟡⚪🔵]\s*)?(동일|실질적 동일|일부 차이|일부 유사|차이·대응 없음|차이|대응 없음)?\s*(\d+%)?/
+  const newSimMatch = text.match(
+    /^(?:유사도\s*:\s*)?\(([A-J](?:-\d+)?)\)\s*(동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음)?\s*(\d+%)?/
   )
-  if (simMatch && /유사도/.test(simMatch[0])) {
-    const label = simMatch[1] || ''
-    const pct   = simMatch[2] || ''
-    const style    = SIMILARITY_STYLES[label]    || SIMILARITY_STYLES['차이']
-    const rowColor = SIMILARITY_ROW_COLORS[label] || SIMILARITY_ROW_COLORS['차이']
+  const oldSimMatch = text.match(
+    /^유사도\s*:\s*(동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음)?\s*(\d+%)?/
+  )
+  if (newSimMatch || oldSimMatch) {
+    const elementLabel = newSimMatch ? newSimMatch[1] : ''
+    const labelText = newSimMatch ? (newSimMatch[2] || '') : (oldSimMatch?.[1] || '')
+    const normalizedLabel = labelText.replace(/\s+/g, '') === '대응없음' ? '차이' : labelText.replace(/\s+/g, '')
+    const pct = newSimMatch ? (newSimMatch[3] || '') : (oldSimMatch?.[2] || '')
+    const style = SIMILARITY_STYLES[normalizedLabel] || SIMILARITY_STYLES['차이']
+    const rowColor = SIMILARITY_ROW_COLORS[normalizedLabel] || SIMILARITY_ROW_COLORS['차이']
     return (
       <li className={`flex items-center gap-2 py-2 px-3 rounded-r my-1.5 list-none -ml-5 ${rowColor}`}>
-        <span className="text-xs font-medium text-gray-500 w-12 shrink-0">유사도</span>
-        {label
+        {elementLabel && <span className="text-xs font-semibold text-gray-700 shrink-0">({elementLabel})</span>}
+        {normalizedLabel
           ? (
             <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-semibold ${style.badge}`}>
-              {style.emoji} {label}
+              {normalizedLabel}
             </span>
           )
           : <span className="text-xs text-gray-400 italic">미입력</span>
         }
-        {pct && <span className="text-xs text-gray-500 font-mono">{pct}</span>}
+        {pct && (
+          <span className="inline-flex items-center gap-1 text-xs text-gray-500 font-mono whitespace-nowrap shrink-0">
+            <span className="shrink-0">{pct}</span>
+          </span>
+        )}
       </li>
     )
   }
 
   // 필드 라벨 스타일
-  for (const { re, cls } of FIELD_LABEL_STYLES) {
-    if (re.test(text)) {
-      return <li className={`text-sm leading-relaxed my-1.5 list-none -ml-5 ${cls}`}>{children}</li>
+  for (const { re, cls, labelCls } of FIELD_LABEL_STYLES) {
+    const fieldMatch = text.match(re)
+    if (fieldMatch) {
+      const label = fieldMatch[1].replace(/\s+/g, ' ')
+      const body = text.slice(fieldMatch[0].length).trim()
+      return (
+        <li className={`list-none -ml-5 my-2 rounded-md border-l-4 px-3 py-2 text-sm leading-relaxed ${cls}`}>
+          <span className={`block text-xs font-bold ${labelCls}`}>{label}</span>
+          {body && <span className="mt-1 block whitespace-pre-line text-slate-800">{body}</span>}
+        </li>
+      )
     }
   }
 
   return <li className="text-sm leading-relaxed my-1">{children}</li>
 }
 
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+function renderJudgmentInline(text) {
+  const match = text.match(
+    /^(\([A-J](?:-\d+)?\)(?:\s*(?:및|,)\s*\([A-J](?:-\d+)?\))*)\s+(동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음)(?:\s+(\d+%))?\s*$/
+  )
+  const fallbackMatch = !match && text.match(
+    /^(동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음)(?:\s+(\d+%))?\s*$/
+  )
+  if (!match && !fallbackMatch) return null
+  const label = match ? match[1] : ''
+  const rawJudgment = match ? match[2] : fallbackMatch[1]
+  const pct = match ? (match[3] || '') : (fallbackMatch[2] || '')
+  const judgment = rawJudgment.replace(/\s+/g, '')
+  return { label, judgment, pct }
+}
+
+function getJudgmentTone(judgment) {
+  const normalized = String(judgment || '').replace(/\s+/g, '')
+  if (normalized === '동일') return 'border-green-300 bg-green-50/60'
+  if (normalized === '실질적동일') return 'border-blue-300 bg-blue-50/60'
+  if (normalized === '일부차이') return 'border-orange-300 bg-orange-50/60'
+  if (normalized === '일부유사') return 'border-amber-300 bg-amber-50/60'
+  if (normalized === '차이' || normalized === '대응없음') return 'border-gray-300 bg-gray-50'
+  return 'border-slate-200 bg-white'
+}
+
+function splitPhase2ComponentBlocks(body) {
+  const lines = String(body || '').split('\n')
+  const blocks = []
+  let current = null
+  let lead = []
+
+  const flushCurrent = () => {
+    if (current) {
+      current.body = current.lines.join('\n').trim()
+      blocks.push(current)
+      current = null
+    }
+  }
+
+  let fallbackLabelCode = 'A'.charCodeAt(0)
+  for (const line of lines) {
+    const judgment = renderJudgmentInline(line.trim())
+    if (judgment) {
+      flushCurrent()
+      let blockLine = line
+      if (!judgment.label) {
+        judgment.label = `(${String.fromCharCode(fallbackLabelCode)})`
+        fallbackLabelCode += 1
+        blockLine = `${judgment.label} ${line.trim()}`
+      }
+      current = { judgment, lines: [blockLine] }
+      continue
+    }
+    if (current) current.lines.push(line)
+    else lead.push(line)
+  }
+  flushCurrent()
+
+  return {
+    lead: lead.join('\n').trim(),
+    blocks: blocks.filter(block => block.body),
+  }
+}
+
 function ReportParagraph({ children }) {
   const text = extractText(children)
   const trimmed = text.trim()
-  if (/^\[(구성대비|구성요소|종합 판단|유사점|결합 논리|차이점|결론)\]$/.test(trimmed)) {
+  if (/^\[(구성요소|추가\s*구성)(?:\s*\(\s*[A-J](?:-\d+)?\s*\))?\]$/.test(trimmed)) {
+    return <p className="phase1-component-heading">{children}</p>
+  }
+  if (/^\[(인용발명 단독\(신규성\)|인용발명 1 \+ 주지관용\(진보성\)|인용발명 1과 2의 결합\(진보성\)|인용발명 1과 2의 결합 및 주지관용\(진보성\))\]$/.test(trimmed)) {
+    return <p className="mt-2 mb-4 text-lg font-bold tracking-tight text-slate-900">{children}</p>
+  }
+  if (/^\[(구성대비|구성요소|종합 판단|유사점|차이점|결론)\]$/.test(trimmed)) {
     const isMajor = /^\[(구성대비|종합 판단)\]$/.test(trimmed)
+    const isDiff = trimmed === '[차이점]'
+    const isSimilar = trimmed === '[유사점]'
+    const isConclusion = trimmed === '[결론]'
     return (
       <p className={
         isMajor
-          ? 'mt-6 mb-2 px-3 py-2 rounded-lg bg-slate-100 border border-slate-200 text-sm font-bold text-slate-800'
-          : 'mt-4 mb-1 text-sm font-semibold text-slate-700'
+          ? 'mt-6 mb-2 px-4 py-3 rounded-xl bg-slate-100 border border-slate-200 text-base font-bold text-slate-800'
+          : isDiff
+            ? 'mt-5 mb-2 px-3 py-2 rounded-lg bg-rose-50 border border-rose-200 text-sm font-bold text-rose-800'
+            : isSimilar
+              ? 'mt-5 mb-2 px-3 py-2 rounded-lg bg-emerald-50 border border-emerald-200 text-sm font-bold text-emerald-800'
+              : isConclusion
+                ? 'mt-5 mb-2 px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-sm font-bold text-amber-800'
+                : 'mt-4 mb-1 text-sm font-semibold text-slate-700'
       }>
         {children}
       </p>
     )
   }
-  if (/^\[(차이점|결합 논리)\s*\d+\]$/.test(trimmed)) {
+  if (/^\[(차이점)\s*\d+\]$/.test(trimmed)) {
     return <p className="mt-4 mb-1 text-sm font-semibold text-slate-700">{children}</p>
   }
-  const match = text.match(/^\([A-J](?:-\d+)?\)(?:\s*(?:및|,)\s*\([A-J](?:-\d+)?\))*\s+(동일|실질적 동일|일부 차이|일부 유사|차이|대응 없음)/)
-  if (match) {
-    const judgment = match[1]
+  const judgmentInline = renderJudgmentInline(trimmed)
+  if (judgmentInline) {
+    const { label, judgment, pct } = judgmentInline
     const color = JUDGMENT_COLORS[judgment] || 'text-gray-500 border-gray-300 bg-gray-50'
     return (
-      <p className={`flex items-center gap-2 font-semibold text-sm border-l-4 pl-3 py-0.5 rounded-r mt-4 mb-1 ${color}`}>
-        {children}
+      <p className={`flex items-center gap-2 font-semibold text-sm border-l-4 pl-3 py-0.5 rounded-r mt-4 mb-1 overflow-x-auto ${color}`}>
+        {label && <span className="shrink-0">{label}</span>}
+        <span className="shrink-0">{judgment}</span>
+        {pct && <span className="shrink-0 font-mono">{pct}</span>}
       </p>
     )
   }
   return <p className="my-1 text-sm leading-relaxed">{children}</p>
 }
 
+function Phase2Markdown({ body }) {
+  return (
+    <div className="report-content prose max-w-none">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={[rehypeRaw]}
+        components={{ p: ReportParagraph, h3: Phase1H3, li: Phase1ListItem }}
+      >
+        {preprocessReport(body)}
+      </ReactMarkdown>
+    </div>
+  )
+}
+
+function Phase2CompositionBody({ body }) {
+  const { lead, blocks } = splitPhase2ComponentBlocks(body)
+  if (blocks.length === 0) return <Phase2Markdown body={body} />
+
+  return (
+    <div>
+      {lead && <Phase2Markdown body={lead} />}
+      <div className="space-y-3">
+        {blocks.map((block, index) => (
+          <section
+            key={`${block.judgment.label}-${index}`}
+            className={`rounded-xl border px-4 py-3 shadow-sm ${getJudgmentTone(block.judgment.judgment)}`}
+          >
+            <Phase2Markdown body={block.body} />
+          </section>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function Phase2SectionCard({ title, body }) {
+  const isComposition = title === '[구성대비]'
+  return (
+    <section className="mb-5 rounded-2xl border border-slate-200 bg-white shadow-sm">
+      <div className="border-b border-slate-200 px-5 py-4">
+        <h3 className="text-base font-bold tracking-tight text-slate-800">{title}</h3>
+      </div>
+      <div className="px-5 py-4">
+        {isComposition ? <Phase2CompositionBody body={body} /> : <Phase2Markdown body={body} />}
+      </div>
+    </section>
+  )
+}
+
 function preprocessReport(md) {
+  md = sanitizeReportText(md)
+
+  function fieldClass(label) {
+    if (label === '청구항 구성') return 'phase1-field phase1-field-claim'
+    if (label === '인용발명 대응 원문') return 'phase1-field phase1-field-quote'
+    if (label === '인용발명 대응 부분 요약') return 'phase1-field phase1-field-summary'
+    if (label === '판단 이유' || label === '판단 근거') return 'phase1-field phase1-field-reason'
+    if (label === '차이점') return 'phase1-field phase1-field-diff'
+    if (label === '유사점 요약') return 'phase1-field phase1-field-similar'
+    return 'phase1-field'
+  }
+
+  function normalizeFieldLabel(rawLabel) {
+    return rawLabel.replace(/\*\*/g, '').replace(/\s+/g, ' ').trim()
+  }
+
+  function normalizePhase1Fields(text) {
+    const fieldRe = /^-\s*(?:\*\*)?(청구항 구성|인용발명\s*대응 원문|인용발명 대응 부분 요약|판단 이유|판단 근거|차이점|유사점 요약)(?:\*\*)?\s*:\s*(.*)$/
+    const sectionHeaderRe = /^#{1,6}\s*\[(구성요소|추가\s*구성)(?:\s*\([A-J](?:-\d+)?\))?\]\s*$/
+    const lines = text.split('\n')
+    const result = []
+    let i = 0
+
+    while (i < lines.length) {
+      const line = lines[i]
+      const match = line.match(fieldRe)
+      if (!match) {
+        result.push(line)
+        i += 1
+        continue
+      }
+
+      const label = normalizeFieldLabel(match[1])
+      const bodyLines = []
+      if (match[2].trim()) bodyLines.push(match[2].trim())
+      i += 1
+
+      while (i < lines.length) {
+        const current = lines[i]
+        const trimmed = current.trim()
+        if (!trimmed) {
+          i += 1
+          break
+        }
+        if (
+          fieldRe.test(current) ||
+          /^#{1,6}\s/.test(trimmed) ||
+          sectionHeaderRe.test(trimmed) ||
+          /^\([A-J](?:-\d+)?\)\s/.test(trimmed) ||
+          /^-\s*(유사점 요약|차이점|결론)\s*:/.test(trimmed)
+        ) {
+          break
+        }
+        bodyLines.push(trimmed)
+        i += 1
+      }
+
+      const body = bodyLines.join('\n')
+      result.push(
+        `<div class="${fieldClass(label)}"><div class="phase1-field-label">${escapeHtml(label)}</div>${body ? `<div class="phase1-field-body">${escapeHtml(body).replace(/\n/g, '<br />')}</div>` : ''}</div>`
+      )
+    }
+
+    return result.join('\n')
+  }
+
+  function normalizeDifferenceEntries(text) {
+    const lines = text.split('\n')
+    const result = []
+    let i = 0
+
+    while (i < lines.length) {
+      const line = lines[i]
+      if (!/^\([A-J](?:-\d+)?\)\s/.test(line.trim())) {
+        result.push(line)
+        i += 1
+        continue
+      }
+
+      const chunk = [line.trim()]
+      i += 1
+      while (i < lines.length) {
+        const current = lines[i]
+        const trimmed = current.trim()
+        if (!trimmed) {
+          i += 1
+          break
+        }
+        if (
+          /^\([A-J](?:-\d+)?\)\s/.test(trimmed) ||
+          /^\[결론\]$/.test(trimmed) ||
+          /^-?\s*(유사점 요약|차이점|결론)\s*:/.test(trimmed)
+        ) {
+          break
+        }
+        chunk.push(trimmed)
+        i += 1
+      }
+
+      const merged = chunk.join(' ').replace(/\s+/g, ' ').trim()
+      const withConclusionBreak = merged.replace(
+        /\s+((?:다만|따라서)\s+)/g,
+        '\n\n$1'
+      )
+      result.push(withConclusionBreak)
+      if (i < lines.length && lines[i].trim() === '') result.push('')
+    }
+
+    return result.join('\n')
+  }
+
+  function keepFirstComponentHeader(text) {
+    let seenComponentHeader = false
+    return text.split('\n').filter(line => {
+      if (!/^\s*\[(구성요소)\]\s*$/.test(line)) return true
+      if (!seenComponentHeader) {
+        seenComponentHeader = true
+        return true
+      }
+      return false
+    }).join('\n')
+  }
+
+  const judgmentPrefix = String.raw`\([A-J](?:-\d+)?\)(?:\s*(?:및|,)\s*\([A-J](?:-\d+)?\))*\s+(?:동일|실질적동일|실질적\s+동일|일부차이|일부\s+차이|일부유사|일부\s+유사|차이|대응\s+없음)(?:\s+\d+%)?`
   // CLI 에이전트가 새어 보낸 도구 호출 줄(update_topic(...) 등) 제거 — 캐시·히스토리 구보고서까지 정리
   md = md.replace(/^[ \t]*[a-z][a-z0-9_]*\([a-z_]+\s*=\s*['"].*\)[ \t]*-*[ \t]*$/gm, '')
   md = md.replace(
-    /^-\s*(유사점 요약|차이점|결합 논리 및 차이점 극복)\s*:\s*(.+)$/gm,
+    /([^\n])\s*(#{3,6}\s*\[(?:구성요소|추가\s*구성)(?:\s*\([A-J](?:-\d+)?\))?\])/g,
+    '$1\n\n$2'
+  )
+  md = md.replace(/^(#{3,6})(?=\[(?:구성요소|추가\s*구성))/gm, '$1 ')
+  md = md.replace(
+    /^#{1,6}\s*(\[(?:구성요소|추가\s*구성)(?:\s*\([A-J](?:-\d+)?\))?\])\s*$/gm,
+    '$1'
+  )
+  md = keepFirstComponentHeader(md)
+  md = normalizePhase1Fields(md)
+  md = md.replace(
+    /([^\n])\s+(-\s*(유사점 요약|차이점|결론)\s*:)/g,
+    '$1\n\n$2'
+  )
+  md = md.replace(
+    /^-\s*(유사점 요약|차이점|결론)\s*:\s*(.+)$/gm,
     (_, label, body) => {
       const heading =
         label === '유사점 요약'
           ? '[유사점]'
           : label === '차이점'
             ? '[차이점]'
-            : '[결합 논리]'
+            : '[결론]'
       return `${heading}\n\n${body.trim()}`
     }
   )
   md = md.replace(
-    /([^\n])\n(-\s*(유사점 요약|차이점|결합 논리 및 차이점 극복)\s*:)/g,
+    /([^\n])\n(-\s*(유사점 요약|차이점|결론)\s*:)/g,
     '$1\n\n$2'
+  )
+  md = md.replace(
+    /([^\n])\s+(대응 이유\s*:)/g,
+    '$1\n\n$2'
+  )
+  md = md.replace(
+    /([^\n])\n(\([A-J](?:-\d+)?\))/g,
+    '$1\n\n$2'
+  )
+  md = md.replace(
+    /^(\([A-J](?:-\d+)?\)(?:\s*(?:및|,)\s*\([A-J](?:-\d+)?\))*\s+(?:동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음)(?:\s+\d+%)?)\s+(\S.*)$/gm,
+    (_, judgment, body) => `${judgment}\n\n${body}`
+  )
+  md = normalizeDifferenceEntries(md)
+  md = md.replace(
+    /\s+((?:다만|따라서)\s+)/g,
+    '\n\n$1'
   )
   const lines = md.split('\n')
   const result = []
@@ -246,7 +563,12 @@ function preprocessReport(md) {
     result.push(line)
     if (isJudgment && i < lines.length - 1 && lines[i + 1] !== '') result.push('')
   }
-  return result.join('\n')
+  return sanitizeReportText(result.join('\n'))
+}
+
+function preprocessPhase1Report(md) {
+  const hiddenHeadingRe = /^\s*(?:#{1,6}\s*)?\[(?:구성요소|추가\s*구성)(?:\s*\([A-J](?:-\d+)?\))?\]\s*$/gm
+  return preprocessReport(String(md || '').replace(hiddenHeadingRe, ''))
 }
 
 // ── [확장 포인트 1] 청구항 헤더 패턴 ─────────────────────────────────────────
@@ -365,13 +687,48 @@ function splitPhases(md) {
   }
 }
 
+function splitPhase2Sections(md) {
+  if (!md) return null
+  const trimmed = md.trim()
+  const compositionMarker = '[구성대비]'
+  const judgmentMarker = '[종합 판단]'
+  const rejectedMarker = '## 관련도 A 인용발명'
+  const rejectedIdx = trimmed.indexOf(rejectedMarker)
+  const phase2Only = rejectedIdx === -1 ? trimmed : trimmed.slice(0, rejectedIdx).trimEnd()
+  const compositionIdx = phase2Only.indexOf(compositionMarker)
+  const judgmentIdx = phase2Only.indexOf(judgmentMarker)
+  if (compositionIdx === -1 || judgmentIdx === -1 || judgmentIdx <= compositionIdx) return null
+
+  const header = phase2Only.slice(0, compositionIdx).trim()
+  const headerLines = header.split('\n').map(line => line.trim()).filter(Boolean)
+  const phaseTitleLine = headerLines.find(line => /^#\s*\[Phase\s*2\]/i.test(line)) || ''
+  const inventionHeaderLine = headerLines.find(line => /^\[.+\]$/.test(line) && !/^\[Phase\s*2\]$/i.test(line)) || ''
+  const phaseTitle = phaseTitleLine.replace(/^#\s*\[Phase\s*2\]\s*/i, '').trim()
+  const inventionHeader = inventionHeaderLine.replace(/^\[|\]$/g, '').trim()
+
+  return {
+    header,
+    phaseTitle,
+    inventionHeader,
+    compositionBody: phase2Only.slice(compositionIdx + compositionMarker.length, judgmentIdx).trim(),
+    judgmentBody: phase2Only.slice(judgmentIdx + judgmentMarker.length).trim(),
+    rejectedBody: rejectedIdx === -1 ? '' : trimmed.slice(rejectedIdx + rejectedMarker.length).trim(),
+  }
+}
+
 // ── 히스토리 로드/저장 헬퍼 ──────────────────────────────────────────────────
 function loadHistory() {
-  try { return JSON.parse(localStorage.getItem('aria_history') || '[]') }
+  try {
+    return JSON.parse(localStorage.getItem('aria_history') || '[]')
+      .map(item => ({ ...item, report: sanitizeReportText(item.report || '') }))
+  }
   catch { return [] }
 }
 function saveHistory(list) {
-  localStorage.setItem('aria_history', JSON.stringify(list))
+  localStorage.setItem(
+    'aria_history',
+    JSON.stringify(list.map(item => ({ ...item, report: sanitizeReportText(item.report || '') })))
+  )
 }
 
 function formatDate(iso) {
@@ -404,8 +761,8 @@ function HistoryPanel({ history, onSelect, onDelete, onClearLocal, onClearAll, o
         </div>
 
         {/* 전체 삭제 분할 */}
-        {history.length > 0 && (
-          <div className="px-4 py-2 border-b flex flex-col gap-1.5">
+        <div className="px-4 py-2 border-b flex flex-col gap-1.5">
+          {history.length > 0 && (
             <button
               onClick={onClearLocal}
               className="w-full text-xs text-gray-600 hover:text-gray-800 border border-gray-200 rounded-lg py-1.5 hover:bg-gray-50 transition font-medium"
@@ -413,15 +770,15 @@ function HistoryPanel({ history, onSelect, onDelete, onClearLocal, onClearAll, o
             >
               목록만 전체 삭제
             </button>
-            <button
-              onClick={onClearAll}
-              className="w-full text-xs text-red-500 hover:text-red-700 border border-red-200 rounded-lg py-1.5 hover:bg-red-50 transition font-medium"
-              title="히스토리 목록을 비우고 서버의 업로드 파일 및 보고서도 모두 삭제합니다."
-            >
-              서버 데이터 포함 전체 삭제
-            </button>
-          </div>
-        )}
+          )}
+          <button
+            onClick={onClearAll}
+            className="w-full text-xs text-red-500 hover:text-red-700 border border-red-200 rounded-lg py-1.5 hover:bg-red-50 transition font-medium"
+            title="히스토리 목록을 비우고 서버의 업로드 파일 및 보고서도 모두 삭제합니다."
+          >
+            서버 데이터 포함 전체 삭제
+          </button>
+        </div>
 
         {/* 목록 */}
         <div className="flex-1 overflow-y-auto py-2">
@@ -543,10 +900,23 @@ export default function App() {
 
   // 히스토리 목록 및 서버 데이터까지 전체 삭제
   async function clearHistoryWithServer() {
-    const jobIds = [...new Set(history.map(h => h.jobId).filter(Boolean))]
-    await Promise.allSettled(jobIds.map(id => deleteJob(id)))
+    await deleteAllJobs()
     setHistory([])
     localStorage.removeItem('aria_history')
+    setJobId(null)
+    setPriorReady(false)
+    setPriorFiles([])
+    setClaims([])
+    setClaimText('')
+    setClaimNumber(1)
+    setReport('')
+    setReportTab('phase1')
+    setUsedInventions([])
+    setAllReports({})
+    setActiveClaimNumView(null)
+    setContextClaims([])
+    setUseCtx(true)
+    setError('')
     addLog('[히스토리] 히스토리 목록 및 연관된 서버 데이터를 모두 삭제했습니다.')
   }
 
@@ -579,10 +949,11 @@ export default function App() {
   }
 
   async function loadHistoryItem(item) {
-    setReport(item.report)
+    const cleanReport = sanitizeReportText(item.report)
+    setReport(cleanReport)
     setReportTab('phase1')
     setUsedInventions(item.usedInventions || [])
-    setAllReports({ [item.claimNumber]: { report_md: item.report, usedInventions: item.usedInventions || [] } })
+    setAllReports({ [item.claimNumber]: { report_md: cleanReport, usedInventions: item.usedInventions || [] } })
     setActiveClaimNumView(item.claimNumber)
     setClaimNumber(item.claimNumber)
     setClaimText(item.claimTextPreview)
@@ -682,9 +1053,14 @@ export default function App() {
           cancelRef.current.reject = reject
           const es = streamReport(jobId, claim.claim_number, {
             onLog: msg => addLog(msg),
-            onStreamChunk: chunk => setReport(prev => prev + chunk),
+            onStreamChunk: chunk => setReport(prev => sanitizeReportText(prev + chunk)),
+            onPhase1: data => {
+              setReport(sanitizeReportText(data.phase1_md || ''))
+              setUsedInventions(data.used_inventions || [])
+            },
             onDone: async data => {
-              setReport(data.report_md)
+              const cleanReport = sanitizeReportText(data.report_md)
+              setReport(cleanReport)
               setUsedInventions(data.used_inventions || [])
               if (data.timings) {
                 const order = ['comparison', 'citation chain', 'quote verification', 'phase1', 'phase2', 'finalize', 'total']
@@ -697,7 +1073,7 @@ export default function App() {
               setAllReports(prev => ({
                 ...prev,
                 [claim.claim_number]: {
-                  report_md: data.report_md,
+                  report_md: cleanReport,
                   usedInventions: data.used_inventions || []
                 }
               }))
@@ -706,7 +1082,7 @@ export default function App() {
                 jobId: jobId,
                 claimNumber: claim.claim_number,
                 claimTextPreview: text.slice(0, 100),
-                report: data.report_md,
+                report: cleanReport,
                 usedInventions: data.used_inventions || [],
                 createdAt: new Date().toISOString(),
               })
@@ -764,14 +1140,15 @@ export default function App() {
               addLog(`경고: 청구항 ${claim.claim_number} 보고서가 누락되었습니다.`)
               continue
             }
-            setReport(r.report_md)
+            const cleanReport = sanitizeReportText(r.report_md)
+            setReport(cleanReport)
             setReportTab('phase1')
             setUsedInventions(r.used_inventions || [])
             setActiveClaimNumView(claim.claim_number)
             setAllReports(prev => ({
               ...prev,
               [claim.claim_number]: {
-                report_md: r.report_md,
+                report_md: cleanReport,
                 usedInventions: r.used_inventions || [],
               },
             }))
@@ -780,7 +1157,7 @@ export default function App() {
               jobId: jobId,
               claimNumber: claim.claim_number,
               claimTextPreview: text.slice(0, 100),
-              report: r.report_md,
+              report: cleanReport,
               usedInventions: r.used_inventions || [],
               createdAt: new Date().toISOString(),
             })
@@ -1029,7 +1406,7 @@ export default function App() {
                     key={num}
                     onClick={() => {
                       const r = allReports[num]
-                      setReport(r.report_md)
+                      setReport(sanitizeReportText(r.report_md))
                       setUsedInventions(r.usedInventions)
                       setReportTab('phase1')
                       setActiveClaimNumView(Number(num))
@@ -1117,6 +1494,7 @@ export default function App() {
                 // Phase 2 생성 중일 때 탭 전환하면 로딩 표시
                 const isPhase2 = reportTab === 'phase2'
                 const content = isPhase2 ? phase2 : phase1
+                const phase2Sections = isPhase2 ? splitPhase2Sections(content) : null
                 // Phase 2 탭인데 아직 내용 없으면 생성 중 메시지
                 if (isPhase2 && !phase2) {
                   return (
@@ -1128,31 +1506,71 @@ export default function App() {
                 }
                 return (
                   <>
-                    {/* 구성대비에 사용된 인용발명 표시 */}
-                    {usedInventions.length > 0 && (
-                      <div className="mb-5 flex flex-wrap items-center gap-2 px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl">
-                        <span className="text-xs font-semibold text-slate-500 shrink-0 mr-1">구성대비 인용발명</span>
-                        {usedInventions.map((inv, i) => (
-                          <span
-                            key={i}
-                            className="inline-flex items-center gap-1.5 text-sm bg-white border border-blue-200 text-blue-800 rounded-lg px-3 py-1.5 shadow-sm"
+                    {isPhase2 && phase2Sections ? (
+                      <>
+                        {usedInventions.length > 0 && (
+                          <section className="mb-5 rounded-2xl border border-slate-200 bg-slate-50 shadow-sm">
+                            <div className="border-b border-slate-200 px-5 py-4">
+                              {phase2Sections.phaseTitle && (
+                                <p className="text-lg font-bold tracking-tight text-slate-900">{phase2Sections.phaseTitle}</p>
+                              )}
+                              {phase2Sections.inventionHeader && (
+                                <p className="mt-1 text-sm font-semibold text-slate-600">{phase2Sections.inventionHeader}</p>
+                              )}
+                            </div>
+                            <div className="flex flex-wrap gap-2 px-5 py-4">
+                              {usedInventions.map((inv, i) => (
+                                <span
+                                  key={i}
+                                  className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm"
+                                >
+                                  <span className="text-base font-bold text-slate-800">{inv.name}</span>
+                                  <span className="text-slate-300">:</span>
+                                  <span className="font-medium text-slate-600">{inv.filename}</span>
+                                </span>
+                              ))}
+                            </div>
+                          </section>
+                        )}
+                        <Phase2SectionCard title="[구성대비]" body={phase2Sections.compositionBody} />
+                        <Phase2SectionCard title="[종합 판단]" body={phase2Sections.judgmentBody} />
+                        {phase2Sections.rejectedBody && (
+                          <Phase2SectionCard title="관련도 A 인용발명" body={phase2Sections.rejectedBody} />
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        {/* 구성대비에 사용된 인용발명 표시 */}
+                        {usedInventions.length > 0 && (
+                          <section className="mb-5 rounded-2xl border border-slate-200 bg-slate-50 shadow-sm">
+                            <div className="border-b border-slate-200 px-5 py-4">
+                              <p className="text-lg font-bold tracking-tight text-slate-900">구성요소 대비</p>
+                            </div>
+                            <div className="flex flex-wrap gap-2 px-5 py-4">
+                              {usedInventions.map((inv, i) => (
+                                <span
+                                  key={i}
+                                  className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm"
+                                >
+                                  <span className="text-base font-bold text-slate-800">{inv.name}</span>
+                                  <span className="text-slate-300">:</span>
+                                  <span className="font-medium text-slate-600">{inv.filename}</span>
+                                </span>
+                              ))}
+                            </div>
+                          </section>
+                        )}
+                        <div className="report-content phase1-report-content prose max-w-none">
+                          <ReactMarkdown
+                            remarkPlugins={[remarkGfm]}
+                            rehypePlugins={[rehypeRaw]}
+                            components={{ p: ReportParagraph, h3: Phase1H3, li: Phase1ListItem }}
                           >
-                            <span className="text-base font-bold text-blue-700">{inv.name}</span>
-                            <span className="text-slate-400">:</span>
-                            <span className="text-slate-600 font-medium">{inv.filename}</span>
-                          </span>
-                        ))}
-                      </div>
+                            {preprocessPhase1Report(content)}
+                          </ReactMarkdown>
+                        </div>
+                      </>
                     )}
-                    <div className="report-content prose max-w-none">
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm]}
-                        rehypePlugins={[rehypeRaw]}
-                        components={{ p: ReportParagraph, h3: Phase1H3, li: Phase1ListItem }}
-                      >
-                        {preprocessReport(content)}
-                      </ReactMarkdown>
-                    </div>
                   </>
                 )
               })() : (

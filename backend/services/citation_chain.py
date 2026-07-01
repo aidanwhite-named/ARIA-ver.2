@@ -478,6 +478,60 @@ def _compute_supporting_evidence_score(
     return score
 
 
+_CONTROL_CLUSTER_RE = re.compile(
+    r"(?:mode|control|controller|process|processing|determin|detect|decision|"
+    r"switch|select|convert|generate|output|adaptive|luminance|remosaic|"
+    r"binning|depth|제어|판단|검출|모드|처리|생성|출력|변환|선택|스위칭|적응)",
+    re.IGNORECASE,
+)
+_SENSOR_CLUSTER_RE = re.compile(
+    r"(?:sensor|pixel|array|filter|photodiode|image sensor|센서|픽셀|어레이|필터|포토다이오드)",
+    re.IGNORECASE,
+)
+_SIGNAL_CLUSTER_RE = re.compile(
+    r"(?:signal|data|readout|sampling|demultiplex|map|신호|데이터|샘플링|역다중화|맵)",
+    re.IGNORECASE,
+)
+_MECHANICAL_CLUSTER_RE = re.compile(
+    r"(?:motor|wheel|gear|shaft|hinge|구동축|기어|휠|모터|힌지)",
+    re.IGNORECASE,
+)
+_IO_CLUSTER_RE = re.compile(
+    r"(?:display|transmit|receive|interface|memory|storage|표시|송신|수신|인터페이스|메모리|저장)",
+    re.IGNORECASE,
+)
+
+
+def _infer_element_cluster(text: str) -> str:
+    compact = " ".join((text or "").split())
+    if not compact:
+        return "generic"
+    if _CONTROL_CLUSTER_RE.search(compact):
+        return "control"
+    if _SENSOR_CLUSTER_RE.search(compact):
+        return "sensor"
+    if _SIGNAL_CLUSTER_RE.search(compact):
+        return "signal"
+    if _MECHANICAL_CLUSTER_RE.search(compact):
+        return "mechanical"
+    if _IO_CLUSTER_RE.search(compact):
+        return "io"
+    return "generic"
+
+
+def _target_cluster_map(claims: List[ParsedClaim], targets: set[tuple[str, str]]) -> Dict[tuple[str, str], str]:
+    target_lookup = set(targets)
+    result: Dict[tuple[str, str], str] = {}
+    for claim in claims:
+        claim_key = str(claim.claim_number)
+        for element in claim.elements:
+            key = (claim_key, normalize_label(element.label))
+            if key not in target_lookup:
+                continue
+            result[key] = _infer_element_cluster(element.text or "")
+    return result
+
+
 def _cache_item(cache: Optional[Dict], claim_key: str, label: str) -> Optional[Dict]:
     items = (cache or {}).get(claim_key, [])
     if not isinstance(items, list):
@@ -831,6 +885,66 @@ def _score_secondary_candidate(
     return round(sub_score * 100, 2), detail
 
 
+def _score_secondary_candidate_v2(
+    cache: Optional[Dict],
+    primary_cache: Optional[Dict],
+    claims: List[ParsedClaim],
+    primary_gaps: set,
+    soft_gaps: set,
+    weights: Optional[Dict[tuple[str, str], int]] = None,
+) -> tuple[float, Dict]:
+    base_score, detail = _score_secondary_candidate(
+        cache,
+        primary_cache,
+        claims,
+        primary_gaps,
+        soft_gaps,
+        weights,
+    )
+    targets = primary_gaps | soft_gaps
+    if not cache or not targets:
+        return base_score, detail
+
+    denominator = 0.0
+    filled_target_count = 0
+    filled_target_weight = 0.0
+    filled_cluster_weights: Dict[str, float] = {}
+    target_clusters = _target_cluster_map(claims, targets)
+
+    for claim_key, label in targets:
+        base_weight = float((weights or {}).get((claim_key, label), 3))
+        if (claim_key, label) in soft_gaps and (claim_key, label) not in primary_gaps:
+            base_weight *= 0.65
+        denominator += base_weight
+
+        item = _cache_item(cache, claim_key, label)
+        judgment = item.get("judgment", "\ub300\uc751 \uc5c6\uc74c") if item else "\ub300\uc751 \uc5c6\uc74c"
+        sim = _similarity_for_judgment(judgment)
+        if sim < 0.35:
+            continue
+
+        filled_target_count += 1
+        filled_target_weight += base_weight
+        cluster = target_clusters.get((claim_key, label), "generic")
+        filled_cluster_weights[cluster] = filled_cluster_weights.get(cluster, 0.0) + base_weight
+
+    breadth = filled_target_weight / denominator if denominator else 0.0
+    cluster_consistency = 0.0
+    if filled_target_weight > 0 and filled_target_count >= 2:
+        cluster_consistency = max(filled_cluster_weights.values()) / filled_target_weight
+    single_feature_dominance_penalty = 0.0
+    if len(targets) >= 3 and filled_target_count <= 1 and base_score > 0:
+        single_feature_dominance_penalty = min(12.0, 8.0 + 0.06 * base_score)
+
+    adjusted_score = base_score + (8.0 * breadth) + (7.0 * cluster_consistency) - single_feature_dominance_penalty
+    enriched_detail = dict(detail)
+    enriched_detail["sub_score"] = round(adjusted_score / 100.0, 4)
+    enriched_detail["residual_breadth"] = round(breadth, 4)
+    enriched_detail["cluster_consistency"] = round(cluster_consistency, 4)
+    enriched_detail["single_feature_dominance_penalty"] = round(single_feature_dominance_penalty / 100.0, 4)
+    return round(adjusted_score, 2), enriched_detail
+
+
 def _combination_rationale_for(
     reason: Optional[str],
     candidate_types: Optional[List[str]] = None,
@@ -1123,7 +1237,7 @@ def build_citation_chain_from_comparisons(
         for i in range(num_docs):
             if i == primary_inv_idx:
                 continue
-            sub_score, sub_detail = _score_secondary_candidate(
+            sub_score, sub_detail = _score_secondary_candidate_v2(
                 caches[i],
                 caches[primary_inv_idx],
                 independent_claims,
