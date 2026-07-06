@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-from string import Template
 from typing import Dict, List, Optional
 
 from backend.models.schemas import (
@@ -76,21 +75,22 @@ DEFAULT_PHASE1_FORMAT = """\
   [한국어 원문인 경우] 원문 그대로 적고 단락/본문 위치를 병기
   [외국어 원문인 경우(일본어·중국어·영어 등)] 반드시 아래 2줄 구조 사용:
     한국어 직역 또는 준직역 문장
-    (단락 [XXXX] 또는 본문 N 페이지, "외국어 원문 발췌")
+    (단락 [XXXX] 또는 본문 N 페이지, "quote에 있는 원문 언어 그대로의 발췌")
+  [외국어 원문 추가 규칙] 괄호 안 따옴표의 원문 발췌는 중국어 문헌이면 중국어, 일본어 문헌이면 일본어, 영어 문헌이면 영어 그대로 적고 다른 언어로 바꾸지 않음
   [대응 없음인 경우] (인용발명 1에서 해당 구성 확인 불가)
 
 - 인용발명 대응 부분 요약:
 
-- 판단 이유:
+- 판단 이유: (판정명이나 퍼센트를 반복 설명하지 말고, 청구항 제한과 인용발명 대응 원문이 구조·기능·입력·출력·처리 조건 중 어느 점에서 대응되는지 또는 어느 핵심 제한이 빠져 대응이 불충분한지만 1~2문장으로 작성)
 
 
-### 종합 분석 요약
+[종합분석요약]
+
+- 결론: (1~2문장으로만 작성한다. 1문장째에는 핵심 일치 구성과 남는 차이를 바탕으로 최종 판단을 적고, 필요하면 2문장째에 추가 근거 필요 여부 또는 거절 근거 구성 가능 여부를 정리한다)
 
 - 유사점 요약: (1~2문장으로만 작성한다. 1문장째에는 핵심 일치 구성이 어디까지 확인되는지를 적고, 필요하면 2문장째에 그 의미를 정리한다)
 
-- 차이점: (차이점이 없으면 `없음`으로 적고, 차이점이 있으면 각 항목을 줄바꿈으로 구분하되 `[차이점 1]` 같은 소제목은 쓰지 않는다. 각 항목은 차이가 나는 청구항 제한 문언으로 시작하되 반드시 `구성 (알파벳)에 대해` 또는 `[청구항 제한]인 구성 (알파벳)에 대해`처럼 어느 구성요소의 차이인지 알파벳을 자연스럽게 포함한다. 대응 구절은 한국어 문헌이면 원문 그대로 적고 출처를 괄호로 병기하며, 외국어(일본어·중국어·영어 등) 문헌이면 1줄에 한국어 직역 또는 준직역문을 적고 다음 줄 괄호 안에 단락/본문 위치와 원문 발췌를 함께 적는다)
-
-- 결론: (1~2문장으로만 작성한다. 1문장째에는 핵심 일치 구성과 남는 차이를 바탕으로 최종 판단을 적고, 필요하면 2문장째에 추가 근거 필요 여부 또는 거절 근거 구성 가능 여부를 정리한다)"""
+- 차이점: (차이점이 없으면 `없음`으로 적고, 차이점이 있으면 각 항목을 줄바꿈으로 구분하되 `[차이점 1]` 같은 소제목은 쓰지 않는다. 각 항목은 차이가 나는 청구항 제한 문언으로 시작하되 반드시 `구성 (알파벳)에 대해` 또는 `[청구항 제한]인 구성 (알파벳)에 대해`처럼 어느 구성요소의 차이인지 알파벳을 자연스럽게 포함한다. 한국어 문헌은 원문 그대로 적고 출처를 괄호로 병기하며, 외국어 문헌은 한국어 직역 또는 준직역문 다음 괄호 안에 단락/본문 위치와 quote 원문을 원래 언어 그대로 병기한다)"""
 
 # Template B(복수 인용발명) Phase 1 전용 형식
 DEFAULT_PHASE1_FORMAT_COMBO = """\
@@ -104,71 +104,21 @@ DEFAULT_PHASE1_FORMAT_COMBO = """\
   [한국어 원문인 경우] 원문 그대로 적고 단락/본문 위치를 병기
   [외국어 원문인 경우(일본어·중국어·영어 등)] 반드시 아래 2줄 구조 사용:
     한국어 직역 또는 준직역 문장
-    (단락 [XXXX] 또는 본문 N 페이지, "외국어 원문 발췌")
+    (단락 [XXXX] 또는 본문 N 페이지, "quote에 있는 원문 언어 그대로의 발췌")
+  [외국어 원문 추가 규칙] 괄호 안 따옴표의 원문 발췌는 중국어 문헌이면 중국어, 일본어 문헌이면 일본어, 영어 문헌이면 영어 그대로 적고 다른 언어로 바꾸지 않음
 
 - 인용발명 대응 부분 요약:
 
-- 판단 이유:
+- 판단 이유: (판정명이나 퍼센트를 반복 설명하지 말고, 청구항 제한과 인용발명 1의 대응 원문이 구조·기능·입력·출력·처리 조건 중 어느 점에서 대응되는지 또는 어느 핵심 제한이 빠져 대응이 불충분한지만 1~2문장으로 작성)
 
 
-### 📊 종합 분석 요약
+[종합분석요약]
+
+- 결론: (1~2문장으로만 작성한다. 1문장째에는 핵심 일치 구성과 남는 차이를 바탕으로 최종 판단을 적고, 필요하면 2문장째에 문헌 근거의 부족 여부 또는 거절 근거 구성 가능 여부를 정리한다)
 
 - 유사점 요약: (1~2문장으로만 작성한다. 1문장째에는 핵심 일치 구성이 어디까지 확인되는지를 적고, 필요하면 2문장째에 그 의미를 정리한다)
 
-- 차이점: (각 항목은 줄바꿈으로 구분하되 `[차이점 1]`, `[차이점 2]` 같은 소제목은 쓰지 않는다. 각 항목은 차이가 나는 청구항 제한 문언으로 시작하되 반드시 `구성 (알파벳)에 대해` 또는 `[청구항 제한]인 구성 (알파벳)에 대해`처럼 어느 구성요소의 차이인지 알파벳을 자연스럽게 포함하고, 인용발명 1에 없는 부분이 인용발명 2의 어느 구성에 대응되는지, 그 구성의 대응 구절과 출처를 함께 적고, 왜 대응되는지와 결합 판단을 간결히 정리한다. 한국어 문헌은 원문 그대로 적고 출처를 괄호로 병기하며, 외국어(일본어·중국어·영어 등) 문헌은 1줄에 한국어 직역 또는 준직역문을 적고 다음 줄 괄호 안에 단락/본문 위치와 원문 발췌를 함께 적는다. 주지관용기술은 문헌 근거가 없는 차이점에만 최후 수단으로 사용. 독립항 결합형에서 `주지관용 구성 입증자료`로 표시된 예외적 제3문헌만 표시된 일반 구성의 입증자료로 제한한다)
-
-- 결론: (1~2문장으로만 작성한다. 1문장째에는 핵심 일치 구성과 남는 차이를 바탕으로 최종 판단을 적고, 필요하면 2문장째에 문헌 근거의 부족 여부 또는 거절 근거 구성 가능 여부를 정리한다)"""
-
-# Phase 2 제목 — "# [Phase 2]" 경계 마커 뒤에 붙는 문구 (시스템이 경계를 전담, 제목만 사용자 편집)
-DEFAULT_PHASE2_TITLE = "최종 보고서"
-
-# Phase 2 독립항 출력 양식 (LLM 없음, Python이 자리표시자를 채움)
-# 경계선("# [Phase 2] ...")은 시스템이 자동으로 붙이므로 본문 양식에는 포함하지 않는다.
-# 자리표시자: ${inv_header} ${components} ${similar} ${diff} ${conclusion}
-# - ${inv_header}  : [인용발명 1] 또는 [인용발명 1] [인용발명 2] 로 자동 치환
-# - ${components}  : (A) 동일 85% + 원문 발췌 블록 (구성요소별)
-# - ${similar}/${diff}/${conclusion} : Phase 1 종합 분석 요약에서 추출
-DEFAULT_PHASE2_FORMAT_SINGLE = """\
-${inv_header}
-
-[구성대비]
-
-${components}
-
-[종합 판단]
-
-[유사점]
-
-${similar}
-
-[차이점]
-
-${diff}
-
-[결론]
-
-${conclusion}"""
-
-DEFAULT_PHASE2_FORMAT_COMBO = """\
-${inv_header}
-
-[구성대비]
-
-${components}
-
-[종합 판단]
-
-[유사점]
-
-${similar}
-
-[차이점]
-
-${diff}
-
-[결론]
-
-${conclusion}"""
+- 차이점: (각 항목은 줄바꿈으로 구분하되 `[차이점 1]`, `[차이점 2]` 같은 소제목은 쓰지 않는다. 각 항목은 차이가 나는 청구항 제한 문언으로 시작하되 반드시 `구성 (알파벳)에 대해` 또는 `[청구항 제한]인 구성 (알파벳)에 대해`처럼 어느 구성요소의 차이인지 알파벳을 자연스럽게 포함한다. 인용발명 1에서 확인되지 않는 하위 제한, 인용발명 2 또는 주지관용 근거로 보완되는 범위, 그래도 남는 하위 제한 또는 추가 근거 필요성을 포함한다. 보조 문헌이 없으면 없다고만 적고 같은 의미를 반복하지 않는다. 결론 문장은 남는 차이가 통상적 치환·확장으로 해소되는지 또는 추가 문헌 근거가 필요한지를 자연스럽게 정리한다. 한국어 문헌은 원문 그대로 적고 출처를 괄호로 병기하며, 외국어 문헌은 한국어 직역 또는 준직역문 다음 괄호 안에 단락/본문 위치와 quote 원문을 원래 언어 그대로 병기한다. 주지관용기술은 문헌 근거가 없는 차이점에만 최후 수단으로 사용. 독립항 결합형에서 `주지관용 구성 입증자료`로 표시된 예외적 제3문헌만 표시된 일반 구성의 입증자료로 제한한다)"""
 
 DEFAULT_PHASE1_FORMAT_DEPENDENT = """\
 ### [추가 구성]
@@ -180,30 +130,20 @@ DEFAULT_PHASE1_FORMAT_DEPENDENT = """\
 - **인용발명** 대응 원문:
   [한국어 원문인 경우] 원문 그대로 적고 단락/본문 위치를 병기.
   [외국어 원문인 경우(일본어·중국어·영어 등)] 한국어 직역 또는 준직역 문장 다음 줄에 원문 발췌와 단락/본문 위치를 병기.
+  [외국어 원문 추가 규칙] 괄호 안 따옴표의 원문 발췌는 중국어 문헌이면 중국어, 일본어 문헌이면 일본어, 영어 문헌이면 영어 그대로 적고 다른 언어로 바꾸지 않음.
 
 - 인용발명 대응 부분 요약:
 
-- 판단 이유:
+- 판단 이유: (판정명이나 퍼센트를 반복 설명하지 말고, 추가 구성과 인용발명 대응 원문이 구조·기능·입력·출력·처리 조건 중 어느 점에서 대응되는지 또는 어느 핵심 제한이 빠져 대응이 불충분한지만 1~2문장으로 작성)
 
 
-### 종합 분석 요약
+[종합분석요약]
+
+- 결론: (추가 구성의 대응 강도와 남은 차이에 따라 거절 근거 구성 가능 여부를 중립적으로 작성)
 
 - 유사점 요약:
 
-- 차이점:
-
-- 결론: (추가 구성의 대응 강도와 남은 차이에 따라 거절 근거 구성 가능 여부를 중립적으로 작성)"""
-
-DEFAULT_PHASE2_FORMAT_DEPENDENT = """\
-종속항 ${claim_number}
-
-${review_intro}
-
-${analysis}
-
-${parent_basis}
-
-${conclusion}"""
+- 차이점:"""
 
 _BASE_SYSTEM = """당신은 대한민국 특허청 심사관 수준의 특허 분석 전문가입니다.
 
@@ -219,12 +159,9 @@ _BASE_SYSTEM = """당신은 대한민국 특허청 심사관 수준의 특허 �
 
 [인용 규칙]
 - 한국어 인용: 원문 그대로 기재 후 (단락 [XXXX]) 형식
-- 외국어 인용(일본어·중국어·영어 등 모든 외국어) — 2줄 구조를 반드시 지킬 것:
-  1줄: 한국어 직역 또는 준직역 (번역 생략 금지)
-  2줄: (단락 [XXXX] 또는 본문 N 페이지, "원문 영어 인용")
-  예시(비특허):
-  첫 번째 단계는 입력 이미지에서 장면 중첩을 찾는 대응 검색 단계로서 겹치는 이미지에서 동일한 점들의 투영을 식별한다.
-  (본문 2 페이지, "The first stage is correspondence search which finds scene overlap in the input images...")
+- 외국어 인용(일본어·중국어·영어 등 모든 외국어): 한국어 직역 또는 준직역 문장 다음 줄에 (단락 [XXXX] 또는 본문 N 페이지, "quote에 있는 원문 언어 그대로의 발췌") 형식
+- 괄호 안 따옴표의 원문 발췌는 중국어 문헌이면 중국어, 일본어 문헌이면 일본어, 영어 문헌이면 영어 그대로 적고 다른 언어로 바꾸지 말 것
+- 번역문은 발췌 부분의 직역 또는 준직역으로 작성하고, 요약·의역·평가를 섞지 말 것
 
 [출력 형식]
 - 마크다운으로 출력
@@ -261,56 +198,12 @@ def _build_context_block(prev_context: Optional[List[Dict]]) -> str:
         "",
     ]
     for entry in prev_context:
-        lines.append(f"=== 청구항 {entry['claim_number']} 분석 결과 (Phase 2 요약) ===")
-        lines.append(entry.get("phase2_summary", "(요약 없음)"))
+        lines.append(f"=== 청구항 {entry['claim_number']} 분석 결과 요약 ===")
+        lines.append(entry.get("report_summary", "(요약 없음)"))
         lines.append("")
     lines.append("─" * 60)
     lines.append("")
     return "\n".join(lines)
-
-
-def _combination_rationale_text(chain_info: Optional[Dict]) -> str:
-    if not chain_info:
-        return ""
-    rationale = chain_info.get("combination_rationale") or {}
-    label = rationale.get("label", "")
-    type_code = rationale.get("type", "")
-    description = rationale.get("description", "")
-    warnings = rationale.get("warnings") or []
-    lines = []
-    if label or type_code:
-        rationale_label = label or type_code
-        lines.append(f"결합 논리 유형: {rationale_label}".strip())
-    if description:
-        lines.append(f"판단 취지: {description}")
-    for warning in warnings:
-        lines.append(f"주의: {warning}")
-    conventional_support = chain_info.get("conventional_support") or {}
-    if conventional_support:
-        mapping = chain_info.get("doc_name_mapping", {})
-        doc_idx = conventional_support.get("doc_idx")
-        doc_name = (
-            mapping.get(str(doc_idx), f"인용발명 {int(doc_idx) + 1}")
-            if doc_idx is not None else "추가 문헌"
-        )
-        labels = ", ".join(f"({label})" for label in conventional_support.get("labels", []))
-        if conventional_support.get("position") == 3:
-            lines.append(
-                f"예외적 제3 인용발명 역할: {doc_name}은 {labels or '일반 구성'}의 "
-                "주지관용성을 입증하는 자료로만 사용합니다."
-            )
-        else:
-            lines.append(
-                f"주지관용 구성의 문헌 근거: {doc_name}은 {labels or '일반 구성'}의 "
-                "통상적 채용을 뒷받침하는 자료입니다."
-            )
-        lines.append("역할 제한: 이 문헌을 핵심 기술사상이나 새로운 상호작용의 보완 근거로 확대하지 않습니다.")
-    common_knowledge = chain_info.get("common_general_knowledge") or []
-    if common_knowledge:
-        labels = ", ".join(f"({item.get('label', '')})" for item in common_knowledge)
-        lines.append(f"문헌 없는 주지관용 검토 대상: {labels}")
-        lines.append("문헌 근거 없이 주지관용이라고 단정하지 말고, 통상적 기능·단순 결합 가능성과 추가 입증 필요 여부를 구분합니다.")
-    return "\n".join(lines).strip()
 
 
 def _conventional_policy_prompt_block(chain_info: Optional[Dict]) -> str:
@@ -340,20 +233,6 @@ def _conventional_policy_prompt_block(chain_info: Optional[Dict]) -> str:
         f"{policy_text}\n"
         "주지관용 구성은 핵심 차이점과 분리하여 작성하고, 단순 결합 이상의 새로운 작용효과를 추정하지 마십시오.\n\n"
     )
-
-
-def _strip_internal_scoring_notes(text: str) -> str:
-    """Remove internal scoring/debug rationale from user-facing reports."""
-    if not text:
-        return text
-    cleaned_lines = []
-    for line in text.splitlines():
-        if re.search(r"SubScore|score_detail|gap_fill|quote_explicitness|reportability", line, re.IGNORECASE):
-            continue
-        if re.search(r"공백/약점\s*보완도|발췌\s*근거\s*명시성|보고서\s*작성\s*용이성", line):
-            continue
-        cleaned_lines.append(line)
-    return "\n".join(cleaned_lines).strip()
 
 
 def _format_citation_location(match: ElementMatch, prior_docs: List[ExtractedDocument]) -> str:
@@ -388,10 +267,6 @@ def _format_evidence_lines(match: ElementMatch, prior_docs: List[ExtractedDocume
                 location = f" (단락 {chunk_id})"
         lines.append(f"{indent}- {label}: {quote}{location}")
     return lines if len(lines) > 1 else []
-
-
-def _has_citation_location_text(text: str) -> bool:
-    return bool(re.search(r'\((?:단락|문단|본문)\s*(?:\[[^\]]+\]|[^\)]*페이지)', text or ""))
 
 
 def _combination_rationale_prompt_block(chain_info: Optional[Dict]) -> str:
@@ -438,10 +313,51 @@ def sanitize_report_status_icons(text: str) -> str:
     return cleaned
 
 
+def polish_phase1_summary_text(text: str) -> str:
+    """Make LLM-generated summary prose less template-like without changing findings."""
+    polished = str(text or "")
+    polished = polished.replace(
+        "다만 이 구성에 대한 직접적인 대응 관계를 보완할 보조 인용발명은 기재되어 있지 않습니다.",
+        "이 구성의 직접적인 대응 관계를 보완할 보조 인용발명도 확인되지 않습니다.",
+    )
+    polished = polished.replace(
+        "다만 인용발명 1로도 확인되지 않는 하위 제한은 충족하지 못합니다.",
+        "인용발명 1에서 확인되지 않은 하위 제한도 여전히 남아 있습니다.",
+    )
+    polished = polished.replace(
+        "다만 인용발명 2로도 확인되지 않는 하위 제한은 충족하지 못합니다.",
+        "인용발명 2로도 확인되지 않는 하위 제한은 여전히 남아 있습니다.",
+    )
+    polished = re.sub(
+        r"(?m)^이는\s+(.+?)\s*부재함을 의미합니다\.\n"
+        r"인용발명 1에서 확인되지 않은 하위 제한도 여전히 남아 있습니다\.",
+        r"따라서 \1 부재하고, 인용발명 1에서 확인되지 않은 하위 제한도 여전히 남아 있습니다.",
+        polished,
+    )
+    polished = re.sub(
+        r"(?m)^이는\s+(.+?)\s*부재함을 의미합니다\.\n"
+        r"인용발명 2로도 확인되지 않는 하위 제한은 여전히 남아 있습니다\.",
+        r"따라서 \1 부재하고, 인용발명 2로도 확인되지 않는 하위 제한은 여전히 남아 있습니다.",
+        polished,
+    )
+    polished = re.sub(
+        r"(?m)^다만\s+(인용발명\s+\d+에는\s+\".+?\"이라는 내용이 기재되어 있습니다)",
+        r"\1",
+        polished,
+    )
+    polished = re.sub(
+        r"(?m)^따라서\s+(.+?)\s+통상의 기술자가 추가 근거 없이 용이하게 도출할 수 있는지 검토가 필요합니다\.",
+        r"따라서 \1 추가 문헌 근거 없이 통상의 기술자가 용이하게 도출할 수 있는지는 별도로 검토해야 합니다.",
+        polished,
+    )
+    return polished
+
+
 def _dedupe_phase1_sections(phase1_md: str) -> str:
     """Phase 1 LLM 출력에서 반복된 구성요소 섹션을 제거한다 (첫 번째 등장만 유지)."""
     sections = re.split(r'\n(?=###\s)', "\n" + phase1_md.strip())
     seen_labels: set = set()
+    seen_unlabeled_component = False
     seen_summary: bool = False
     kept: list = []
     for sec in sections:
@@ -458,161 +374,20 @@ def _dedupe_phase1_sections(phase1_md: str) -> str:
                 label_m = re.search(r'^\(([A-J](?:-\d+)?)\)', sec, re.MULTILINE)
                 label = label_m.group(1) if label_m else None
             if not label:
+                if not seen_unlabeled_component:
+                    seen_unlabeled_component = True
+                    kept.append(sec)
                 continue
             if label not in seen_labels:
                 seen_labels.add(label)
                 kept.append(sec)
-        elif '종합 분석 요약' in header:
+        elif re.search(r'종합\s*분석\s*요약|종합분석요약', header):
             if not seen_summary:
                 seen_summary = True
                 kept.append(sec)
         else:
             kept.append(sec)
     return "\n\n".join(kept)
-
-
-# Phase 1 판정 라인 파싱용 — 구/신 포맷 모두 허용
-_SIM_LABELS = r'(?:실질적\s*동일|실질적동일|일부\s*유사|일부유사|일부\s*차이|일부차이|대응\s*없음|대응없음|동일|차이)'
-_EMOJI_RE = re.compile(
-    "["
-    "\U0001F000-\U0001FAFF"
-    "\U00002600-\U000027BF"
-    "️‍"
-    "]"
-)
-
-
-def _normalize_phase1_judgment(judgment: str, percent: str) -> str:
-    normalized = re.sub(r'\s+', '', judgment or '')
-    if normalized == '대응없음':
-        normalized = '차이'
-    if normalized in {'동일', '실질적동일', '일부차이', '일부유사', '차이'}:
-        return normalized
-    pm = re.search(r'(\d+)\s*%', percent or '')
-    score = int(pm.group(1)) if pm else None
-    if score is None:
-        return normalized
-    if score >= 100:
-        return '동일'
-    if score >= 95:
-        return '실질적동일'
-    if score >= 85:
-        return '일부유사'
-    if score >= 75:
-        return '일부차이'
-    return '차이'
-
-
-def _extract_similarity(sec: str) -> tuple:
-    """Phase 1 구성요소 섹션에서 판정 라벨과 퍼센트를 추출한다."""
-    m = re.search(r'유사도\s*\*{0,2}\s*[:：]\s*([^\n]+)', sec)
-    if m:
-        raw = m.group(1)
-    else:
-        hm = re.search(r'^\(([A-Ja-j](?:-\d+)?)\)\s+([^\n]+)', sec, re.MULTILINE)
-        if hm:
-            raw = hm.group(2)
-        else:
-            header = sec.split('\n', 1)[0]
-            hm = re.search(r'\([A-Ja-j](?:-\d+)?\)\]?\s+([^\n]+)', header)
-            raw = hm.group(1) if hm else ""
-
-    cleaned = re.sub(r'<[^>]+>', '', raw)   # HTML 태그 제거
-    cleaned = cleaned.replace('*', '')       # 마크다운 볼드 제거
-    cleaned = _EMOJI_RE.sub('', cleaned)     # 이모지 제거
-    cleaned = cleaned.replace('[', '').replace(']', '')
-
-    jm = re.search(_SIM_LABELS, cleaned)
-    judgment = _normalize_phase1_judgment(jm.group(0).strip() if jm else "", "")
-
-    pm = re.search(r'\d+\s*%\s*(?:이상|이하|내외|정도)?', cleaned)
-    percent = re.sub(r'\s+', '', pm.group(0)) if pm else ""
-    judgment = _normalize_phase1_judgment(judgment, percent)
-    return judgment, percent
-
-
-def _extract_component_field(sec: str, field_names: list[str]) -> str:
-    if not sec:
-        return ""
-    joined = "|".join(field_names)
-    pattern = (
-        rf'-\s*\*{{0,2}}\s*(?:{joined})\s*\*{{0,2}}\s*:\s*(.+?)'
-        rf'(?=\n\s*-\s*\*{{0,2}}\s*(?:청구항\s*구성|인용발명\s*\*{{0,2}}\s*대응\s*원문|인용발명\s*\*{{0,2}}\s*원문|'
-        rf'인용발명\s*대응\s*부분\s*요약|판단\s*이유|유사도|차이점)'
-        rf'|\n\s*#{{1,6}}\s|\n\s*📊|\Z)'
-    )
-    match = re.search(pattern, sec, re.DOTALL)
-    return match.group(1).strip() if match else ""
-
-
-def _build_phase2_summary_fallback(components: list[dict]) -> tuple[str, str, str]:
-    if not components:
-        return "", "", ""
-
-    strong_judgments = {"동일", "실질적동일"}
-    partial_judgments = {"일부유사", "일부차이"}
-    weak_judgments = {"일부차이", "일부유사", "차이", "대응 없음"}
-
-    strong_labels = [f"({comp['label']})" for comp in components if comp.get("judgment") in strong_judgments]
-    partial_labels = [f"({comp['label']})" for comp in components if comp.get("judgment") in partial_judgments]
-    weak_components = [comp for comp in components if comp.get("judgment") in weak_judgments]
-
-    similar = ""
-    if strong_labels:
-        similar = f"구성요소 {', '.join(strong_labels)}는 인용발명과 직접 대응되거나 실질적으로 동일한 구성이 확인됩니다."
-        if partial_labels:
-            similar += f" 구성요소 {', '.join(partial_labels)}도 기능 또는 기술적 취지 측면에서 일부 유사성이 확인됩니다."
-    elif partial_labels:
-        similar = f"구성요소 {', '.join(partial_labels)}를 중심으로 기능 또는 기술적 취지가 일부 대응됩니다."
-
-    if not similar:
-        similar = "직접 대응되거나 실질적으로 동일한 구성이 확인되지 않습니다."
-
-    diff_blocks: list[str] = []
-    for comp in weak_components:
-        reason = re.sub(r'\s+', ' ', comp.get("reason", "")).strip()
-        if not reason:
-            reason = "인용발명에서 직접 대응되는 기재를 확인하지 못했습니다."
-        sentences = re.split(r'(?<=[.!?다])\s+', reason)
-        lead = sentences[0].strip() if sentences else reason
-        tail = " ".join(sentence.strip() for sentence in sentences[1:] if sentence.strip())
-        block = f"({comp['label']}) {lead}"
-        if tail:
-            block += f"\n다만 {tail}"
-        diff_blocks.append(block.strip())
-    diff = "\n\n".join(diff_blocks) if diff_blocks else "없음"
-
-    if weak_components:
-        weak_labels = ", ".join(f"({comp['label']})" for comp in weak_components)
-        conclusion = f"구성요소 {weak_labels}에서 남는 차이가 있어 추가 보완 근거나 결합 논리 검토가 필요합니다."
-    elif strong_labels:
-        conclusion = "핵심 구성 전반이 인용발명에서 확인되어 거절 근거 구성이 가능합니다."
-    else:
-        conclusion = "일부 대응 구성은 확인되나 최종 판단을 위해 추가 검토가 필요합니다."
-
-    return similar, diff, conclusion
-
-
-async def generate_independent_phase2(
-    phase1_md: str,
-    claim: ParsedClaim,
-    matches: List[ElementMatch],
-    prior_docs: List[ExtractedDocument],
-    chain_info: Optional[Dict],
-    settings: Settings,
-) -> str:
-    """Phase 2만 생성 (분리 호출용). Phase 1 결과를 받아 최종 보고서 작성."""
-    # 결합(Template B) 여부는 인용 체인이 결정한다(total 길이). 체인이 없을 때만
-    # 구성요소 귀속(any idx>0)으로 추정한다. — 주인용발명이 doc 0이 아니어도 정확.
-    if chain_info:
-        needs_combination = len(chain_info.get("total", [])) > 1
-    else:
-        needs_combination = any(m.cited_invention_index > 0 for m in matches)
-
-    if needs_combination:
-        return await _generate_template_b_phase2(phase1_md, claim, matches, prior_docs, chain_info, settings)
-    else:
-        return await _generate_template_a_phase2(phase1_md, claim, chain_info, settings)
 
 
 async def generate_independent_phase1_streaming(
@@ -777,480 +552,6 @@ def _make_phase1_prompt(
     )
 
 
-def _parse_phase1(phase1_md: str) -> dict:
-    """Phase 1 마크다운에서 Phase 2 조립에 필요한 데이터를 추출한다 (LLM 없음)."""
-    components: list = []
-    summary_similar = ""
-    summary_diff = ""
-    summary_combination = ""
-    conclusion = ""
-
-    # 종합 분석 요약 헤더가 ### 없이(또는 다른 헤더 레벨로) 출력되는 경우를 보정해
-    # 섹션 분리(### 기준)가 항상 성립하도록 한다.
-    phase1_md = re.sub(
-        r'(?m)^[ \t]*#{0,6}[ \t]*(?:📊[ \t]*)?종합\s*분석\s*요약[^\n]*$',
-        '### 📊 종합 분석 요약',
-        phase1_md,
-    )
-
-    raw_sections = re.split(r'\n(?=###\s)', "\n" + phase1_md.strip())
-
-    for sec in raw_sections:
-        sec = sec.strip()
-        if not sec:
-            continue
-        header_line = sec.split('\n', 1)[0].strip()
-
-        # ── 구성요소 섹션 ──────────────────────────────────────────────────────
-        m = re.match(r'###\s+\[?(?:구성요소|추가\s*구성)(?:\s+\(([A-J](?:-\d+)?)\))?\]?', header_line)
-        if not m:
-            m = re.search(r'^\(([A-J](?:-\d+)?)\)', sec, re.MULTILINE)
-        if m:
-            label = m.group(1) if m.lastindex else None
-            if not label:
-                label_m = re.search(r'^\(([A-J](?:-\d+)?)\)', sec, re.MULTILINE)
-                label = label_m.group(1) if label_m else None
-            if not label:
-                continue
-
-            judgment, percent = _extract_similarity(sec)
-
-            # 대응 원문은 단락을 그대로 발췌하므로, 다음 '필드 라벨'이나 섹션 경계가
-            # 나오기 전까지 전부 캡처한다. (발췌 내부의 '- ' 줄에서 잘리지 않도록)
-            # 대응 원문 추출 — LLM이 다양한 bold/축약 형식으로 출력해도 캡처
-            # 지원 형식: "- **인용발명** 대응 원문:", "- **인용발명 대응 원문:**",
-            #           "- 인용발명 대응 원문:", "- **인용발명 원문:**", "- 인용발명 원문:"
-            _QUOTE_PATTERNS = [
-                # 표준: - **인용발명** 대응 원문: / - 인용발명 대응 원문:
-                r'-\s*\*{0,2}\s*인용발명\s*\*{0,2}\s*대응\s*원문\s*\*{0,2}\s*:\s*(.+?)',
-                # bold 통합: - **인용발명 대응 원문:**
-                r'-\s*\*{1,2}\s*인용발명\s*대응\s*원문\s*\*{1,2}\s*:\s*(.+?)',
-                # 축약: - 인용발명 원문: / - **인용발명 원문:**
-                r'-\s*\*{0,2}\s*인용발명\s*\*{0,2}\s*원문\s*\*{0,2}\s*:\s*(.+?)',
-            ]
-            _QUOTE_END = (
-                r'(?='
-                r'\n\s*-\s*\*{0,2}\s*(?:유사도|판단\s*이유|차이점|청구항\s*구성|인용발명\s*대응\s*부분)'
-                r'|\n\s*#{1,6}\s'
-                r'|\n\s*📊'
-                r'|\Z'
-                r')'
-            )
-            quote_m = None
-            for _qpat in _QUOTE_PATTERNS:
-                quote_m = re.search(_qpat + _QUOTE_END, sec, re.DOTALL)
-                if quote_m:
-                    break
-            quote = quote_m.group(1).strip() if quote_m else ""
-
-            claim_config = _extract_component_field(sec, ["청구항\\s*(?:추가\\s*)?구성"])
-            reason = _extract_component_field(sec, ["판단\\s*이유"])
-            components.append({
-                "label": label,
-                "judgment": judgment,
-                "percent": percent,
-                "claim_config": claim_config,
-                "quote": quote,
-                "reason": reason,
-            })
-
-        # ── 종합 분석 요약 섹션 ───────────────────────────────────────────────
-        elif '종합 분석 요약' in header_line:
-            for _sim_pat in [
-                r'-\s*유사점\s*요약\s*:\s*(.+?)(?=\n\s*-\s|\Z)',
-                r'-\s*유사점\s*:\s*(.+?)(?=\n\s*-\s|\Z)',
-            ]:
-                sim_m = re.search(_sim_pat, sec, re.DOTALL)
-                if sim_m:
-                    summary_similar = sim_m.group(1).strip()
-                    break
-
-            for _combo_pat in [
-                r'-\s*결합\s*논리(?:\s*및\s*차이점\s*극복)?\s*:\s*(.+?)(?=\n\s*-\s|\Z)',
-                r'-\s*차이점\s*극복\s*:\s*(.+?)(?=\n\s*-\s|\Z)',
-            ]:
-                combo_m = re.search(_combo_pat, sec, re.DOTALL)
-                if combo_m:
-                    summary_combination = combo_m.group(1).strip()
-                    break
-
-            for _diff_pat in [
-                r'-\s*차이점\s*:\s*(.+?)(?=\n\s*-\s|\Z)',
-            ]:
-                diff_m = re.search(_diff_pat, sec, re.DOTALL)
-                if diff_m:
-                    summary_diff = diff_m.group(1).strip()
-                    break
-
-            conc_m = re.search(
-                r'-\s*\*{0,2}\s*결론\s*\*{0,2}\s*:\s*(.+?)(?=\n\s*-\s|\Z)',
-                sec, re.DOTALL,
-            )
-            if conc_m:
-                conclusion = conc_m.group(1).strip()
-
-    # 결론 폴백: LLM이 `- 결론:` 라벨을 생략한 경우, Phase 1 전체에서 마지막 판단 문장을 사용
-    if not conclusion:
-        verdicts = re.findall(
-            r'[^\n.。]*쉽게\s*발명할\s*수\s*(?:있|없)습니다[.。]?',
-            phase1_md,
-        )
-        if verdicts:
-            conclusion = verdicts[-1].strip()
-
-    seen_labels: set = set()
-    deduped: list = []
-    for c in components:
-        if c["label"] not in seen_labels:
-            seen_labels.add(c["label"])
-            deduped.append(c)
-
-    fallback_similar, fallback_diff, fallback_conclusion = _build_phase2_summary_fallback(deduped)
-    if not summary_similar:
-        summary_similar = fallback_similar
-    if not summary_diff:
-        summary_diff = fallback_diff
-    if not conclusion:
-        conclusion = fallback_conclusion
-
-    return {
-        "components": deduped,
-        "summary_similar": summary_similar,
-        "summary_diff": summary_diff,
-        "summary_combination": summary_combination,
-        "conclusion": conclusion,
-    }
-
-
-def _normalize_bracketed_labels(text: str) -> str:
-    """Collapse accidental double brackets around report sub-headings like [[차이점 1]]."""
-    if not text:
-        return text
-    text = re.sub(
-        r'\[\[\s*((?:차이점|유사점|결합\s*논리)[^\]\n]*?)\s*\]\]',
-        r'[\1]',
-        text,
-    )
-    text = re.sub(
-        r'\[\[\s*((?:차이점|유사점|결합\s*논리)[^\]\n]*?)\s*\]',
-        r'[\1]',
-        text,
-    )
-    return text
-
-
-def _strip_temp_component_labels(text: str) -> str:
-    """Remove temporary component labels from user-facing narrative sentences."""
-    if not text:
-        return text
-    text = re.sub(
-        r'구성(?:요소)?\s*(?:\([A-J](?:-\d+)?\)\s*,\s*)*\([A-J](?:-\d+)?\)\s*의\s*',
-        '',
-        text,
-    )
-    text = re.sub(
-        r'(?m)^(\s*[-*]?\s*)'
-        r'(?:\([A-J](?:-\d+)?\)\s*,\s*)*\([A-J](?:-\d+)?\)\s+',
-        r'\1',
-        text,
-    )
-    text = re.sub(r'[ \t]{2,}', ' ', text)
-    return text.strip()
-
-
-def _normalize_difference_section(text: str) -> str:
-    """Normalize difference entries to the Phase 2 narrative format."""
-    if not text:
-        return text
-
-    def _normalize_difference_conclusion(gap: str, reason: str, conclusion: str) -> str:
-        gap = re.sub(r'\s+', ' ', gap).strip() or "해당 구성"
-        reason = re.sub(r'\s+', ' ', reason).strip()
-        conclusion = re.sub(r'\s+', ' ', conclusion).strip()
-
-        negative_cues = (
-            "명시되어 있지 않",
-            "명시하고 있지 않",
-            "개시되어 있지 않",
-            "확인되지 않",
-            "직접 대응되기 어렵",
-            "대응되기 어렵",
-            "도출되기 어렵",
-            "도출할 수 없",
-            "구체적 개시가 없",
-            "기재가 없",
-        )
-        generic_positive_cues = (
-            "거절 근거를 구성할 수 있습니다",
-            "보완되는지 결합 동기와 함께 판단할 수 있습니다",
-            "용이하게 도출될 수 있을 것으로 판단됩니다",
-            "대응될 수 있습니다",
-        )
-
-        has_negative_reason = any(cue in reason for cue in negative_cues)
-        has_generic_positive_conclusion = (
-            not conclusion or any(cue in conclusion for cue in generic_positive_cues)
-        )
-
-        if has_negative_reason and has_generic_positive_conclusion:
-            if "구체적 개시가 없" in reason:
-                return f"다만 {gap}에 대해서는 구체적 개시가 없다는 점에서 용이하게 도출하기 어렵다고 보여집니다."
-            return f"다만 {gap}에 대해서는 명시되어 있지 않다는 점에서 차이가 있습니다."
-
-        if not conclusion:
-            return "다만 인용발명 2의 기재만으로 해당 차이점이 바로 보완되었다고 단정하기는 어렵습니다."
-        if has_negative_reason and "추가 근거가 필요합니다" in conclusion:
-            return f"다만 {gap}에 대해서는 차이가 있습니다."
-        return conclusion
-
-    def _ensure_label_spacing(value: str) -> str:
-        return re.sub(
-            r'(?m)^((?:\([A-J](?:-\d+)?\)\s*,\s*)*\([A-J](?:-\d+)?\))(?!\s)',
-            r'\1 ',
-            value,
-        )
-
-    def _split_tail_conclusion(lines: list[str]) -> tuple[list[str], str]:
-        if len(lines) <= 1:
-            return lines, ""
-        tail = re.sub(r'\s+', ' ', lines[-1]).strip()
-        if re.match(r'^(?:다만|또한|한편|결국|따라서)\b', tail):
-            return lines[:-1], tail
-        return lines, ""
-
-    def _split_reason_tail(reason: str) -> tuple[str, str]:
-        reason = re.sub(r'\s+', ' ', reason).strip()
-        therefore_match = re.search(r'\s+(따라서|결국)\b', reason)
-        if therefore_match:
-            prefix = reason[:therefore_match.start()]
-            if re.search(r'\s+(?:다만|한편|또한)\b', prefix):
-                return prefix.strip(), reason[therefore_match.start() + 1:].strip()
-        tail_match = re.search(r'\s+(다만|또한|한편|결국|따라서)\b', reason)
-        if not tail_match:
-            return reason, ""
-        return reason[:tail_match.start()].strip(), reason[tail_match.start() + 1:].strip()
-
-    def _phase2_difference_sentence(
-        labels: str,
-        gap: str,
-        quote: str,
-        citation: str,
-        reason: str,
-        conclusion: str = "",
-    ) -> str:
-        gap = gap.strip()
-        quote = quote.strip()
-        citation = citation.strip()
-        reason = reason.strip()
-        conclusion = _normalize_difference_conclusion(gap, reason, conclusion)
-        if reason and not re.search(r'[.!?。]$', reason):
-            reason += "."
-        if conclusion and not re.search(r'[.!?。]$', conclusion):
-            conclusion += "."
-        gap_text = gap or "인용발명 1에 명시되지 않은 부분"
-        gap_text = re.sub(r'\s+', ' ', gap_text).strip()
-        gap_suffix = "" if gap_text.endswith("구성") else " 구성"
-        inv_match = re.match(r'^\s*(인용발명\s*\d+)\s*(?:에는|에는\s*)?', quote)
-        inv_name = inv_match.group(1).replace(" ", " ") if inv_match else "인용발명 2"
-        if inv_match:
-            quote = quote[inv_match.end():].strip()
-        quote = quote.strip().strip('"“”')
-        return (
-            f"{gap_text}{gap_suffix}에 대해 {inv_name}에는 "
-            f"\"{quote}\"이라는 내용이 기재되어 있으며{citation}, 이는 "
-            f"{reason}\n"
-            f"{conclusion}"
-        )
-
-    def _split_labeled_entries(lines: list[str]) -> list[list[str]]:
-        entries: list[list[str]] = []
-        current: list[str] = []
-        label_pat = r'^\((?:[A-J](?:-\d+)?)\)(?:\s*,\s*\([A-J](?:-\d+)?\))*\s+'
-
-        for line in lines:
-            if re.match(label_pat, line):
-                if current:
-                    entries.append(current)
-                current = [line]
-                continue
-            if current:
-                current.append(line)
-            else:
-                current = [line]
-
-        if current:
-            entries.append(current)
-        return entries
-
-    def _compact_body(body: str) -> str:
-        body = re.sub(r'\s+', ' ', body).strip()
-        if not body:
-            return body
-
-        label_match = re.match(
-            r'^(?P<labels>(?:\([A-J](?:-\d+)?\)\s*,\s*)*\([A-J](?:-\d+)?\))\s*(?P<body>.+)$',
-            body,
-        )
-        labels = label_match.group('labels') if label_match else ""
-        body_wo_label = label_match.group('body').strip() if label_match else body
-
-        primary_idx = body_wo_label.find("인용발명 1에 직접 개시되어 있지 않")
-        secondary_token = "인용발명 2에는"
-        secondary_idx = body_wo_label.find(secondary_token)
-        if primary_idx == -1 or secondary_idx == -1 or secondary_idx <= primary_idx:
-            return body
-        gap = body_wo_label[:primary_idx].strip().rstrip(', ')
-        gap = re.sub(r'\s+$', '', gap)
-        gap = re.sub(r'\s*[은는이가]?\s*$', '', gap)
-        rest = body_wo_label[secondary_idx + len(secondary_token):].strip()
-        citation_match = re.search(r'\((?:(?:문단|단락)\s*\[[^\]]+\]|본문\s*\d+\s*페이지)[^)]*\)', rest)
-        if not citation_match:
-            return body
-        quote = rest[:citation_match.start()].strip().rstrip(', ')
-        citation = citation_match.group(0).strip()
-        reason = rest[citation_match.end():].strip()
-        reason = re.sub(
-            r'^(?:하는\s*구성이\s*기재되어\s*(?:있으며|있고)|가\s*기재되어\s*(?:있으며|있고)|가\s*개시되어\s*(?:있으며|있고)|가\s*설명되어\s*(?:있으며|있고)|기재되어\s*(?:있으며|있고))\s*,?\s*',
-            '',
-            reason,
-        )
-        reason = re.sub(r'^이는\s*', '', reason)
-        reason = re.sub(r'청구항의\s*해당\s*차이\s*부분에\s*대응되는\s*내용으로\s*볼\s*수\s*있습니다\.?$', '청구항의 해당 차이 부분에 대응된다고 볼 수 있습니다.', reason)
-        reason = re.sub(r'로\s*볼\s*수\s*있습니다\.?$', '로 볼 수 있습니다.', reason)
-        reason, tail = _split_reason_tail(reason)
-        return _phase2_difference_sentence(labels, gap, quote, citation, reason, tail)
-
-    def _normalize_entry(lines: list[str]) -> str:
-        if not lines:
-            return ""
-        if len(lines) == 1:
-            single_line = _ensure_label_spacing(re.sub(r'\s+', ' ', lines[0]).strip())
-            return _compact_body(single_line)
-        if (
-            len(lines) >= 3
-            and "인용발명 1에 직접 개시되어 있지 않으나" in lines[0]
-            and "인용발명 2에는" in lines[1]
-            and re.search(r'\((?:(?:문단|단락)\s*\[[^\]]+\]|본문\s*\d+\s*페이지)[^)]*\)', lines[2])
-        ):
-            first_line = re.sub(r'\s+', ' ', lines[0]).strip()
-            label_match = re.match(r'^(?P<labels>(?:\([A-J](?:-\d+)?\)\s*,\s*)*\([A-J](?:-\d+)?\))\s*(?P<gap>.+?)은?\s*인용발명 1에 직접 개시되어 있지 않으나,?$', first_line)
-            if label_match:
-                quote_line = re.sub(r'^\s*인용발명\s*2에는\s*', '', re.sub(r'\s+', ' ', lines[1]).strip())
-                citation_line = re.sub(r'\s+', ' ', lines[2]).strip()
-                citation_match = re.search(r'\((?:(?:문단|단락)\s*\[[^\]]+\]|본문\s*\d+\s*페이지)[^)]*\)', citation_line)
-                if citation_match:
-                    quote = f"{quote_line} {citation_line[:citation_match.start()].strip()}".strip()
-                    quote = re.sub(r'\s+', ' ', quote).strip()
-                    reason_parts = [citation_line[citation_match.end():].strip()] + [re.sub(r'\s+', ' ', line).strip() for line in lines[3:]]
-                    reason = " ".join(part for part in reason_parts if part).strip()
-                    reason = re.sub(
-                        r'^(?:하는\s*구성이\s*기재되어\s*(?:있으며|있고)|가\s*기재되어\s*(?:있으며|있고)|가\s*개시되어\s*(?:있으며|있고)|가\s*설명되어\s*(?:있으며|있고)|기재되어\s*(?:있으며|있고))\s*,?\s*',
-                        '',
-                        reason,
-                    )
-                    reason = re.sub(r'^이는\s*', '', reason)
-                    reason = re.sub(r'청구항의\s*해당\s*차이\s*부분에\s*대응되는\s*내용으로\s*볼\s*수\s*있습니다\.?', '청구항의 해당 차이 부분에 대응된다고 볼 수 있습니다.', reason)
-                    reason = re.sub(r'로\s*볼\s*수\s*있습니다\.?$', '로 볼 수 있습니다.', reason)
-                    reason, tail = _split_reason_tail(reason)
-                    return _phase2_difference_sentence(
-                        label_match.group('labels'),
-                        label_match.group('gap').strip(),
-                        quote,
-                        citation_match.group(0).strip(),
-                        reason,
-                        tail,
-                    )
-        body_lines, conclusion = _split_tail_conclusion(lines)
-        body = _ensure_label_spacing(_compact_body(" ".join(body_lines)))
-        body_label_match = re.match(
-            r'^(?P<labels>(?:\([A-J](?:-\d+)?\)\s*,\s*)*\([A-J](?:-\d+)?\))\s*(?P<rest>.+)$',
-            body,
-        )
-        if body_label_match:
-            labels = body_label_match.group('labels')
-            rest = body_label_match.group('rest')
-            primary_idx = rest.find("인용발명 1에 직접 개시되어 있지 않")
-            secondary_token = "인용발명 2에는"
-            secondary_idx = rest.find(secondary_token)
-            citation_match = re.search(r'\((?:(?:문단|단락)\s*\[[^\]]+\]|본문\s*\d+\s*페이지)[^)]*\)', rest)
-        else:
-            labels = ""
-            primary_idx = -1
-            secondary_idx = -1
-            citation_match = None
-        if body_label_match and primary_idx > 0 and secondary_idx > primary_idx and citation_match:
-            gap = rest[:primary_idx].strip().rstrip(", ")
-            gap = re.sub(r'\s*[은는이가]?\s*$', '', gap)
-            quote = rest[secondary_idx + len(secondary_token):citation_match.start()].strip().rstrip(", ")
-            reason = rest[citation_match.end():].strip()
-            reason = re.sub(
-                r'^(?:하는\s*구성이\s*기재되어\s*(?:있으며|있고)|가\s*기재되어\s*(?:있으며|있고)|가\s*개시되어\s*(?:있으며|있고)|가\s*설명되어\s*(?:있으며|있고)|기재되어\s*(?:있으며|있고))\s*,?\s*',
-                '',
-                reason,
-            )
-            reason = re.sub(r'^이는\s*', '', reason)
-            reason = re.sub(r'청구항의\s*해당\s*차이\s*부분에\s*대응되는\s*내용으로\s*볼\s*수\s*있습니다\.?', '청구항의 해당 차이 부분에 대응된다고 볼 수 있습니다.', reason)
-            reason = re.sub(r'로\s*볼\s*수\s*있습니다\.?$', '로 볼 수 있습니다.', reason)
-            reason = re.sub(r'청구항의\s*해당\s*차이\s*부분에\s*대응되는\s*내용으로\s*볼\s*수\s*있습니다\.?$', '청구항의 해당 차이 부분에 대응된다고 볼 수 있습니다.', reason)
-            reason, tail = _split_reason_tail(reason)
-            body = _phase2_difference_sentence(
-                labels,
-                gap,
-                quote,
-                citation_match.group(0).strip(),
-                reason,
-                tail,
-            )
-        if body and conclusion:
-            return f"{body}\n{conclusion}"
-        if body:
-            return body
-        return conclusion
-
-    text = _ensure_label_spacing(_normalize_bracketed_labels(text))
-    text = re.sub(r'(?m)^\s*\[차이점\s*\d+\]\s*', '', text).strip()
-    blocks = re.split(r'\n\s*\n', text)
-    normalized_blocks: list[str] = []
-    for block in blocks:
-        lines = [line.strip() for line in block.splitlines() if line.strip()]
-        if not lines:
-            continue
-        for entry_lines in _split_labeled_entries(lines):
-            normalized = _normalize_entry(entry_lines)
-            if normalized:
-                normalized_blocks.append(normalized)
-    return _strip_temp_component_labels("\n\n".join(normalized_blocks).strip())
-
-
-def _filter_summary_diff_by_component_judgments(text: str, components: list[dict]) -> str:
-    """Drop summary difference entries for components already judged identical in substance."""
-    if not text:
-        return text
-
-    no_diff_labels = {
-        comp["label"]
-        for comp in components
-        if comp.get("judgment") in {"동일", "실질적 동일", "실질적동일"}
-    }
-    if not no_diff_labels:
-        return text
-
-    stripped = text.strip()
-    if stripped == "없음":
-        return stripped
-
-    blocks = [block.strip() for block in re.split(r"\n\s*\n", stripped) if block.strip()]
-    kept_blocks: list[str] = []
-    for block in blocks:
-        first_line = block.splitlines()[0].strip()
-        labels = re.findall(r"\(([A-J](?:-\d+)?)\)", first_line)
-        if labels and all(label in no_diff_labels for label in labels):
-            continue
-        kept_blocks.append(block)
-
-    return "\n\n".join(kept_blocks) if kept_blocks else "없음"
-
-
 def _has_common_knowledge_basis(chain_info: Optional[Dict]) -> bool:
     if not chain_info:
         return False
@@ -1260,7 +561,7 @@ def _has_common_knowledge_basis(chain_info: Optional[Dict]) -> bool:
     )
 
 
-def _format_phase2_inv_header(
+def format_rejection_basis_header(
     inv1_name: str,
     inv2_name: str = "",
     inv3_name: str = "",
@@ -1268,229 +569,15 @@ def _format_phase2_inv_header(
     chain_info: Optional[Dict] = None,
 ) -> str:
     has_common_knowledge = _has_common_knowledge_basis(chain_info) or bool(inv3_name)
+    primary_name = (inv1_name or "인용발명 1").strip()
+    secondary_name = (inv2_name or "").strip()
     if is_combo and inv2_name:
         if has_common_knowledge:
-            return "[인용발명 1과 2의 결합 및 주지관용(진보성)]"
-        return "[인용발명 1과 2의 결합(진보성)]"
+            return f"[{primary_name}과 {secondary_name}의 결합 및 주지관용(진보성)]"
+        return f"[{primary_name}과 {secondary_name}의 결합(진보성)]"
     if has_common_knowledge:
-        return "[인용발명 1 + 주지관용(진보성)]"
-    return "[인용발명 단독(신규성)]"
-
-
-def _finalize_phase2_difference_layout(text: str) -> str:
-    if not text:
-        return text
-
-    pattern = re.compile(
-        r'(?P<labels>(?:\([A-J](?:-\d+)?\)\s*,\s*)*\([A-J](?:-\d+)?\))\s*'
-        r'(?P<gap>.+?)은?\s*인용발명\s*1에\s*직접\s*개시되어\s*있지\s*않(?:으나|고),\s*'
-        r'인용발명\s*2에는\s*(?P<quote>.+?)\s*'
-        r'(?P<citation>\((?:(?:문단|단락)\s*\[[^\]]+\]|본문\s*\d+\s*페이지)[^)]*\))\s*'
-        r'(?P<reason_tail>(?:하는\s*구성이\s*기재되어\s*(?:있으며|있고)|가\s*기재되어\s*(?:있으며|있고)|가\s*개시되어\s*(?:있으며|있고)|가\s*설명되어\s*(?:있으며|있고)|기재되어\s*(?:있으며|있고))\s*,?\s*.+?)(?=\n(?:다만|또한|한편|결국)\b|\n\[결론\]|\Z)',
-        re.DOTALL,
-    )
-
-    def repl(match: re.Match) -> str:
-        reason = match.group('reason_tail').strip()
-        reason = re.sub(
-            r'^(?:하는\s*구성이\s*기재되어\s*(?:있으며|있고)|가\s*기재되어\s*(?:있으며|있고)|가\s*개시되어\s*(?:있으며|있고)|가\s*설명되어\s*(?:있으며|있고)|기재되어\s*(?:있으며|있고))\s*,?\s*',
-            '',
-            reason,
-        )
-        reason = re.sub(r'^이는\s*', '', reason)
-        reason = re.sub(r'청구항의\s*해당\s*차이\s*부분에\s*대응되는\s*내용으로\s*볼\s*수\s*있습니다\.?$', '청구항의 해당 차이 부분에 대응된다고 볼 수 있습니다.', reason)
-        reason = re.sub(r'로\s*볼\s*수\s*있습니다\.?$', '로 볼 수 있습니다.', reason)
-        gap = match.group('gap').strip()
-        conclusion = _normalize_difference_conclusion(gap, reason, "")
-        if reason and not re.search(r'[.!?。]$', reason):
-            reason += "."
-        if conclusion and not re.search(r'[.!?。]$', conclusion):
-            conclusion += "."
-        quote = match.group('quote').strip()
-        citation = match.group('citation').strip()
-        quote = quote.strip().strip('"“”')
-        gap_text = re.sub(r'\s+', ' ', gap).strip()
-        gap_suffix = "" if gap_text.endswith("구성") else " 구성"
-        return (
-            f"{gap_text}{gap_suffix}에 대해 인용발명 2에는 "
-            f"\"{quote}\"이라는 내용이 기재되어 있으며{citation}, 이는 {reason}\n"
-            f"{conclusion}"
-        )
-
-    return pattern.sub(repl, text)
-
-
-def _build_phase2_markdown(
-    phase1_md: str,
-    claim_number: int,
-    inv1_name: str,
-    inv2_name: str = "",
-    inv3_name: str = "",
-    is_combo: bool = False,
-    combination_rationale: str = "",
-    components_override: str = "",
-    chain_info: Optional[Dict] = None,
-    settings: Optional[Settings] = None,
-) -> str:
-    """Phase 1 파싱 결과를 Phase 2 양식에 채워 조립한다 (LLM 호출 없음).
-
-    반환값은 본문만 포함하며, 경계선("# [Phase 2] 제목")은 호출부(analyze.py)가 붙인다.
-    양식은 backend/prompts 파일을 우선 사용하고, 파일이 없으면 내장 기본값을 사용한다.
-    양식의 자리표시자를 Python이 치환한다:
-      ${inv_header} ${components} ${similar} ${combination_rationale} ${diff} ${conclusion}
-    각 구성요소 줄(동일 85% + 원문)은 코드가 생성한다.
-    """
-    phase1_md = _strip_internal_scoring_notes(phase1_md)
-    combination_rationale = _strip_internal_scoring_notes(combination_rationale)
-    data = _parse_phase1(phase1_md)
-
-    inv_header = _format_phase2_inv_header(
-        inv1_name,
-        inv2_name,
-        inv3_name,
-        is_combo=is_combo,
-        chain_info=chain_info,
-    )
-
-    if components_override.strip():
-        components_block = components_override.strip()
-    else:
-        comp_lines: list = []
-        for comp in data["components"]:
-            sim = comp["judgment"]
-            sim = {
-                "실질적동일": "실질적 동일",
-                "일부차이": "일부 차이",
-                "일부유사": "일부 유사",
-            }.get(sim, sim)
-            if comp.get("percent"):
-                sim = f"{sim} {comp['percent']}".strip()
-            label = str(comp.get("label") or "").strip()
-            comp_lines.append(f"({label}) {sim}".strip() if label else sim.rstrip())
-            comp_lines.append("")
-            if comp["quote"]:
-                comp_lines.append(comp["quote"])
-            else:
-                comp_lines.append("(해당 인용발명에서 구성 확인 불가)")
-            comp_lines.append("")
-        components_block = "\n".join(comp_lines).strip()
-
-    fallback_similar, fallback_diff, fallback_conclusion = _build_phase2_summary_fallback(data["components"])
-
-    similar = data["summary_similar"] or fallback_similar or \
-        "※ Phase 1 탭의 [종합 분석 요약 — 유사점 요약] 항목을 참고하여 직접 작성하십시오."
-    diff = data["summary_diff"] or fallback_diff or \
-        "※ Phase 1 탭의 [종합 분석 요약 — 차이점 요약] 항목을 참고하여 직접 작성하십시오."
-    diff = _filter_summary_diff_by_component_judgments(
-        _normalize_difference_section(diff),
-        data["components"],
-    )
-    if fallback_diff not in {"", "없음"} and diff in {"", "없음"}:
-        diff = fallback_diff
-    if is_combo:
-        combination_rationale = ""
-    conclusion = data["conclusion"] or fallback_conclusion or (
-        "※ Phase 1 분석 결과에서 결론 항목을 확인할 수 없습니다. "
-        "Phase 1 탭의 종합 분석 요약을 참고하여 결론을 직접 작성하십시오."
-    )
-
-    # 양식: 폴더 txt → 내장 기본값
-    if is_combo:
-        tmpl = load_prompt("format_phase2_combo.txt", DEFAULT_PHASE2_FORMAT_COMBO)
-    else:
-        tmpl = load_prompt("format_phase2_single.txt", DEFAULT_PHASE2_FORMAT_SINGLE)
-
-    rendered = Template(tmpl).safe_substitute(
-        inv_header=inv_header,
-        components=components_block,
-        similar=similar,
-        combination_rationale=combination_rationale,
-        diff=diff,
-        conclusion=conclusion,
-    )
-    rendered = _normalize_bracketed_labels(_strip_internal_scoring_notes(rendered))
-    return _finalize_phase2_difference_layout(rendered)
-
-
-def _build_primary_phase2_components(
-    claim: ParsedClaim,
-    matches: List[ElementMatch],
-    prior_docs: List[ExtractedDocument],
-    primary_idx: int,
-    phase1_components: Optional[List[Dict]] = None,
-) -> str:
-    phase1_by_label = {
-        str(comp.get("label")): comp
-        for comp in (phase1_components or [])
-        if comp.get("label")
-    }
-    primary_by_label: Dict[str, ElementMatch] = {}
-    for match in matches:
-        if match.cited_invention_index != primary_idx:
-            continue
-        prev = primary_by_label.get(match.label)
-        if prev is None or _JUDGMENT_ORDER.get(match.judgment, 0) > _JUDGMENT_ORDER.get(prev.judgment, 0):
-            primary_by_label[match.label] = match
-
-    ordered_labels = [element.label for element in claim.elements]
-    for match in matches:
-        if match.label not in ordered_labels:
-            ordered_labels.append(match.label)
-
-    lines: list[str] = []
-    for label in ordered_labels:
-        match = primary_by_label.get(label)
-        parsed = phase1_by_label.get(label, {})
-        if match is None:
-            match = ElementMatch(
-                label=label,
-                found=False,
-                quote="",
-                chunk_id="",
-                judgment=parsed.get("judgment") or "대응 없음",
-                cited_invention_index=primary_idx,
-                similarity_reason="",
-            )
-        effective_judgment = parsed.get("judgment") or match.judgment
-        sim = {
-            "실질적동일": "실질적 동일",
-            "일부차이": "일부 차이",
-            "일부유사": "일부 유사",
-        }.get(effective_judgment, effective_judgment)
-        if parsed.get("percent"):
-            sim = f"{sim} {parsed['percent']}".strip()
-        label_text = f"({label}) " if label else ""
-        lines.append(f"{label_text}{sim}".strip())
-        lines.append("")
-        parsed_quote = (parsed.get("quote") or "").strip()
-        quote = parsed_quote or match.quote
-        if quote and effective_judgment not in NO_MATCH_LABELS:
-            lines.append(quote)
-            if not _has_citation_location_text(quote):
-                lines.append(_format_citation_location(match, prior_docs))
-        else:
-            lines.append("(인용발명 1에서 해당 구성 확인 불가)")
-        lines.append("")
-    return "\n".join(lines).strip()
-
-
-async def _generate_template_a_phase2(
-    phase1_md: str,
-    claim: ParsedClaim,
-    chain_info: Optional[Dict],
-    settings: Settings,
-) -> str:
-    """Phase 2 조립 (LLM 없음): Phase 1 파싱 → 마크다운 직접 구성"""
-    doc_name_mapping = chain_info.get("doc_name_mapping") if chain_info else None
-    primary_idx = chain_info.get("total", [0])[0] if chain_info else 0
-    inv1_name = doc_name_mapping.get(str(primary_idx), "인용발명 1") if doc_name_mapping else "인용발명 1"
-    return _build_phase2_markdown(
-        phase1_md,
-        claim.claim_number,
-        inv1_name,
-        chain_info=chain_info,
-        settings=settings,
-    )
+        return f"[{primary_name} + 주지관용(진보성)]"
+    return f"[{primary_name} 단독(신규성)]"
 
 
 def _make_phase1_a_prompt(
@@ -1515,56 +602,6 @@ def _make_phase1_b_prompt(
 ) -> str:
     return _make_phase1_prompt(claim, matches, prior_docs, chain_info, settings, prev_context,
                                combo=True, secondary_matches=secondary_matches)
-
-async def _generate_template_b_phase2(
-    phase1_md: str,
-    claim: ParsedClaim,
-    matches: List[ElementMatch],
-    prior_docs: List[ExtractedDocument],
-    chain_info: Optional[Dict],
-    settings: Settings,
-) -> str:
-    """Phase 2 보고서 생성 (LLM 작성, Template B): Phase 1 요약에서 최종 보고서 작성.
-
-    이 함수는 Phase 1의 분석 요약을 받아 최종 독립항 보고서를 작성한다. 작성 기준:
-    1) 구성대비 요약 내용의 구성 2개 인용발명 기반 작성
-    2) 인용발명별 발췌 내용의 정확한 출처 표기
-    3) 각 결합 논리 유형에 따른 진보성 판단 기준 적용.
-    """
-    doc_name_mapping = chain_info.get("doc_name_mapping") if chain_info else None
-    total_invs = chain_info.get("total", [0, 1]) if chain_info else [0, 1]
-    inv1_idx = total_invs[0]
-    inv2_idx = total_invs[1] if len(total_invs) > 1 else 1
-    inv3_idx = total_invs[2] if len(total_invs) > 2 else None
-    inv1_name = doc_name_mapping.get(str(inv1_idx), "인용발명 1") if doc_name_mapping else "인용발명 1"
-    inv2_name = doc_name_mapping.get(str(inv2_idx), "인용발명 2") if doc_name_mapping else "인용발명 2"
-    inv3_name = (
-        doc_name_mapping.get(str(inv3_idx), "인용발명 3")
-        if doc_name_mapping and inv3_idx is not None
-        else ("인용발명 3" if inv3_idx is not None else "")
-    )
-    combination_rationale = _combination_rationale_text(chain_info)
-    phase1_data = _parse_phase1(_strip_internal_scoring_notes(phase1_md))
-    components_override = _build_primary_phase2_components(
-        claim,
-        matches,
-        prior_docs,
-        inv1_idx,
-        phase1_components=phase1_data["components"],
-    )
-    return _build_phase2_markdown(
-        phase1_md,
-        claim.claim_number,
-        inv1_name,
-        inv2_name,
-        inv3_name,
-        is_combo=True,
-        combination_rationale=combination_rationale,
-        components_override=components_override,
-        chain_info=chain_info,
-        settings=settings,
-    )
-
 
 # ---------------------------------------------------------------------------
 # 신규성 부정 (차이점 없음)
@@ -1680,16 +717,6 @@ def _dependent_parent_context_status(
     )
 
 
-def _extract_dependent_conclusion(phase1_md: str) -> str:
-    """Extract the explicit Phase 1 conclusion without inventing a verdict."""
-    match = re.search(
-        r"(?ms)^\s*-\s*\*{0,2}(?:\uacb0\ub860|Conclusion)\*{0,2}\s*:\s*(.+?)"
-        r"(?=\n\s*-\s|\n\s*#{1,6}\s|\Z)",
-        phase1_md or "",
-    )
-    return match.group(1).strip() if match else ""
-
-
 def _meaningful_dependent_matches(
     matches: Optional[List[ElementMatch]],
     secondary_matches: Optional[List[ElementMatch]] = None,
@@ -1748,102 +775,6 @@ def _dependent_display_chain_info(
     return base
 
 
-def _clean_dependent_summary_text(text: str) -> str:
-    text = _normalize_bracketed_labels(_strip_internal_scoring_notes(text or "")).strip()
-    text = re.sub(r'(?m)^\s*\[[^\]\n]+\]\s*', '', text).strip()
-    return text
-
-
-def _fallback_claim_core(claim: ParsedClaim, label: str) -> str:
-    for element in claim.elements or []:
-        if element.label == label:
-            return element.text.strip()
-    return (claim.text or "").strip() or f"구성 {label}"
-
-
-def _korean_with_wa_gwa(text: str) -> str:
-    stripped = (text or "").rstrip()
-    if not stripped:
-        return "와"
-    ch = stripped[-1]
-    code = ord(ch)
-    if 0xAC00 <= code <= 0xD7A3:
-        return "과" if (code - 0xAC00) % 28 else "와"
-    return "와"
-
-
-def _build_dependent_phase2_analysis(
-    phase1_md: str,
-    claim: ParsedClaim,
-    current_inv_str: str,
-    fallback_conclusion: str,
-) -> str:
-    data = _parse_phase1(_strip_internal_scoring_notes(phase1_md))
-    components = data.get("components") or []
-    diff = _clean_dependent_summary_text(data.get("summary_diff") or "")
-    if not diff:
-        diff = "없음"
-
-    comp_lines: list[str] = ["### [추가 구성]", ""]
-    for comp in components:
-        sim = comp.get("judgment", "")
-        sim = {
-            "실질적동일": "실질적 동일",
-            "일부차이": "일부 차이",
-            "일부유사": "일부 유사",
-        }.get(sim, sim)
-        if comp.get("percent"):
-            sim = f"{sim} {comp['percent']}".strip()
-        label = str(comp.get("label") or "").strip()
-        header = f"({label}) {sim}".strip() if label else sim.strip()
-        comp_lines.append(header)
-        comp_lines.append("")
-        quote = (comp.get("quote") or "(해당 인용발명에서 추가 구성 확인 불가)").strip()
-        comp_lines.append("- 인용발명 대응 원문:")
-        comp_lines.extend(f"  {line}" if line else "" for line in quote.splitlines())
-        comp_lines.append("")
-
-    if not components:
-        comp_lines.append("※ Phase 1 추가 구성 대비 분석 결과를 확인할 수 없습니다.")
-        comp_lines.append("")
-
-    conclusion_basis = _clean_dependent_summary_text(data.get("conclusion") or fallback_conclusion)
-    if not conclusion_basis:
-        conclusion_basis = "부모 청구항의 판단과 함께 종합 검토가 필요합니다."
-
-    if components:
-        first = components[0]
-        claim_core = (first.get("claim_config") or _fallback_claim_core(claim, first["label"])).strip()
-    else:
-        claim_core = _fallback_claim_core(claim, "")
-
-    has_difference = diff not in {"", "없음"}
-    has_substantial_identity = any(
-        (c.get("judgment") or "").replace(" ", "") == "실질적동일"
-        for c in components
-    )
-    if has_difference:
-        relation = f"{_korean_with_wa_gwa(claim_core)} 차이가 있습니다. 구체적으로 {diff}"
-    elif has_substantial_identity:
-        relation = "에 실질적으로 동일하게 대응될 수 있습니다."
-    else:
-        relation = "에 대응될 수 있습니다."
-    relation_text = f"{claim_core}{relation}"
-
-    conclusion = (
-        f"청구항 {claim.claim_number}의 구성에 대해 {current_inv_str}에는 위 인용발명 대응 원문과 같은 내용이 기재되어 있으며, "
-        f"이는 청구항 {claim.claim_number}의 {relation_text}\n\n"
-        f"따라서 {conclusion_basis}"
-    )
-    return "\n".join(comp_lines).strip() + (
-        "\n\n### 종합 분석 요약\n\n"
-        "[차이점]\n\n"
-        f"{diff}\n\n"
-        "[결론]\n\n"
-        f"{conclusion}"
-    )
-
-
 async def generate_dependent_report(
 
     claim: ParsedClaim,
@@ -1878,11 +809,14 @@ async def generate_dependent_report(
     final_str = format_inv_list(total_invs, mapping) if total_invs else ("인용발명 1" if parent_available else "문헌 없음")
     added_inv_str = format_inv_list(added_invs, mapping) if added_invs else "없음"
     if display_chain and display_chain.get("coverage_complete") is False:
-        coverage_status = "일부 추가 구성 미대응"
+        if added_invs:
+            coverage_status = "부분 대응 — 새 인용발명이 추가 구성의 일부 기술적 특징을 보완하지만 차이가 남아 있습니다."
+        else:
+            coverage_status = "일부 추가 구성 미대응"
     else:
         coverage_status = "추가 구성이 모두 대응되었습니다."
 
-        added_doc = None
+    added_doc = None
     if added_invs and added_invs[0] < len(prior_docs):
         added_doc = prior_docs[added_invs[0]]
 
@@ -1909,113 +843,6 @@ async def generate_dependent_report(
         phase1_dep_fmt=phase1_dep_fmt,
     )
     return await call_ai(prompt, _build_system(settings, "dependent"), settings, agent="report")
-
-
-def generate_dependent_phase2(
-    phase1_md: str,
-    claim: ParsedClaim,
-    chain_info: Optional[Dict],
-    settings: Settings,
-    matches: Optional[List[ElementMatch]] = None,
-    secondary_matches: Optional[List[ElementMatch]] = None,
-) -> str:
-    """종속항 Phase 2 보고서 생성 (LLM 작성): Phase 1 분석 요약에서 최종 종속항 보고서 작성."""
-    display_chain = _dependent_display_chain_info(
-        chain_info,
-        matches=matches,
-        secondary_matches=secondary_matches,
-    )
-    parent_num = claim.parent_claim or 1
-    inherited_invs = display_chain.get("inherited", [0]) if display_chain else [0]
-    added_invs = display_chain.get("added", []) if display_chain else []
-    total_invs = display_chain.get("total", inherited_invs) if display_chain else inherited_invs
-    mapping = display_chain.get("doc_name_mapping") if display_chain else None
-    parent_available, parent_context_status = _dependent_parent_context_status(claim, display_chain)
-
-    inherited_str = format_inv_list(inherited_invs, mapping) if inherited_invs else ("인용발명 1" if parent_available else "없음 (부모항 미제공)")
-    current_inv_str = format_inv_list(added_invs, mapping) if added_invs else (inherited_str if parent_available else (format_inv_list(total_invs, mapping) if total_invs else "대응 문헌 없음"))
-    final_str = format_inv_list(total_invs, mapping) if total_invs else current_inv_str
-
-    if parent_available:
-        review_intro = (
-            f"제{parent_num}항에 있어서, 청구항 {claim.claim_number}의 추가 구성은 "
-            f"아래와 같이 {current_inv_str}에 의해 검토됩니다."
-        )
-        parent_basis = (
-            f"부모 청구항의 기존 대비에서 사용된 인용발명 조합은 {inherited_str}이며, "
-            f"청구항 {claim.claim_number}의 추가 구성까지 고려한 검토 조합은 {final_str}입니다."
-        )
-    else:
-        review_intro = (
-            f"청구항 {claim.claim_number}이 인용하는 제{parent_num}항은 입력 또는 이전 컨텍스트에서 "
-            f"확인되지 않아, '에 있어서' 뒤의 추가 기술 특징을 {current_inv_str}과 직접 대비합니다."
-        )
-        parent_basis = (
-            "확인되지 않은 부모 청구항의 실체나 거절이유는 추정하지 않고, "
-            f"청구항 {claim.claim_number}에 직접 기재된 추가 기술 특징만을 판단 대상으로 삼았습니다."
-        )
-    phase1_analysis = re.sub(
-        rf"(?m)^\s*###\s+청구항\s+{claim.claim_number}\s*$\n*",
-        "",
-        phase1_md.strip(),
-    ).strip()
-    if not phase1_analysis:
-        phase1_analysis = "※ Phase 1 추가 구성 대비 분석 결과를 확인할 수 없습니다."
-
-    coverage_incomplete = bool(
-        display_chain and display_chain.get("coverage_complete") is False
-    )
-    phase1_conclusion = _extract_dependent_conclusion(phase1_analysis)
-    conclusion = (
-        f"청구항 {claim.claim_number}의 최종 판단은 위 추가 구성 대비 결과와 부모 청구항의 "
-        f"판단을 함께 고려하여 검토할 필요가 있습니다. 검토 대상 인용발명 조합은 {final_str}입니다."
-    )
-    if not parent_available and phase1_conclusion:
-        conclusion = (
-            f"{phase1_conclusion} "
-            f"다만, 부모항 {parent_num}이 확인되지 않아 청구항 전체의 거절 근거 구성 가능 여부는 현재 정보만으로 단정하지 않습니다. 현재 정보만으로 판단할 수 없습니다."
-        )
-    elif not parent_available:
-        conclusion = (
-            f"청구항 {claim.claim_number}의 추가 기술 특징에 대한 대비 결과는 위와 같으나, "
-            f"인용하는 제{parent_num}항이 확인되지 않아 청구항 전체의 거절 근거 구성 가능 여부는 "
-            "현재 정보만으로 판단할 수 없습니다."
-        )
-    elif coverage_incomplete:
-        uncovered = "추가 구성" if display_chain.get("uncovered_labels") else "일부 추가 구성"
-        conclusion = (
-            f"청구항 {claim.claim_number}의 {uncovered}에 대해서는 부모 체인에 새 인용발명 "
-            "1개만 추가하는 범위에서 대응 근거가 완성되지 않으므로, 위 인용발명 조합만으로 "
-            "통상의 기술자가 쉽게 발명할 수 있다고 보기 어렵습니다."
-        )
-    elif phase1_conclusion:
-        conclusion = phase1_conclusion
-        conclusion = (
-            f"청구항 {claim.claim_number}의 최종 판단은 위 추가 구성 대비 결과와 부모 청구항의 "
-            f"판단을 함께 고려하여 검토할 필요가 있습니다. 검토 대상 인용발명 조합은 {final_str}입니다."
-        )
-
-    analysis = _build_dependent_phase2_analysis(
-        phase1_analysis,
-        claim,
-        current_inv_str,
-        conclusion,
-    )
-
-    tmpl = load_prompt("format_phase2_dependent.txt", DEFAULT_PHASE2_FORMAT_DEPENDENT)
-
-    return Template(tmpl).safe_substitute(
-        claim_number=str(claim.claim_number),
-        parent_num=str(parent_num),
-        parent_context_status=parent_context_status,
-        inherited_str=inherited_str,
-        current_inv_str=current_inv_str,
-        final_str=final_str,
-        review_intro=review_intro,
-        parent_basis=parent_basis,
-        analysis=analysis,
-        conclusion=conclusion,
-    )
 
 
 async def generate_dependent_reports_batch(
@@ -2045,7 +872,10 @@ async def generate_dependent_reports_batch(
         final_str = format_inv_list(total_invs, mapping) if total_invs else ("인용발명 1" if parent_available else "대응 문헌 없음")
         added_inv_str = format_inv_list(added_invs, mapping) if added_invs else "없음"
         if (chain_info or {}).get("coverage_complete") is False:
-            coverage_status = "대응 불충분 — 새 인용발명 1개만으로 커버되지 않은 추가 구성이 있습니다."
+            if added_invs:
+                coverage_status = "부분 대응 — 새 인용발명이 추가 구성의 일부 기술적 특징을 보완하지만 차이가 남아 있습니다."
+            else:
+                coverage_status = "대응 불충분 — 새 인용발명 1개만으로 커버되지 않은 추가 구성이 있습니다."
         else:
             coverage_status = "모든 추가 구성 대응 확인"
 
@@ -2286,19 +1116,25 @@ async def parse_manual_claim_locally(
     clean_text = claim_text.strip()
     inferred_parent = parent_claim
     if inferred_parent is None:
-        # 1차: 어미 패턴 정확 매칭 ("제N항에 있어서" / "제N항의")
-        m = re.search(r"제\s*(\d+)\s*항(?:에\s*있어서|의)", clean_text)
+        # 1차: 어미 패턴 정확 매칭 ("제N항에 있어서" / "청구항 N에 있어서" / "제N항의")
+        m = re.search(
+            r"(?:제\s*(\d+)\s*항|청구항\s*(\d+))"
+            r"(?:\s*(?:내지|또는|및)\s*(?:제\s*\d+\s*항|청구항\s*\d+|\d+))?"
+            r"(?:\s*중\s*어느\s*한\s*항)?"
+            r"(?:에\s*있어서|의)",
+            clean_text,
+        )
         if m:
-            candidate = int(m.group(1))
+            candidate = int(m.group(1) or m.group(2))
             if candidate != claim_number:
                 inferred_parent = candidate
 
     if inferred_parent is None:
-        # 2차: 어두 오타·생략 대비 — 앞부분 150자 안에 "제N항" + N < 현재 번호
+        # 2차: 어두 오타·생략 대비 — 앞부분 150자 안에 "제N항"/"청구항 N" + N < 현재 번호
         # finditer로 전체 후보를 보는 이유: "제10항. 제1항에 있이서…"처럼 자기 번호가
         # 맨 앞에 오면 re.search 첫 결과가 자기 자신(N == 현재)이라 조건에 걸린다.
-        for m2 in re.finditer(r"제\s*(\d+)\s*항", clean_text[:150]):
-            candidate = int(m2.group(1))
+        for m2 in re.finditer(r"(?:제\s*(\d+)\s*항|청구항\s*(\d+))", clean_text[:150]):
+            candidate = int(m2.group(1) or m2.group(2))
             if candidate < claim_number:
                 inferred_parent = candidate
                 break
@@ -2308,13 +1144,13 @@ async def parse_manual_claim_locally(
         # "제X항 [내지/또는/및 제Y항]을 포함하는/인용하는/에 따른" 형태로 참조하는 경우.
         # 독립항이 다른 청구항을 단순 언급하는 것과 구분하기 위해 의존 동사구를 필수로 요구한다.
         m3 = re.search(
-            r"제\s*(\d+)\s*항"
-            r"(?:\s*(?:내지|또는|및)\s*제\s*\d+\s*항)?"
+            r"(?:제\s*(\d+)\s*항|청구항\s*(\d+))"
+            r"(?:\s*(?:내지|또는|및)\s*(?:제\s*\d+\s*항|청구항\s*\d+|\d+))?"
             r"\s*(?:(?:을|를)\s*(?:포함|인용|청구|참조|기재)\s*(?:하는|하여|하고)?|에\s*따른|에\s*의한)",
             clean_text,
         )
         if m3:
-            candidate = int(m3.group(1))
+            candidate = int(m3.group(1) or m3.group(2))
             if candidate < claim_number:
                 inferred_parent = candidate
 
@@ -2543,6 +1379,12 @@ _SYSTEM_ENHANCE_CLAIM = """당신은 대한민국 특허 청구항 분석 전문
 4. 어미("특징으로 하는 장치/방법") → closing 보존
 5. 단어 하나짜리(프로세서, 메모리 등) → label="_"
 6. 이전 구성을 "상기 X"로 참조하는 구성 → "A-1", "B-1" 등 서브라벨
+7. 각 구성요소의 importance는 아래 기준으로 "5", "3", "2" 중 하나를 선택
+   - "5": 핵심 ★★★. 발명의 기술적 과제 해결수단, 신규·진보성 판단의 중심이 되는 구조/처리/조건/상호작용
+   - "3": 보조 ★★☆. 핵심 구성을 보조하거나 입출력·처리 흐름·동작 조건을 구체화하지만 단독 핵심은 아닌 구성
+   - "2": 관용 ★☆☆. 프로세서, 메모리, 통신부, 디스플레이, 저장부, 일반 센서처럼 통상적으로 부가되는 일반 구성
+8. 단순히 청구항 앞쪽에 나온다는 이유만으로 "5"를 주지 말고, 기술적 의미와 과제 해결 기여도를 기준으로 판단
+9. 서브구성은 부모 구성의 핵심 제한을 구체화하면 부모와 같은 중요도를 줄 수 있고, 단순 참조·부가 설명이면 "3"으로 둠
 
 출력 형식 (JSON):
 {
@@ -2649,12 +1491,7 @@ def _format_component_comparison(
         lines = [f"- {doc_name}: {match.judgment}"]
         lines.append(f"  {match.quote}")
         if match.chunk_id:
-            doc = prior_docs[match.cited_invention_index] if match.cited_invention_index < len(prior_docs) else None
-            if doc and doc.document_type == "non_patent":
-                anchor = match.chunk_id.replace("[P", "").split("-")[0] if "[P" in match.chunk_id else "?"
-                lines.append(f"  (본문 {anchor} 페이지)")
-            else:
-                lines.append(f"  (단락 {match.chunk_id})")
+            lines.append(f"  {_format_citation_location(match, prior_docs)}")
         lines.extend(_format_evidence_lines(match, prior_docs, indent="  "))
         return lines
 
@@ -2697,12 +1534,7 @@ def _format_component_comparison(
         if m.quote:
             lines.append(m.quote)
         if m.chunk_id:
-            doc = prior_docs[m.cited_invention_index] if m.cited_invention_index < len(prior_docs) else None
-            if doc and doc.document_type == "non_patent":
-                anchor = m.chunk_id.replace("[P", "").split("-")[0] if "[P" in m.chunk_id else "?"
-                lines.append(f'(본문 {anchor} 페이지)')
-            else:
-                lines.append(f"(단락 {m.chunk_id})")
+            lines.append(_format_citation_location(m, prior_docs))
         lines.extend(_format_evidence_lines(m, prior_docs))
         lines.append("")
     return "\n".join(lines)

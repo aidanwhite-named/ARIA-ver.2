@@ -34,7 +34,6 @@ from backend.models.schemas import (
 )
 from backend.paths import CASES_DIR, REPORTS_DIR, UPLOADS_DIR
 from backend.routers.settings import _load as load_settings
-from backend.services.rag_retriever import get_rag_runtime_status
 from backend.services import pdf_extractor
 from backend.services.ai_engine import call_ai
 from backend.services.ai_engine import kill_active_cli_procs
@@ -54,27 +53,23 @@ from backend.services.citation_extractor import (
     select_candidate_doc_indices_for_elements,
     verify_quotes,
 )
-from backend.services.gap_search import find_uncovered_elements, web_search_gap_documents
-from backend.services.prompt_loader import load_prompt, render_prompt
 from backend.services.reference_store import (
     save_case_artifacts_sqlite,
     save_reference_entries_sqlite,
 )
 from backend.services.report_generator import (
-    DEFAULT_PHASE2_TITLE,
     _dedupe_phase1_sections,
     _strip_agent_tool_calls,
-    build_rejected_inventions_section,
     detect_category_same_claims,
     enhance_claim_parsing_with_llm,
     enhance_purpose_effects_with_llm,
     generate_category_same_report,
-    generate_dependent_phase2,
     generate_dependent_report,
     generate_dependent_reports_batch,
     generate_independent_phase1_streaming,
-    generate_independent_phase2,
+    format_rejection_basis_header,
     parse_manual_claim_locally,
+    polish_phase1_summary_text,
     sanitize_report_status_icons,
 )
 
@@ -85,9 +80,13 @@ DOC_CACHE_DIR = UPLOADS_DIR / "_doc_cache"
 for _dir in (UPLOADS_DIR, REPORTS_DIR, CASES_DIR, DOC_CACHE_DIR):
     _dir.mkdir(exist_ok=True)
 
-_PHASE2_MARKER_RE = re.compile(r"^\s*#\s*\[Phase\s*2\][^\n]*\n+", re.IGNORECASE)
-_PHASE2_BOUNDARY_RE = re.compile(r"(?im)^\s*#\s*\[Phase\s*2\]")
-_BATCH_SPLIT_RE = re.compile(r"(?m)^\s*===\s*청구항\s*(\d+)\s*===\s*$")
+_LEGACY_FINAL_BOUNDARY_RE = re.compile(r"(?im)^\s*#\s*\[Phase\s*2\]")
+_REJECTION_BASIS_HEADER_RE = re.compile(
+    r"^\s*\[(?:인용발명\s*\d+\s*단독\(신규성\)|"
+    r"인용발명\s*\d+\s*\+\s*주지관용\(진보성\)|"
+    r"인용발명\s*\d+\s*과\s*인용발명\s*\d+\s*의\s*결합(?:\s*및\s*주지관용)?\(진보성\))\]"
+)
+_BATCH_SPLIT_RE = re.compile(r"(?m)^\s*(?:#{1,6}\s*)?===\s*청구항\s*(\d+)\s*===\s*$")
 
 
 def _ev(event: str, data: str | dict) -> dict:
@@ -148,24 +147,58 @@ async def _await_with_batch_status_heartbeat(
             task.cancel()
 
 
-def _phase2_boundary(settings) -> str:
-    title = DEFAULT_PHASE2_TITLE
-    return f"# [Phase 2] {title}"
-
-
-def _strip_phase2_marker(body: str) -> str:
-    return _PHASE2_MARKER_RE.sub("", body.lstrip(), count=1).lstrip()
-
-
-def _find_phase2_boundary(body: str) -> int:
-    match = _PHASE2_BOUNDARY_RE.search(body or "")
+def _find_legacy_final_boundary(body: str) -> int:
+    match = _LEGACY_FINAL_BOUNDARY_RE.search(body or "")
     return match.start() if match else -1
 
 
+def _phase1_only_report(body: str) -> str:
+    idx = _find_legacy_final_boundary(body)
+    if idx < 0:
+        return body
+    return body[:idx].rstrip()
+
+
+def _rejection_basis_header(chain_info, matches) -> str:
+    mapping = (chain_info or {}).get("doc_name_mapping", {})
+    total = list((chain_info or {}).get("total") or [])
+    if not total:
+        total = sorted({m.cited_invention_index for m in matches}) or [0]
+    inv1_idx = total[0]
+    inv2_idx = total[1] if len(total) > 1 else None
+    inv3_idx = total[2] if len(total) > 2 else None
+    inv1_name = mapping.get(str(inv1_idx), f"인용발명 {inv1_idx + 1}")
+    inv2_name = mapping.get(str(inv2_idx), f"인용발명 {inv2_idx + 1}") if inv2_idx is not None else ""
+    inv3_name = mapping.get(str(inv3_idx), f"인용발명 {inv3_idx + 1}") if inv3_idx is not None else ""
+    return format_rejection_basis_header(
+        inv1_name,
+        inv2_name,
+        inv3_name,
+        is_combo=len(total) > 1,
+        chain_info=chain_info,
+    )
+
+
+def _prepend_rejection_basis_header(report_md: str, chain_info, matches) -> str:
+    report_md = (report_md or "").strip()
+    report_md = re.sub(
+        r"(?im)^\s*#{1,6}\s*(?:[^\w\r\n]*)?\s*종합\s*분석\s*요약\s*$",
+        "[종합분석요약]",
+        report_md,
+    )
+    if _REJECTION_BASIS_HEADER_RE.match(report_md):
+        lines = report_md.splitlines()
+        if len(lines) > 1 and lines[1].strip() == "[구성대비]":
+            return report_md
+        if len(lines) > 2 and not lines[1].strip() and lines[2].strip() == "[구성대비]":
+            return report_md
+        return f"{lines[0].strip()}\n\n[구성대비]\n\n{chr(10).join(lines[1:]).strip()}"
+    header = _rejection_basis_header(chain_info, matches)
+    return f"{header}\n\n[구성대비]\n\n{report_md}" if report_md else f"{header}\n\n[구성대비]"
+
+
 def _load_settings_with_dir():
-    settings = load_settings()
-    settings.rag_uploads_dir = str(UPLOADS_DIR.resolve())
-    return settings
+    return load_settings()
 
 
 def _job_dir(job_id: str) -> Path:
@@ -298,8 +331,6 @@ def _invalidate_claim_derived_artifacts(job_id: str, claim_number: int) -> None:
         job_dir / "citation_chain.json",
         job_dir / "same_pairs.json",
         job_dir / "context.json",
-        job_dir / f"gap_search_results_claim{claim_number}.json",
-        job_dir / f"search_strategy_{claim_number}.md",
     ]
     for path in derived_paths:
         try:
@@ -340,19 +371,11 @@ def _load_context(job_id: str) -> list:
 
 def _save_context_entry(job_id: str, claim_number: int, claim_text: str, report_md: str) -> None:
     context = [c for c in _load_context(job_id) if c.get("claim_number") != claim_number]
-    idx = _find_phase2_boundary(report_md)
-    if idx >= 0:
-        tail = report_md[idx:]
-        rejected_marker = "\n## 관련도 A 인용발명"
-        rejected_idx = tail.find(rejected_marker)
-        phase2 = tail[:rejected_idx] if rejected_idx >= 0 else tail
-        phase2 = phase2[:4000]
-    else:
-        phase2 = report_md[-4000:]
+    summary = _phase1_only_report(report_md)[-4000:]
     context.append({
         "claim_number": claim_number,
         "claim_text_preview": claim_text[:200],
-        "phase2_summary": phase2,
+        "report_summary": summary,
     })
     context.sort(key=lambda x: x.get("claim_number", 0))
     _write_json(_job_dir(job_id) / "context.json", context)
@@ -395,83 +418,6 @@ def _parent_independent_num(claim: ParsedClaim, claims_by_num: dict[int, ParsedC
         visited.add(cur.claim_number)
         cur = claims_by_num.get(cur.parent_claim)
     return cur.claim_number if cur and cur.claim_type == "independent" else None
-
-
-def _gap_search_result_path(job_dir: Path, claim_number: int) -> Path:
-    return job_dir / f"gap_search_results_claim{claim_number}.json"
-
-
-def _save_gap_search_result(job_dir: Path, claim_number: int, result: dict) -> None:
-    _write_json(_gap_search_result_path(job_dir, claim_number), result)
-
-
-def _load_gap_search_result(job_dir: Path, claim_number: int) -> Optional[dict]:
-    data = _load_json(_gap_search_result_path(job_dir, claim_number), None)
-    return data if isinstance(data, dict) else None
-
-
-def _format_gap_search_result_for_chat(result: Optional[dict], max_chars: int = 6000) -> str:
-    if not result:
-        return ""
-    lines: list[str] = []
-    for target in result.get("results", []) or []:
-        lines.append(f"- 구성요소 {target.get('label', '')}: {target.get('feature_ko', '')}".strip())
-        queries = target.get("queries_used") or []
-        if queries:
-            lines.append(f"  검색어: {', '.join(str(q) for q in queries[:4])}")
-        docs = target.get("documents") or []
-        if not docs:
-            lines.append("  인용 문헌: 없음")
-            continue
-        for doc in docs[:3]:
-            title = doc.get("title") or doc.get("url") or "제목 없음"
-            lines.append(f"  인용: {title} {doc.get('number', '')} ({doc.get('relevance', '')})".strip())
-            if doc.get("url"):
-                lines.append(f"  URL: {doc['url']}")
-            if doc.get("summary"):
-                lines.append(f"  요약: {doc['summary']}")
-    if result.get("error"):
-        lines.append(f"검색 오류: {result.get('error')}")
-    return "\n".join(lines).strip()[:max_chars]
-
-
-def _format_uncovered_elements_for_chat(gap_result: Optional[dict], max_chars: int = 2500) -> str:
-    if not gap_result or not gap_result.get("analyzed"):
-        return ""
-    uncovered = gap_result.get("uncovered") or []
-    if not uncovered:
-        return "모든 구성요소가 기존 인용발명에서 대응되었습니다."
-
-    lines: list[str] = []
-    for item in uncovered[:6]:
-        label = item.get("label", "")
-        text = item.get("text", "")
-        judgment = item.get("best_judgment", "")
-        best_doc = item.get("best_doc", "")
-        tail = f" / 현재 최고 판정: {judgment}" if judgment else ""
-        if best_doc:
-            tail += f" / 근거 문헌: {best_doc}"
-        lines.append(f"- ({label}) {text}{tail}")
-    return "\n".join(lines).strip()[:max_chars]
-
-
-def _should_run_gap_search_from_chat(messages) -> bool:
-    latest_user = next((m.content for m in reversed(messages) if m.role == "user"), "")
-    if not latest_user:
-        return False
-
-    text = latest_user.lower()
-    search_terms = ("검색", "찾아", "웹검색", "search", "find", "look up")
-    gap_terms = (
-        "대응없는", "대응 없는", "미대응", "보완문헌", "보완문서",
-        "누락", "빠진", "커버 안", "cover", "uncovered", "missing",
-    )
-    invention_terms = ("인용발명", "발명", "문헌", "특허", "prior art", "reference")
-    return (
-        any(term in text for term in search_terms)
-        and any(term in text for term in gap_terms)
-        and any(term in text for term in invention_terms)
-    )
 
 
 def _save_case_artifacts(job_id: str, docs: List[ExtractedDocument], manifest: list[dict]) -> None:
@@ -810,7 +756,7 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                 return
             settings = _load_settings_with_dir()
             compare_mode = getattr(settings, "comparison_mode", "per_doc")
-            require_rag_cache = bool(getattr(settings, "use_rag_retrieval", False))
+
             cached = REPORTS_DIR / f"report_{job_id}_claim{claim_number}.md"
             claims = _load_claims(job_id)
             prior_docs = _load_prior_docs(job_id)
@@ -830,7 +776,6 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                 claim,
                 prior_docs,
                 str(job_dir),
-                require_rag=require_rag_cache,
                 comparison_mode=compare_mode,
             )
             cached_chain = _load_json(job_dir / "citation_chain.json", {})
@@ -844,7 +789,7 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                 and cached_all
                 and policy_cache_current
             ):
-                cached_report = sanitize_report_status_icons(cached.read_text(encoding="utf-8"))
+                cached_report = sanitize_report_status_icons(_phase1_only_report(cached.read_text(encoding="utf-8")))
                 cached_chain_info = get_claim_chain_info(cached_chain, claim_number)
                 _save_context_entry(job_id, claim_number, claim.text, cached_report)
                 async for event in _yield_timing("cached report return", total_start):
@@ -857,15 +802,6 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                 return
 
             yield _ev("start", f"청구항 {claim_number} 보고서 작성을 시작합니다.")
-            if settings.use_rag_retrieval:
-                reranker_note = (
-                    f", reranker top {settings.reranker_top_k}"
-                    if settings.use_reranker else ", reranker off"
-                )
-                yield _ev(
-                    "log",
-                    f"[RAG] Dense+BM25 top {settings.rag_top_k}{reranker_note}",
-                )
             if cache_reset:
                 yield _ev("log", "[cache] incompatible comparison cache reset")
             if not cached_all:
@@ -874,7 +810,6 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                     str(job_dir),
                     claim_number,
                     len(prior_docs),
-                    require_rag=require_rag_cache,
                     comparison_mode=compare_mode,
                 )
                 missing_doc_idxs = [i for i in range(len(prior_docs)) if i not in cached_doc_idxs]
@@ -908,7 +843,6 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                     claim,
                     prior_docs,
                     str(job_dir),
-                    require_rag=require_rag_cache,
                     comparison_mode=compare_mode,
                 )
                 async for event in _yield_timing("comparison", compare_start):
@@ -916,16 +850,6 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
             else:
                 yield _ev("log", "[cache] using cached comparisons")
 
-            if settings.use_rag_retrieval and not cached_all:
-                rag_status = get_rag_runtime_status()
-                yield _ev(
-                    "log",
-                    "[RAG status] "
-                    f"dense={rag_status['dense']}, qdrant={rag_status['qdrant']}, "
-                    f"bm25={rag_status['bm25']}, reranker={rag_status['reranker']}",
-                )
-                if rag_status.get("fallback_reason"):
-                    yield _ev("log", f"[RAG fallback] {rag_status['fallback_reason']}")
 
             chain_start = time.perf_counter()
             chain_data = build_citation_chain_from_comparisons(str(job_dir), claims, prior_docs)
@@ -938,7 +862,6 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                     prior_docs,
                     str(job_dir),
                     allowed_docs=chain_info["total"],
-                    require_rag=require_rag_cache,
                     comparison_mode=compare_mode,
                 )
 
@@ -952,7 +875,6 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                         prior_docs,
                         str(job_dir),
                         allowed_docs=[sec_idx],
-                        require_rag=require_rag_cache,
                         comparison_mode=compare_mode,
                     )
                     secondary_matches.extend(sec_matches)
@@ -985,7 +907,9 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                     clean_chunk = sanitize_report_status_icons(chunk)
                     phase1_chunks.append(clean_chunk)
                     yield _ev("stream_chunk", clean_chunk)
-                phase1_md = sanitize_report_status_icons(_dedupe_phase1_sections(_strip_agent_tool_calls("".join(phase1_chunks))))
+                phase1_md = polish_phase1_summary_text(
+                    sanitize_report_status_icons(_dedupe_phase1_sections(_strip_agent_tool_calls("".join(phase1_chunks))))
+                )
             else:
                 async def _emit_progress(message: str) -> None:
                     yield_event = _ev("log", message)
@@ -1004,9 +928,11 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                 for event in nonlocal_yield_events:
                     yield event
                 raw = sanitize_report_status_icons(_strip_agent_tool_calls(raw))
-                split = _find_phase2_boundary(raw)
+                split = _find_legacy_final_boundary(raw)
                 phase1_body = raw[:split].strip() if split >= 0 else raw
-                phase1_md = sanitize_report_status_icons(_dedupe_phase1_sections(phase1_body))
+                phase1_md = polish_phase1_summary_text(
+                    sanitize_report_status_icons(_dedupe_phase1_sections(phase1_body))
+                )
             phase1_md = f"### claim {claim_number}\n\n{phase1_md}"
             async for event in _yield_timing("phase1", phase1_start):
                 yield event
@@ -1016,30 +942,11 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                 "used_inventions": used_inventions,
             })
 
-            yield _ev("generate", "Phase 2 assembly in progress")
-            phase2_start = time.perf_counter()
-            boundary = _phase2_boundary(settings)
-            if claim.claim_type == "independent":
-                phase2_body = await generate_independent_phase2(
-                    phase1_md, claim, matches, prior_docs, chain_info, settings
-                )
-            else:
-                phase2_body = generate_dependent_phase2(
-                    phase1_md,
-                    claim,
-                    chain_info,
-                    settings,
-                    matches=matches,
-                    secondary_matches=secondary_matches,
-                )
-            async for event in _yield_timing("phase2", phase2_start):
-                yield event
-            phase2_md = boundary + "\n\n" + _strip_phase2_marker(phase2_body)
-            report_md = sanitize_report_status_icons(phase1_md + "\n\n" + phase2_md)
-            rejected_section = build_rejected_inventions_section(claim, prior_docs, chain_info, str(job_dir))
-            if rejected_section:
-                report_md = sanitize_report_status_icons(report_md + "\n\n" + rejected_section)
-
+            report_md = _prepend_rejection_basis_header(
+                sanitize_report_status_icons(phase1_md),
+                chain_info,
+                matches,
+            )
             finalize_start = time.perf_counter()
             same_claims_for_this = [int(k) for k, v in same_pairs.items() if v == claim_number]
             if same_claims_for_this:
@@ -1096,19 +1003,19 @@ def _assemble_dependent_report(
     secondary_matches=None,
 ) -> str:
     body = _strip_agent_tool_calls(raw)
-    split = _find_phase2_boundary(body)
+    split = _find_legacy_final_boundary(body)
     phase1 = body[:split].strip() if split >= 0 else body.strip()
     phase1 = _dedupe_phase1_sections(phase1)
-    phase1_md = f"### 청구항 {claim.claim_number}\n\n{phase1}"
-    phase2_body = generate_dependent_phase2(
-        phase1_md,
-        claim,
-        chain_info,
-        settings,
-        matches=matches,
-        secondary_matches=secondary_matches,
-    )
-    return phase1_md + "\n\n" + _phase2_boundary(settings) + "\n\n" + _strip_phase2_marker(phase2_body)
+    return f"### 청구항 {claim.claim_number}\n\n{phase1}"
+
+
+def _has_substantive_dependent_report(md: str, claim_number: int) -> bool:
+    body = sanitize_report_status_icons(_strip_agent_tool_calls(md or "")).strip()
+    body = re.sub(r"(?m)^\s*\[[^\]\n]*(?:신규성|진보성)[^\]\n]*\]\s*$", "", body)
+    body = re.sub(r"(?m)^\s*\[구성대비\]\s*$", "", body)
+    body = re.sub(rf"(?mi)^\s*###\s*(?:청구항|claim)\s*{claim_number}\s*$", "", body)
+    body = re.sub(r"(?m)^\s*[-*_]{3,}\s*$", "", body).strip()
+    return len(body) >= 20
 
 
 @router.post("/report_batch_dependent/{job_id}")
@@ -1160,7 +1067,7 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
         )
 
         compare_mode = getattr(settings, "comparison_mode", "per_doc")
-        require_rag_cache = bool(getattr(settings, "use_rag_retrieval", False))
+
         cached_chain = _load_json(job_dir / "citation_chain.json", {})
         policy_cache_changed = (
             not isinstance(cached_chain, dict)
@@ -1185,7 +1092,6 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
                 str(job_dir),
                 claim.claim_number,
                 len(prior_docs),
-                require_rag=require_rag_cache,
                 comparison_mode=compare_mode,
             )
             target_doc_idxs = candidate_docs_for(claim)
@@ -1222,7 +1128,6 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
                 claim,
                 prior_docs,
                 str(job_dir),
-                require_rag=require_rag_cache,
                 comparison_mode=compare_mode,
             )
             target_doc_idxs = candidate_docs_for(claim)
@@ -1230,7 +1135,6 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
                 str(job_dir),
                 claim.claim_number,
                 len(prior_docs),
-                require_rag=require_rag_cache,
                 comparison_mode=compare_mode,
             )
             target_cached = target_doc_idxs and all(i in cached_doc_idxs for i in target_doc_idxs)
@@ -1293,18 +1197,21 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
                 and not policy_cache_changed
             ):
                 cached_report = sanitize_report_status_icons(cached.read_text(encoding="utf-8"))
-                cached_chain_info = get_claim_chain_info(chain_data, cn)
-                _save_context_entry(job_id, claim.claim_number, claim.text, cached_report)
-                results[str(cn)] = {
-                    "report_md": cached_report,
-                    "used_inventions": _used_inventions_for(cached_chain_info, prior_docs),
-                }
-                continue
+                if not _has_substantive_dependent_report(cached_report, cn):
+                    cached.unlink(missing_ok=True)
+                    (_ensure_case_dirs(job_id) / "reports" / f"claim{cn}.md").unlink(missing_ok=True)
+                else:
+                    cached_chain_info = get_claim_chain_info(chain_data, cn)
+                    _save_context_entry(job_id, claim.claim_number, claim.text, cached_report)
+                    results[str(cn)] = {
+                        "report_md": cached_report,
+                        "used_inventions": _used_inventions_for(cached_chain_info, prior_docs),
+                    }
+                    continue
             matches, _ = get_matches_from_cache(
                 claim,
                 prior_docs,
                 str(job_dir),
-                require_rag=require_rag_cache,
                 comparison_mode=compare_mode,
             )
             chain_info = get_claim_chain_info(chain_data, cn) if chain_data else None
@@ -1314,7 +1221,6 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
                     prior_docs,
                     str(job_dir),
                     allowed_docs=chain_info["total"],
-                    require_rag=require_rag_cache,
                     comparison_mode=compare_mode,
                 )
             secondary_matches = None
@@ -1327,7 +1233,6 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
                         prior_docs,
                         str(job_dir),
                         allowed_docs=[sec_idx],
-                        require_rag=require_rag_cache,
                         comparison_mode=compare_mode,
                     )
                     secondary_matches.extend(sec)
@@ -1366,6 +1271,17 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
                 chunks[int(parts[i])] = parts[i + 1].strip()
             for claim, matches, chain_info, secondary in batch_items:
                 raw = chunks.get(claim.claim_number)
+                if raw:
+                    candidate_report = _assemble_dependent_report(
+                        raw,
+                        claim,
+                        chain_info,
+                        settings,
+                        matches=matches,
+                        secondary_matches=secondary,
+                    )
+                    if not _has_substantive_dependent_report(candidate_report, claim.claim_number):
+                        raw = None
                 if not raw:
                     _update_dependent_batch_status(
                         job_id,
@@ -1404,10 +1320,15 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
                     matches=matches,
                     secondary_matches=secondary,
                 )
-                report_md = sanitize_report_status_icons(report_md)
-                rejected_section = build_rejected_inventions_section(claim, prior_docs, chain_info, str(job_dir))
-                if rejected_section:
-                    report_md = sanitize_report_status_icons(report_md + "\n\n" + rejected_section)
+                report_md = _prepend_rejection_basis_header(
+                    sanitize_report_status_icons(report_md),
+                    chain_info,
+                    matches,
+                )
+                if not _has_substantive_dependent_report(report_md, claim.claim_number):
+                    raise RuntimeError(
+                        f"청구항 {claim.claim_number} 보고서 본문이 비어 있어 저장을 중단했습니다. 다시 생성해 주세요."
+                    )
                 _save_report(job_id, claim.claim_number, report_md)
                 _save_reference_db(job_id, claim, matches, prior_docs, chain_info, report_md)
                 _save_context_entry(job_id, claim.claim_number, claim.text, report_md)
@@ -1480,7 +1401,6 @@ async def chat_about_report(job_id: str, claim_number: int, req: ChatRequest):
     settings = _load_settings_with_dir()
     claim = next((c for c in _load_claims(job_id) if c.claim_number == claim_number), None)
     claim_text = claim.text if claim else ""
-    prior_docs = _load_prior_docs(job_id) if claim else []
     if req.web_search:
         evidence_rule = (
             "보고서에 있는 인용 결과를 주로 활용하되, 불충분한 경우에는 웹검색으로 보완하세요. "
@@ -1494,29 +1414,6 @@ async def chat_about_report(job_id: str, claim_number: int, req: ChatRequest):
         "인용문을 새로 만들지 말고, 근거가 없으면 없다고 답하세요.\n\n"
         f"[청구항 {claim_number}]\n{claim_text}\n\n[보고서]\n{req.report_md}"
     )
-    gap_summary = None
-    if claim and prior_docs:
-        gap_summary = find_uncovered_elements(str(job_dir), claim, [d.filename for d in prior_docs])
-        uncovered_context = _format_uncovered_elements_for_chat(gap_summary)
-        if uncovered_context:
-            system += f"\n\n[구성대비 미대응 구성요소]\n{uncovered_context}"
-
-    gap_result = _load_gap_search_result(job_dir, claim_number)
-    if (
-        req.web_search
-        and claim
-        and gap_summary
-        and gap_summary.get("analyzed")
-        and gap_summary.get("uncovered")
-        and not gap_result
-        and _should_run_gap_search_from_chat(req.messages)
-    ):
-        gap_result = await web_search_gap_documents(claim, gap_summary, settings)
-        _save_gap_search_result(job_dir, claim_number, gap_result)
-
-    gap_context = _format_gap_search_result_for_chat(gap_result)
-    if gap_context:
-        system += f"\n\n[인용 보완문서 인용 결과]\n{gap_context}"
     lines = []
     for msg in req.messages[-8:]:
         speaker = "사용자" if msg.role == "user" else "어시스턴트"
@@ -1740,56 +1637,3 @@ async def enhance_claim(job_id: str, claim_number: int):
     return enhanced_data
 
 
-def _load_claim_for_gap(job_id: str, claim_number: int):
-    job_dir = _job_dir(job_id)
-    if not job_dir.exists():
-        raise HTTPException(status_code=404, detail="작업을 찾을 수 없습니다.")
-    claim = next((c for c in _load_claims(job_id) if c.claim_number == claim_number), None)
-    if not claim:
-        raise HTTPException(status_code=404, detail=f"청구항 {claim_number}를 찾을 수 없습니다.")
-    doc_filenames = [d.filename for d in _load_prior_docs(job_id)]
-    return job_dir, claim, doc_filenames
-
-
-@router.get("/gap_search/{job_id}/{claim_number}")
-async def get_gap_elements(job_id: str, claim_number: int):
-    job_dir, claim, doc_filenames = _load_claim_for_gap(job_id, claim_number)
-    return find_uncovered_elements(str(job_dir), claim, doc_filenames)
-
-
-@router.post("/gap_search/{job_id}/{claim_number}/web_search")
-async def web_search_gap(job_id: str, claim_number: int):
-    job_dir, claim, doc_filenames = _load_claim_for_gap(job_id, claim_number)
-    gap = find_uncovered_elements(str(job_dir), claim, doc_filenames)
-    if not gap["analyzed"]:
-        raise HTTPException(status_code=400, detail="구성요소 비교 인용발명을 먼저 실행해주세요.")
-    if not gap["uncovered"]:
-        return {"claim_number": claim_number, "results": [], "message": "보완 검색이 필요한 미대응 구성요소가 없습니다."}
-    result = await web_search_gap_documents(claim, gap, _load_settings_with_dir())
-    _save_gap_search_result(job_dir, claim_number, result)
-    return result
-
-
-@router.get("/search_strategy/{job_id}/{claim_number}")
-async def get_search_strategy(job_id: str, claim_number: int):
-    path = _job_dir(job_id) / f"search_strategy_{claim_number}.md"
-    return {
-        "claim_number": claim_number,
-        "exists": path.exists(),
-        "strategy_md": path.read_text(encoding="utf-8") if path.exists() else "",
-    }
-
-
-@router.post("/search_strategy/{job_id}/{claim_number}")
-async def generate_search_strategy(job_id: str, claim_number: int):
-    job_dir, claim, _ = _load_claim_for_gap(job_id, claim_number)
-    settings = _load_settings_with_dir()
-    system = load_prompt("system_search_strategy.txt")
-    prompt = render_prompt(
-        "prompt_search_strategy.txt",
-        claim_number=str(claim_number),
-        claim_text=claim.text,
-    )
-    strategy_md = _strip_agent_tool_calls(await call_ai(prompt, system, settings, agent="report"))
-    (job_dir / f"search_strategy_{claim_number}.md").write_text(strategy_md, encoding="utf-8")
-    return {"claim_number": claim_number, "exists": True, "strategy_md": strategy_md}

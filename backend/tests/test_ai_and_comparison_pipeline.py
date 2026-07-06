@@ -11,7 +11,6 @@ from unittest.mock import AsyncMock, patch
 
 from backend.models.schemas import (
     ClaimElement,
-    ChatMessage,
     ElementMatch,
     ExtractedDocument,
     ManualClaimRequest,
@@ -31,7 +30,6 @@ from backend.services.citation_extractor import (
     _build_hybrid_docs_block,
     _comparison_safe_elements,
     _parse_json_array,
-    _retrieval_query_elements,
     _select_best_matches,
     _shorten_quote,
     analyze_claim_elements_hybrid,
@@ -48,19 +46,16 @@ from backend.services.reference_store import (
     save_case_artifacts_sqlite,
     save_reference_entries_sqlite,
 )
-from backend.services import gap_search
 from backend.services.report_generator import (
-    _build_phase2_markdown,
-    _filter_summary_diff_by_component_judgments,
-    _normalize_difference_section,
     _format_component_comparison,
-    _generate_template_b_phase2,
+    _dedupe_phase1_sections,
     _extract_first_json_object,
     _make_phase1_b_prompt,
     _make_phase1_prompt,
     build_rejected_inventions_section,
-    generate_dependent_phase2,
+    generate_dependent_report,
     parse_manual_claim_locally,
+    polish_phase1_summary_text,
 )
 
 
@@ -151,23 +146,6 @@ class AgyRecoveryTests(unittest.TestCase):
 
         self.assertEqual(selected, final_response)
         self.assertIsInstance(json.loads(selected), list)
-
-
-class RetrievalQueryExpansionTests(unittest.TestCase):
-    def test_mode_value_dependent_claim_expands_search_terms(self):
-        elements = [
-            ClaimElement(
-                label="A",
-                text="상기 특정 요청 패킷은, 상기 인밴드 모드를 표시하는 제1값, 상기 아웃밴드 모드를 표시하는 제2값 및 상기 혼용 모드를 표시하는 제3값 중 어느 하나의 값을 포함하는, 무선전력 수신장치.",
-            )
-        ]
-
-        expanded = _retrieval_query_elements(elements)
-
-        self.assertEqual(expanded[0].label, "A")
-        self.assertIn("specific request packet", expanded[0].text)
-        self.assertIn("first value second value third value", expanded[0].text)
-        self.assertIn("mixed mode hybrid mode", expanded[0].text)
 
 
 class ComparisonParsingTests(unittest.TestCase):
@@ -277,6 +255,38 @@ class ComparisonParsingTests(unittest.TestCase):
         with self.assertRaisesRegex(CompareFailed, "doc_index=1/label=A"):
             _parse_json_array(response, elements, expected_doc_indices=[0, 1])
 
+    def test_parse_json_array_dedupes_repeated_document_label_pairs(self):
+        elements = [ClaimElement(label="A", text="sensor")]
+        response = json.dumps(
+            [
+                {
+                    "label": "A",
+                    "doc_index": 0,
+                    "found": False,
+                    "quote": "",
+                    "chunk_id": "",
+                    "judgment": "대응 없음",
+                    "판단_이유": "첫 번째 중복 항목",
+                },
+                {
+                    "label": "A",
+                    "doc_index": 0,
+                    "found": True,
+                    "quote": "pressure sensor",
+                    "chunk_id": "[0010]",
+                    "judgment": "실질적 동일",
+                    "판단_이유": "더 강한 중복 항목",
+                },
+            ],
+            ensure_ascii=False,
+        )
+
+        parsed = _parse_json_array(response, elements, expected_doc_indices=[0])
+
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["judgment"], "실질적 동일")
+        self.assertEqual(parsed[0]["quote"], "pressure sensor")
+
     def test_quote_verification_handles_ellipsis_and_rejects_negative_doc_index(self):
         docs = [ExtractedDocument(raw_text="first relevant passage and second relevant passage")]
         valid = ElementMatch(
@@ -301,120 +311,6 @@ class ComparisonParsingTests(unittest.TestCase):
             _extract_first_json_object(response),
             {"purpose": "p", "effects": "e"},
         )
-
-    def test_chat_gap_search_trigger_detects_missing_feature_search_intent(self):
-        messages = [
-            ChatMessage(
-                role="user",
-                content="보고서 작성 후 구성대비에 대응없는 구성들을 포함하는 발명을 검색해줄래?",
-            )
-        ]
-
-        self.assertTrue(analyze_router._should_run_gap_search_from_chat(messages))
-
-    def test_chat_gap_search_trigger_ignores_general_question(self):
-        messages = [
-            ChatMessage(
-                role="user",
-                content="구성 C가 왜 대응 없음으로 판단되었는지 설명해줘.",
-            )
-        ]
-
-        self.assertFalse(analyze_router._should_run_gap_search_from_chat(messages))
-
-    def test_gap_search_verification_merge_keeps_verified_documents(self):
-        search_result = {
-            "results": [
-                {
-                    "label": "C",
-                    "documents": [
-                        {"number": "US123", "title": "doc1", "relevance": "high"},
-                        {"number": "US456", "title": "doc2", "relevance": "medium"},
-                    ],
-                }
-            ]
-        }
-        verification = {
-            "results": [
-                {
-                    "label": "C",
-                    "documents": [
-                        {
-                            "number": "US123",
-                            "verification_status": "direct",
-                            "confidence": "high",
-                            "reason": "직접 개시",
-                            "quote": "example quote",
-                        },
-                        {
-                            "number": "US456",
-                            "verification_status": "unsupported",
-                            "confidence": "low",
-                            "reason": "불충분",
-                            "quote": "",
-                        },
-                    ],
-                }
-            ]
-        }
-
-        merged = gap_search._merge_verification(search_result, verification)
-
-        docs = merged["results"][0]["documents"]
-        self.assertEqual(len(docs), 1)
-        self.assertEqual(docs[0]["number"], "US123")
-        self.assertEqual(docs[0]["verification_status"], "direct")
-
-    def test_gap_search_http_fallback_returns_patent_candidates(self):
-        claim = ParsedClaim(
-            claim_number=1,
-            text="test claim",
-            elements=[ClaimElement(label="C", text="센서 신호를 보정하는 처리부", importance="5")],
-            preamble="센서 제어 장치",
-        )
-        gap_result = {
-            "uncovered": [
-                {
-                    "label": "C",
-                    "text": "센서 신호를 보정하는 처리부",
-                    "importance": "5",
-                    "best_judgment": "없음",
-                    "best_doc": "",
-                }
-            ]
-        }
-
-        async def fake_call_ai(*args, **kwargs):
-            raise RuntimeError("web search tool unavailable")
-
-        async def fake_search_target_documents(target, field_text):
-            return (
-                ["site:patents.google.com sensor correction patent"],
-                [
-                    {
-                        "title": "Example patent",
-                        "number": "US1234567A",
-                        "url": "https://patents.google.com/patent/US1234567A/en",
-                        "summary": "fallback result",
-                        "relevance": "medium",
-                        "source": "http_fallback",
-                    }
-                ],
-            )
-
-        with patch.object(gap_search, "call_ai", side_effect=fake_call_ai), patch.object(
-            gap_search,
-            "_search_target_documents",
-            side_effect=fake_search_target_documents,
-        ):
-            result = __import__("asyncio").run(
-                gap_search.web_search_gap_documents(claim, gap_result, Settings())
-            )
-
-        self.assertTrue(result["fallback_used"])
-        self.assertEqual(result["results"][0]["label"], "C")
-        self.assertEqual(result["results"][0]["documents"][0]["number"], "US1234567A")
-
 
     def test_missing_parent_reference_keeps_only_features_after_dependency_phrase(self):
         claim = __import__("asyncio").run(
@@ -708,6 +604,77 @@ class BatchStatusHeartbeatTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(update_status.call_count, 1)
 
 
+class DependentReportValidationTests(unittest.TestCase):
+    def test_dedupe_keeps_unlabeled_single_dependent_section(self):
+        report = (
+            "### [추가 구성]\n"
+            "실질적동일 85%\n\n"
+            "- 청구항 추가 구성: 압력 센서를 포함하는 구성\n"
+            "- 판단 이유: 인용발명의 압력 센서와 대응됩니다.\n\n"
+            "[종합분석요약]\n"
+            "- 결론: 추가 구성은 인용발명에 의해 확인됩니다."
+        )
+
+        result = _dedupe_phase1_sections(report)
+
+        self.assertIn("실질적동일 85%", result)
+        self.assertIn("[종합분석요약]", result)
+
+    def test_header_only_dependent_report_is_not_substantive(self):
+        report = "[인용발명 1 단독(신규성)]\n\n[구성대비]\n\n### 청구항 3"
+
+        self.assertFalse(analyze_router._has_substantive_dependent_report(report, 3))
+
+    def test_dependent_report_with_body_is_substantive(self):
+        report = "### 청구항 3\n\n### [추가 구성]\n실질적동일 85%\n\n판단 이유: 대응 근거가 확인됩니다."
+
+        self.assertTrue(analyze_router._has_substantive_dependent_report(report, 3))
+
+
+class DependentReportGenerationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_single_report_prompt_handles_uncovered_chain_without_added_doc(self):
+        claim = ParsedClaim(
+            claim_number=7,
+            claim_type="dependent",
+            parent_claim=1,
+            text="제1항에 있어서, 압력 센서를 더 포함하는 장치",
+            elements=[ClaimElement(label="A", text="압력 센서를 더 포함하는 구성")],
+        )
+        matches = [
+            ElementMatch(
+                label="A",
+                cited_invention_index=0,
+                judgment="차이",
+                quote="pressure sensor",
+                chunk_id="[0001]",
+            )
+        ]
+        docs = [ExtractedDocument(filename="prior.pdf")]
+        chain_info = {
+            "inherited": [0],
+            "added": [],
+            "total": [0],
+            "coverage_complete": False,
+            "doc_name_mapping": {"0": "인용발명 1"},
+        }
+
+        with patch(
+            "backend.services.report_generator.call_ai",
+            new=AsyncMock(return_value="ok"),
+        ) as mocked_call:
+            result = await generate_dependent_report(
+                claim,
+                matches,
+                docs,
+                chain_info,
+                Settings(),
+            )
+
+        self.assertEqual(result, "ok")
+        prompt = mocked_call.await_args.args[0]
+        self.assertIn("단일 추가 문헌 커버 상태: 일부 추가 구성 미대응", prompt)
+
+
 class ConventionalSupportPolicyTests(unittest.TestCase):
     @staticmethod
     def _item(label: str, judgment: str, quote: str = "") -> dict:
@@ -842,207 +809,6 @@ class ConventionalSupportPolicyTests(unittest.TestCase):
         )
         self.assertIsNone(_conventionality_basis(element))
 
-    def test_phase1_prompt_marks_third_document_role(self):
-        claim = ParsedClaim(
-            claim_number=1,
-            text="claim",
-            elements=[ClaimElement(label="C", text="바퀴", importance="2")],
-        )
-        docs = [
-            ExtractedDocument(filename="primary.pdf"),
-            ExtractedDocument(filename="secondary.pdf"),
-            ExtractedDocument(filename="conventional.pdf"),
-        ]
-        matches = [ElementMatch(label="C", cited_invention_index=2, judgment="동일", quote="wheel")]
-        chain_info = {
-            "total": [0, 1, 2],
-            "doc_name_mapping": {"0": "인용발명 1", "1": "인용발명 2", "2": "인용발명 3"},
-            "combination_rationale": {"label": "공백 보완형", "description": "핵심 차이 보완"},
-            "conventional_support": {
-                "doc_idx": 2,
-                "position": 3,
-                "role": "conventional_support",
-                "labels": ["C"],
-            },
-        }
-
-        prompt = _make_phase1_prompt(
-            claim,
-            matches,
-            docs,
-            chain_info,
-            Settings(),
-            combo=True,
-            secondary_matches=matches,
-        )
-
-        self.assertIn("인용발명 3 - 주지관용 구성 입증자료", prompt)
-        self.assertIn("핵심 기술사상 보완 근거로 확대하지 않습니다", prompt)
-
-        phase2 = _build_phase2_markdown(
-            "### [구성요소]\n\n(C) 실질적동일 95%\n\n- 청구항 구성: 바퀴\n\n"
-            "### 종합 분석 요약\n\n- 유사점 요약: 일반 구성\n- 차이점: 없음\n- 결론: 검토 완료",
-            1,
-            "인용발명 1",
-            "인용발명 2",
-            "인용발명 3",
-            is_combo=True,
-            combination_rationale="제3문헌은 주지관용 입증자료로만 사용",
-            chain_info=chain_info,
-            settings=Settings(),
-        )
-        self.assertIn("[인용발명 1과 2의 결합 및 주지관용(진보성)]", phase2)
-        self.assertIn("[구성대비]", phase2)
-        self.assertNotIn("[구성요소]", phase2)
-        self.assertIn("[종합 판단]", phase2)
-
-    def test_single_phase2_header_changes_with_common_knowledge(self):
-        base_phase1 = (
-            "### [구성요소]\n\n(A) 동일 100%\n\n- 청구항 구성: 제어부\n\n"
-            "### 종합 분석 요약\n\n- 유사점 요약: 직접 대응\n- 차이점: 없음\n- 결론: 검토 완료"
-        )
-
-        novelty_phase2 = _build_phase2_markdown(
-            base_phase1,
-            1,
-            "인용발명 1",
-            settings=Settings(),
-        )
-        self.assertIn("[인용발명 단독(신규성)]", novelty_phase2)
-
-        inventive_phase2 = _build_phase2_markdown(
-            base_phase1,
-            1,
-            "인용발명 1",
-            chain_info={
-                "common_general_knowledge": [{"label": "B"}],
-            },
-            settings=Settings(),
-        )
-        self.assertIn("[인용발명 1 + 주지관용(진보성)]", inventive_phase2)
-
-    def test_combo_phase2_components_use_primary_matches_only(self):
-        claim = ParsedClaim(
-            claim_number=1,
-            text="claim",
-            elements=[
-                ClaimElement(label="A", text="primary feature", importance="5"),
-                ClaimElement(label="B", text="secondary-only feature", importance="3"),
-            ],
-        )
-        docs = [
-            ExtractedDocument(filename="primary.pdf"),
-            ExtractedDocument(filename="secondary.pdf"),
-        ]
-        matches = [
-            ElementMatch(label="A", cited_invention_index=0, judgment="동일", quote="primary quote", chunk_id="[0001]"),
-            ElementMatch(label="B", cited_invention_index=1, judgment="대응 없음", quote="secondary quote", chunk_id="[0002]"),
-        ]
-        chain_info = {
-            "total": [0, 1],
-            "doc_name_mapping": {"0": "인용발명 1", "1": "인용발명 2"},
-            "combination_rationale": {"label": "결합", "description": "보조 문헌"},
-        }
-        phase1_md = (
-            "### [구성요소]\n\n(A) 동일 100%\n\n- 인용발명 대응 원문: primary quote\n\n"
-            "### [구성요소]\n\n(B) 차이 0%\n\n- 인용발명 대응 원문: (인용발명 1에서 해당 구성 확인 불가)\n\n"
-            "### 종합 분석 요약\n\n- 유사점 요약: A는 직접 대응됨\n- 차이점: B는 인용발명 2에서만 확인됨\n- 결론: 검토 완료"
-        )
-
-        phase2 = asyncio.run(
-            _generate_template_b_phase2(phase1_md, claim, matches, docs, chain_info, Settings())
-        )
-
-        self.assertIn("동일 100%", phase2)
-        self.assertIn("primary quote", phase2)
-        self.assertIn("(단락 [0001])", phase2)
-        self.assertIn("차이 0%", phase2)
-        self.assertIn("(A) 동일", phase2)
-        self.assertNotIn("secondary quote (인용발명 2)", phase2)
-        self.assertLess(phase2.index("[구성대비]"), phase2.index("[종합 판단]"))
-
-    def test_combo_phase2_preserves_translated_phase1_quote_block(self):
-        claim = ParsedClaim(
-            claim_number=1,
-            text="claim",
-            elements=[ClaimElement(label="A", text="sensor", importance="5")],
-        )
-        docs = [
-            ExtractedDocument(filename="primary.pdf"),
-            ExtractedDocument(filename="secondary.pdf"),
-        ]
-        matches = [
-            ElementMatch(
-                label="A",
-                cited_invention_index=0,
-                judgment="실질적 동일",
-                quote="a sensor that detects pressure",
-                chunk_id="[0001]",
-            ),
-        ]
-        chain_info = {
-            "total": [0, 1],
-            "doc_name_mapping": {"0": "인용발명 1", "1": "인용발명 2"},
-        }
-        phase1_md = (
-            "### [구성요소]\n\n(A) 실질적동일 90%\n\n"
-            "- 인용발명 대응 원문: 압력을 검출하는 센서\n"
-            "(단락 [0001], \"a sensor that detects pressure\")\n\n"
-            "### 종합 분석 요약\n\n"
-            "- 유사점 요약: 핵심 구성이 대응됨\n"
-            "- 차이점: 없음\n"
-            "- 결론: 검토 완료"
-        )
-
-        phase2 = asyncio.run(
-            _generate_template_b_phase2(phase1_md, claim, matches, docs, chain_info, Settings())
-        )
-
-        self.assertIn("실질적 동일 90%\n\n압력을 검출하는 센서", phase2)
-        self.assertIn('(단락 [0001], "a sensor that detects pressure")', phase2)
-        self.assertNotIn("\n\na sensor that detects pressure\n\n[종합 판단]", phase2)
-
-    def test_combo_phase2_prefers_phase1_quote_even_when_raw_match_is_no_match(self):
-        claim = ParsedClaim(
-            claim_number=1,
-            text="claim",
-            elements=[ClaimElement(label="A", text="sensor", importance="5")],
-        )
-        docs = [ExtractedDocument(filename="primary.pdf"), ExtractedDocument(filename="secondary.pdf")]
-        matches = [
-            ElementMatch(
-                label="A",
-                cited_invention_index=0,
-                judgment="대응 없음",
-                quote="",
-                chunk_id="[0001]",
-            ),
-        ]
-        phase1_md = (
-            "### [구성요소]\n\n(A) 실질적동일 90%\n\n"
-            "- **인용발명** 대응 원문: 압력을 검출하는 센서\n"
-            "(문단 [0001], \"a sensor that detects pressure\")\n\n"
-            "### 종합 분석 요약\n\n"
-            "- 유사점 요약: 핵심 구성이 대응됨\n"
-            "- 차이점: 없음\n"
-            "- 결론: 검토 완료"
-        )
-
-        phase2 = asyncio.run(
-            _generate_template_b_phase2(
-                phase1_md,
-                claim,
-                matches,
-                docs,
-                {"total": [0, 1], "doc_name_mapping": {"0": "인용발명 1", "1": "인용발명 2"}},
-                Settings(),
-            )
-        )
-
-        self.assertIn("실질적 동일 90%", phase2)
-        self.assertIn("압력을 검출하는 센서", phase2)
-        self.assertIn('(문단 [0001], "a sensor that detects pressure")', phase2)
-        self.assertNotIn("(인용발명 1에서 해당 구성 확인 불가)", phase2)
 
     def test_combo_component_comparison_uses_primary_reference_per_component(self):
         docs = [
@@ -1086,244 +852,32 @@ class ConventionalSupportPolicyTests(unittest.TestCase):
             ],
         )
 
-        self.assertIn("인용발명 1에는 [명시되지 않은 부분]이 명시되어 있지 않아 차이가 있으나", prompt)
-        self.assertIn("인용발명 2 발췌가 청구항의 부족한 제한에 대응되는 이유", prompt)
+        self.assertIn("인용발명 1에서 확인되지 않는 하위 제한", prompt)
+        self.assertIn("보조 문헌이 있으면 대응 발췌와 출처를 제시", prompt)
+        self.assertIn("보조 문헌이 없으면 없다고만 적은 뒤 같은 의미를 반복하지 않는다", prompt)
         self.assertIn("인용발명 2의 직접 대응 여부와 보완 범위는 종합 분석 요약의 차이점에서만 작성합니다.", prompt)
 
-    def test_combo_phase2_removes_diff_for_substantially_identical_component(self):
-        claim = ParsedClaim(
-            claim_number=11,
-            text="claim",
-            elements=[ClaimElement(label="A", text="feature", importance="5")],
-        )
-        docs = [
-            ExtractedDocument(filename="primary.pdf"),
-            ExtractedDocument(filename="secondary.pdf"),
-        ]
-        chain_info = {
-            "total": [0, 1],
-            "doc_name_mapping": {"0": "인용발명 1", "1": "인용발명 2"},
-        }
-        phase1_md = (
-            "### [구성요소]\n\n(A) 일부유사 85%\n\n"
-            "- 인용발명 대응 원문: primary quote\n\n"
-            "### 종합 분석 요약\n\n"
-            "- 유사점 요약: 핵심 구성이 실질적으로 대응됨\n"
-            "- 차이점: (A) 표현 차이는 있으나 인용발명 1에 직접 개시되어 있지 않은 세부 문언은 인용발명 2에서 보완됩니다.\n"
-            "  다만 실질적 동일한 기술수단으로 판단됩니다.\n"
-            "- 결론: 검토 완료"
+    def test_phase1_summary_polish_removes_repeated_fallback_phrasing(self):
+        raw = (
+            "손실은 다수의 방향에서 자세 변형된 3d 휴먼모델을 렌더링한 3d 이미지들과 "
+            "다수의 방향에서 gt 3d 휴먼모델을 렌더링한 2d 이미지들 간의 차이인 구성에 대해 "
+            "인용발명 1에는 3d 이미지와 2d 이미지 간의 렌더링 차이를 손실로 산출하는 구성이 "
+            "명시되어 있지 않아 차이가 있습니다.\n"
+            "다만 이 구성에 대한 직접적인 대응 관계를 보완할 보조 인용발명은 기재되어 있지 않습니다.\n"
+            "이는 3d 이미지와 2d 이미지 간의 차이를 손실로 계산하는 세부 처리 조건이 부재함을 의미합니다.\n"
+            "다만 인용발명 1로도 확인되지 않는 하위 제한은 충족하지 못합니다.\n"
+            "따라서 인용발명 1의 이미지 간 인지적 손실을 다방향 렌더링 이미지 간의 차이로 설계 변경하는 것은 "
+            "통상의 기술자가 추가 근거 없이 용이하게 도출할 수 있는지 검토가 필요합니다."
         )
 
-        phase2 = asyncio.run(
-            _generate_template_b_phase2(phase1_md, claim, [], docs, chain_info, Settings())
-        )
+        polished = polish_phase1_summary_text(raw)
 
-        self.assertIn("[차이점]", phase2)
-        self.assertIn("인용발명 2에서 보완됩니다", phase2)
+        self.assertIn("보조 인용발명도 확인되지 않습니다.", polished)
+        self.assertIn("세부 처리 조건이 부재하고", polished)
+        self.assertIn("추가 문헌 근거 없이 통상의 기술자가 용이하게 도출할 수 있는지는 별도로 검토해야 합니다.", polished)
+        self.assertNotIn("다만 이 구성에 대한", polished)
+        self.assertNotIn("다만 인용발명 1로도", polished)
 
-    def test_combo_phase2_keeps_difference_separate_from_combination_rationale(self):
-        claim = ParsedClaim(
-            claim_number=10,
-            text="claim",
-            elements=[ClaimElement(label="A", text="feature", importance="5")],
-        )
-        docs = [
-            ExtractedDocument(filename="primary.pdf"),
-            ExtractedDocument(filename="secondary.pdf"),
-        ]
-        chain_info = {
-            "total": [0, 1],
-            "doc_name_mapping": {"0": "인용발명 1", "1": "인용발명 2"},
-            "combination_rationale": {"label": "결합 논리", "description": "보조 설명"},
-        }
-        phase1_md = (
-            "### [구성요소]\n\n(A) 일부차이 80%\n\n"
-            "- 인용발명 대응 원문: primary quote\n\n"
-            "### 종합 분석 요약\n\n"
-            "- 유사점 요약: 일부 구성이 대응됨\n"
-            "- 차이점: [[차이점 1]] 추가 구성 확인 필요\n"
-            "- 결론: 검토 필요"
-        )
-
-        phase2 = asyncio.run(
-            _generate_template_b_phase2(phase1_md, claim, [], docs, chain_info, Settings())
-        )
-
-        self.assertIn("[차이점]", phase2)
-        self.assertIn("추가 구성 확인 필요", phase2)
-        self.assertNotIn("[결합 논리]", phase2)
-        self.assertNotIn("[[차이점 1]]", phase2)
-        self.assertNotIn("[차이점 1]", phase2)
-
-    def test_combo_phase2_normalizes_difference_into_phase2_sentence_and_conclusion_lines(self):
-        claim = ParsedClaim(
-            claim_number=10,
-            text="claim",
-            elements=[ClaimElement(label="B", text="feature", importance="5")],
-        )
-        docs = [
-            ExtractedDocument(filename="primary.pdf"),
-            ExtractedDocument(filename="secondary.pdf"),
-        ]
-        chain_info = {
-            "total": [0, 1],
-            "doc_name_mapping": {"0": "인용발명 1", "1": "인용발명 2"},
-        }
-        phase1_md = (
-            "### [구성요소]\n\n(B) 차이 70%\n\n"
-            "- 인용발명 대응 원문: primary quote\n\n"
-            "### 종합 분석 요약\n\n"
-            "- 유사점 요약: 일부 구성이 대응됨\n"
-            "- 차이점: (B) 청구항의 센서 출력값에 따라 보정값을 갱신하는 구성은 인용발명 1에 직접 개시되어 있지 않으나,\n"
-            "  인용발명 2에는 센서 측정값을 이용하여 보정 파라미터를 갱신\n"
-            "  (단락 [0034], \"the correction parameter is updated using the sensed value\") 하는 구성이 기재되어 있으며\n"
-            "  이는 입력값 변화에 따라 보정값을 다시 설정하는 제어 로직을 제시하므로, 청구항의 해당 차이 부분에 대응되는 내용으로 볼 수 있습니다.\n"
-            "  다만 갱신 조건의 구체성은 청구항보다 제한적으로 개시되어 있다.\n"
-            "- 결론: 검토 필요"
-        )
-
-        phase2 = asyncio.run(
-            _generate_template_b_phase2(phase1_md, claim, [], docs, chain_info, Settings())
-        )
-
-        self.assertIn(
-            '청구항의 센서 출력값에 따라 보정값을 갱신하는 구성에 대해 '
-            '인용발명 2에는 "센서 측정값을 이용하여 보정 파라미터를 갱신"이라는 내용이 기재되어 있으며'
-            '(단락 [0034], "the correction parameter is updated using the sensed value"), 이는 '
-            '입력값 변화에 따라 보정값을 다시 설정하는 제어 로직을 제시하므로, 청구항의 해당 차이 부분에 대응된다고 볼 수 있습니다.',
-            phase2,
-        )
-        self.assertNotIn("구성 (B)의", phase2)
-
-    def test_combo_phase2_converts_generic_positive_conclusion_to_plain_difference_when_reason_is_negative(self):
-        phase2 = _build_phase2_markdown(
-            "### [구성요소]\n\n(B) 차이 70%\n\n"
-            "### 종합 분석 요약\n\n"
-            "- 유사점 요약: 일부 구성이 대응됨\n"
-            "- 차이점: (B) 뎁스 모드를 포함하는 세 가지 모드의 제어 회로를 구비하는 이미지 처리 장치는 인용발명 1에 직접 개시되어 있지 않으나, "
-            "인용발명 2에는 이미지 처리 장치가 기재되어 있으며 (문단 [0042]) 이는 일부 모드 제어만 설명할 뿐 청구항과 같이 세 가지 모드를 모두 명시하고 있지 않습니다. "
-            "따라서 추가 검토를 통해 거절 근거를 구성할 수 있습니다.\n"
-            "- 결론: 검토 필요",
-            1,
-            "인용발명 1",
-            "인용발명 2",
-            is_combo=True,
-            settings=Settings(),
-        )
-
-        self.assertIn(
-            "뎁스 모드를 포함하는 세 가지 모드의 제어 회로를 구비하는 이미지 처리 장치에 대해서는 명시되어 있지 않다는 점에서 차이가 있습니다.",
-            phase2,
-        )
-        self.assertNotIn("추가 검토를 통해 거절 근거를 구성할 수 있습니다", phase2)
-
-    def test_combo_phase2_converts_missing_disclosure_to_non_obviousness_style_difference(self):
-        phase2 = _build_phase2_markdown(
-            "### [구성요소]\n\n(C) 차이 65%\n\n"
-            "### 종합 분석 요약\n\n"
-            "- 유사점 요약: 일부 구성이 대응됨\n"
-            "- 차이점: (C) 적외선 픽셀이 포함된 패턴에 최적화된 합산 처리는 인용발명 1에 직접 개시되어 있지 않으나, "
-            "인용발명 2에는 공백 보완 방식이 기재되어 있으며 (문단 [0051]) 이는 공백 보완만 설명할 뿐 적외선 픽셀이 포함된 패턴에 최적화된 합산 처리에 대해서는 구체적 개시가 없습니다. "
-            "따라서 용이하게 도출될 수 있을 것으로 판단됩니다.\n"
-            "- 결론: 검토 필요",
-            1,
-            "인용발명 1",
-            "인용발명 2",
-            is_combo=True,
-            settings=Settings(),
-        )
-
-        self.assertIn(
-            "다만 적외선 픽셀이 포함된 패턴에 최적화된 합산 처리에 대해서는 구체적 개시가 없다는 점에서 용이하게 도출하기 어렵다고 보여집니다.",
-            phase2,
-        )
-        self.assertNotIn("용이하게 도출될 수 있을 것으로 판단됩니다", phase2)
-
-    def test_combo_phase2_preserves_phase1_limiting_reason_before_therefore(self):
-        phase2 = _build_phase2_markdown(
-            "### [구성요소]\n\n(B) 일부차이 75%\n\n"
-            "### 종합 분석 요약\n\n"
-            "- 유사점 요약: 일부 통신 모드가 대응됨\n"
-            "- 차이점: (B) 인밴드 통신과 아웃밴드 통신을 함께 사용하는 혼용 모드는 인용발명 1에 직접 개시되어 있지 않으나, "
-            "인용발명 2에는 아웃밴드 방식이 일치하면 아웃밴드로 반환하고 일치하지 않으면 제1 통신 방식으로 반환하는 내용이 기재되어 있으며 (단락 [0009]) "
-            "이는 아웃밴드 통신의 일치성 여부에 따라 인밴드 또는 아웃밴드를 전환하여 이용하는 제어 방식에 대응됩니다. "
-            "다만 이는 동시 병행 사용이라기보다는 택일적 전환에 가까운 측면이 있어 청구항의 혼용 모드와 완전히 동일하지는 않습니다. "
-            "따라서 인용발명 2의 개시 기법을 결합하더라도 혼용 모드 구성을 직접 도출하기에는 한계가 있어 추가 근거가 필요합니다.\n"
-            "- 결론: 검토 필요",
-            1,
-            "인용발명 1",
-            "인용발명 2",
-            is_combo=True,
-            settings=Settings(),
-        )
-
-        self.assertIn("택일적 전환에 가까운 측면이 있어 청구항의 혼용 모드와 완전히 동일하지는 않습니다.", phase2)
-        self.assertIn("따라서 인용발명 2의 개시 기법을 결합하더라도 혼용 모드 구성을 직접 도출하기에는 한계가 있어 추가 근거가 필요합니다.", phase2)
-        self.assertLess(
-            phase2.index("택일적 전환에 가까운 측면"),
-            phase2.index("따라서 인용발명 2의 개시 기법"),
-        )
-
-    def test_combo_phase2_adds_space_after_difference_label(self):
-        normalized = _normalize_difference_section("(A)?붿껌?쒖옄 媛?낅꽦???꾪빐 ?쒓났?쒕? 蹂댁젙?⑸땲??")
-
-        self.assertEqual("?붿껌?쒖옄 媛?낅꽦???꾪빐 ?쒓났?쒕? 蹂댁젙?⑸땲??", normalized)
-
-    def test_phase2_builds_judgment_fallback_when_phase1_summary_is_missing(self):
-        phase1_md = (
-            "### [구성요소]\n\n"
-            "(A) 실질적동일 95%\n\n"
-            "- 인용발명 대응 원문: primary quote\n\n"
-            "- 판단 이유: 인용발명 1의 배열 구조가 청구항과 실질적으로 동일합니다.\n\n"
-            "### [구성요소]\n\n"
-            "(B) 일부유사 60%\n\n"
-            "- 인용발명 대응 원문: secondary quote\n\n"
-            "- 판단 이유: 세부 모드 동작 회로는 직접 개시되지 않아 추가 보완이 필요합니다. 기능적 취지는 일부 대응됩니다."
-        )
-
-        phase2 = _build_phase2_markdown(
-            phase1_md,
-            13,
-            "인용발명 1",
-            "인용발명 2",
-            is_combo=True,
-            settings=Settings(),
-        )
-
-        self.assertNotIn("직접 작성하십시오", phase2)
-        self.assertIn("구성요소 (A)는 인용발명과 직접 대응되거나 실질적으로 동일한 구성이 확인됩니다.", phase2)
-        self.assertIn("세부 모드 동작 회로는 직접 개시되지 않아 추가 보완이 필요합니다.", phase2)
-        self.assertIn("구성요소 (B)에서 남는 차이가 있어 추가 보완 근거나 결합 논리 검토가 필요합니다.", phase2)
-
-    def test_filter_summary_diff_drops_substantially_identical_without_space_variant(self):
-        filtered = _filter_summary_diff_by_component_judgments(
-            "(A) 문언 차이만 있습니다.\n\n(B) 실제 차이가 남습니다.",
-            [
-                {"label": "A", "judgment": "실질적동일"},
-                {"label": "B", "judgment": "차이"},
-            ],
-        )
-
-        self.assertNotIn("(A)", filtered)
-        self.assertIn("(B) 실제 차이가 남습니다.", filtered)
-
-    def test_combo_phase2_splits_multiple_labeled_differences_without_blank_lines(self):
-        normalized = _normalize_difference_section(
-            "(A) 첫 번째 차이입니다.\n"
-            "다만 보완 필요합니다.\n"
-            "(B) 두 번째 차이입니다.\n"
-            "또한 추가 검토가 필요합니다.\n"
-            "(C) 세 번째 차이입니다."
-        )
-
-        self.assertEqual(
-            "첫 번째 차이입니다.\n"
-            "다만 보완 필요합니다.\n\n"
-            "두 번째 차이입니다.\n"
-            "또한 추가 검토가 필요합니다.\n\n"
-            "세 번째 차이입니다.",
-            normalized,
-        )
 
     def test_second_conventional_document_gets_limited_rationale(self):
         chain_data = {
@@ -2095,29 +1649,54 @@ class DependentCitationChainPolicyTests(unittest.TestCase):
         self.assertFalse(chain["coverage_complete"])
         self.assertEqual(chain["uncovered_labels"], ["C", "D"])
 
-    def test_phase2_does_not_reject_when_one_new_reference_cannot_cover_the_claim(self):
-        claim = ParsedClaim(
-            claim_number=2,
-            claim_type="dependent",
-            parent_claim=1,
-            text="claim 2",
-            elements=[ClaimElement(label="C", text="추가 구성 C")],
-        )
-        chain_info = {
-            "inherited": [0, 1],
-            "added": [],
-            "total": [0, 1],
-            "coverage_complete": False,
-            "uncovered_labels": ["C"],
-            "doc_name_mapping": {"0": "인용발명 1", "1": "인용발명 2"},
-        }
+    def test_dependent_claim_keeps_quoted_difference_as_partial_added_reference(self):
+        claims = [
+            ParsedClaim(
+                claim_number=1,
+                text="independent claim",
+                elements=[
+                    ClaimElement(label="IA", text="잠재 포인트 클라우드", importance="5"),
+                    ClaimElement(label="IB", text="대상 식별 임베딩", importance="5"),
+                ],
+            ),
+            ParsedClaim(
+                claim_number=4,
+                claim_type="dependent",
+                parent_claim=1,
+                text="claim 4",
+                elements=[
+                    ClaimElement(
+                        label="A",
+                        text="잠재 데이터 표현과 대상 식별 임베딩을 입력으로 하는 제1 처리 모듈 출력 및 제2 처리 모듈 출력",
+                        importance="5",
+                    )
+                ],
+            ),
+        ]
+        caches = [
+            {
+                "1": [self._item("IA", "동일", "latent representation"), self._item("IB", "대응 없음")],
+                "4": [self._item("A", "대응 없음")],
+            },
+            {
+                "1": [self._item("IA", "대응 없음"), self._item("IB", "동일", "target embedding")],
+                "4": [self._item("A", "대응 없음")],
+            },
+            {
+                "1": [self._item("IA", "대응 없음"), self._item("IB", "대응 없음")],
+                "4": [self._item("A", "차이", "the processing model accepts structured input data")],
+            },
+        ]
 
-        report = generate_dependent_phase2("### 청구항 2\n\n추가 구성을 검토했습니다.", claim, chain_info, Settings())
+        result = self._write_caches_and_build(claims, caches)
+        chain = result["chains"]["4"]
+        independent_total = result["chains"]["1"]["total"]
 
-        self.assertIn("새 인용발명 1개만 추가", report)
-        self.assertIn("쉽게 발명할 수 있다고 보기 어렵습니다", report)
-        self.assertIn("청구항 2의 추가 구성에 대해서는", report)
-        self.assertNotIn("청구항 2의 C에 대해서는", report)
+        self.assertEqual(chain["inherited"], independent_total)
+        self.assertEqual(chain["added"], [2])
+        self.assertEqual(chain["total"], independent_total + [2])
+        self.assertFalse(chain["coverage_complete"])
+        self.assertEqual(chain["uncovered_labels"], ["A"])
 
 
 class ConsistencyRegressionTests(unittest.TestCase):
@@ -2128,139 +1707,6 @@ class ConsistencyRegressionTests(unittest.TestCase):
         self.assertLessEqual(len(shortened), 350)
         self.assertIn(" ... ", shortened)
 
-    def test_dependent_phase2_preserves_explicit_phase1_conclusion(self):
-        claim = ParsedClaim(
-            claim_number=2,
-            claim_type="dependent",
-            parent_claim=1,
-            text="claim 2",
-            elements=[ClaimElement(label="A", text="additional feature")],
-        )
-        chain_info = {
-            "inherited": [0],
-            "added": [],
-            "total": [0],
-            "parent_available": True,
-            "coverage_complete": True,
-            "doc_name_mapping": {"0": "인용발명 1"},
-        }
-        phase1 = (
-            "### [추가 구성]\n\n(A) 차이 60%\n\n"
-            "### 종합 분석 요약\n\n"
-            "- 결론: 남은 조건 차이에 관해서는 추가 근거가 필요합니다."
-        )
-
-        report = generate_dependent_phase2(phase1, claim, chain_info, Settings())
-
-        self.assertIn("추가 근거가 필요합니다", report)
-        self.assertNotIn("쉽게 발명할 수 있습니다", report)
-
-    def test_dependent_phase2_additional_configuration_contains_quote_only(self):
-        claim = ParsedClaim(
-            claim_number=2,
-            claim_type="dependent",
-            parent_claim=1,
-            text="제1항에 있어서, 압력 센서를 더 포함하는 장치",
-            elements=[ClaimElement(label="A", text="압력 센서를 더 포함하는 구성")],
-        )
-        chain_info = {
-            "inherited": [0],
-            "added": [],
-            "total": [0],
-            "parent_available": True,
-            "coverage_complete": True,
-            "doc_name_mapping": {"0": "인용발명 1"},
-        }
-        phase1 = (
-            "### [추가 구성]\n\n"
-            "(A) 실질적동일 90%\n\n"
-            "- 청구항 추가 구성: 압력 센서를 더 포함하는 구성\n\n"
-            "- 인용발명 대응 원문: 압력 센서를 포함한다(단락 [0010])\n\n"
-            "- 인용발명 대응 부분 요약: 압력 센서가 요약됩니다.\n\n"
-            "- 판단 이유: 청구항의 센서와 대응됩니다.\n\n"
-            "### 종합 분석 요약\n\n"
-            "- 차이점: 없음\n"
-            "- 결론: 추가 구성은 인용발명 1에 의해 실질적으로 동일하게 확인됩니다."
-        )
-
-        report = generate_dependent_phase2(phase1, claim, chain_info, Settings())
-        additional = report.split("### 종합 분석 요약", 1)[0]
-
-        self.assertIn("[추가 구성]", report)
-        self.assertIn("- 인용발명 대응 원문:", additional)
-        self.assertIn("압력 센서를 포함한다(단락 [0010])", additional)
-        self.assertNotIn("인용발명 대응 부분 요약", additional)
-        self.assertNotIn("판단 이유", additional)
-        self.assertIn("[결론]", report)
-        self.assertIn("청구항 2의 구성에 대해 인용발명 1에는 위 인용발명 대응 원문과 같은 내용이 기재되어 있으며", report)
-        self.assertIn("이는 청구항 2의 압력 센서를 더 포함하는 구성에 실질적으로 동일하게 대응될 수 있습니다.", report)
-        self.assertIn("따라서 추가 구성은 인용발명 1에 의해 실질적으로 동일하게 확인됩니다.", report)
-        self.assertNotIn("[판단 이유]", report)
-        self.assertNotIn("청구항의 센서와 대응됩니다.", report)
-
-    def test_dependent_phase2_bold_quote_label_does_not_leak_into_claim_core(self):
-        claim = ParsedClaim(
-            claim_number=3,
-            claim_type="dependent",
-            parent_claim=2,
-            text="제2항에 있어서, 특정 요청 패킷이 모드 표시 값을 포함하는 장치",
-            elements=[ClaimElement(label="A", text="특정 요청 패킷이 모드 표시 값을 포함하는 구성")],
-        )
-        chain_info = {
-            "inherited": [0, 1],
-            "added": [],
-            "total": [0, 1],
-            "parent_available": True,
-            "coverage_complete": False,
-            "uncovered_labels": ["A"],
-            "doc_name_mapping": {"0": "인용발명 1", "1": "인용발명 2"},
-        }
-        phase1 = (
-            "### [추가 구성]\n\n"
-            "(A) 일부차이 70%\n\n"
-            "- 청구항 추가 구성: 특정 요청 패킷이 모드 표시 값을 포함하는 구성\n\n"
-            "- **인용발명** 대응 원문:\n"
-            "가정해보자, PRX는 BLE, NFC 및 강화된 인밴드 통신 방식을 지원한다\n\n"
-            "- 판단 이유: 패킷 내 표시 값은 직접 개시되지 않습니다.\n\n"
-            "### 종합 분석 요약\n\n"
-            "- 차이점: 패킷 내 파라미터 정보가 명시되어 있지 않아 차이가 있습니다.\n"
-            "- 결론: 추가 근거가 필요합니다."
-        )
-
-        report = generate_dependent_phase2(phase1, claim, chain_info, Settings())
-        conclusion = report.split("[결론]", 1)[1].split("따라서", 1)[0]
-        claim_side = conclusion.split("이는 청구항 3의", 1)[1]
-
-        self.assertIn("특정 요청 패킷이 모드 표시 값을 포함하는 구성과 차이가 있습니다.", claim_side)
-        self.assertNotIn("인용발명", claim_side)
-        self.assertNotIn("가정해보자", claim_side)
-
-    def test_dependent_phase2_does_not_decide_full_claim_without_parent(self):
-        claim = ParsedClaim(
-            claim_number=5,
-            claim_type="dependent",
-            parent_claim=4,
-            text="claim 5",
-            elements=[ClaimElement(label="A", text="additional feature")],
-        )
-        chain_info = {
-            "inherited": [],
-            "added": [0],
-            "total": [0],
-            "parent_available": False,
-            "coverage_complete": True,
-            "doc_name_mapping": {"0": "인용발명 1"},
-        }
-
-        report = generate_dependent_phase2(
-            "### [추가 구성 (A)]\n\n- 결론: 대응됩니다.",
-            claim,
-            chain_info,
-            Settings(),
-        )
-
-        self.assertIn("청구항 전체의 거절 근거 구성 가능 여부", report)
-        self.assertIn("판단할 수 없습니다", report)
 
     def test_reference_store_replaces_all_rows_for_same_claim_scope(self):
         with tempfile.TemporaryDirectory() as temp_dir:
