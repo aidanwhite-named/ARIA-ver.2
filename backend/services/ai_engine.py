@@ -51,6 +51,14 @@ _AGY_META_RESPONSE_PATTERNS = (
     "read the prompt file to understand the task",
     "read the complete utf-8 prompt from the file below",
     "prompt file:",
+    "command is running",
+    "waiting for the command",
+    "search command",
+    "tool result",
+    "명령어가 실행 중",
+    "명령이 실행 중",
+    "결과를 대기",
+    "검색 작업의 결과",
 )
 
 _cli_cache: dict[str, bool] = {}
@@ -501,6 +509,9 @@ def _select_agy_response_candidate(candidates: list[str]) -> str:
     """Prefer a complete structured/final response over longer reasoning text."""
     cleaned = [_clean_agy_payload_text(item) for item in candidates]
     cleaned = [item for item in cleaned if item]
+    filtered = [item for item in cleaned if not _is_agy_internal_text(item)]
+    if filtered:
+        cleaned = filtered
     if not cleaned:
         return ""
 

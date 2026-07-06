@@ -1,9 +1,0 @@
-종속항 ${claim_number}
-
-${review_intro}
-
-${analysis}
-
-${parent_basis}
-
-${conclusion}

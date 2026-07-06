@@ -9,16 +9,14 @@ const DEFAULT_SETTINGS = {
   model_parser: 'claude-haiku-4-5-20251001',
   model_compare: 'claude-sonnet-4-6',
   model_report: 'claude-haiku-4-5-20251001',
-  use_rag_retrieval: true,
-  rag_top_k: 20,
-  use_reranker: true,
-  reranker_top_k: 10,
 }
 const DEFAULT_MODELS = {
   claude: ['claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'],
   openai: ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini'],
   agy: ['gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemini-3.1-pro-preview'],
 }
+
+
 
 export default function SettingsModal({ onClose }) {
   const [settings, setSettings] = useState(null)
@@ -170,6 +168,8 @@ export default function SettingsModal({ onClose }) {
                 </div>
               </div>
 
+
+
               <div>
                 <label className="text-xs font-medium text-gray-600 block mb-1">
                   작업 단계별 모델
@@ -204,13 +204,15 @@ export default function SettingsModal({ onClose }) {
                   {[
                     {
                       value: 'per_doc',
-                      title: 'Per-doc 비교',
-                      description: '인용발명마다 LLM을 따로 호출해 순차적으로 비교합니다.',
+                      title: '문헌 각각 비교',
+                      description: '인용발명들의 글자 합이 30만 자 이상일 때 이용.',
+                      caution: '문헌 수만큼 호출되어 토큰 및 시간 비용 증가',
                     },
                     {
                       value: 'hybrid',
                       title: '통합 비교',
-                      description: '모든 인용발명을 한 번의 큰 프롬프트로 묶어 동시에 비교합니다.',
+                      description: '속도 우선. 문헌이 적고 짧을 때 권장합니다.',
+                      caution: '본문이 길면 문헌 각각 비교를 이용',
                     },
                   ].map(option => {
                     const selected = settings.comparison_mode === option.value
@@ -231,113 +233,22 @@ export default function SettingsModal({ onClose }) {
                           onChange={() => set('comparison_mode', option.value)}
                           className="sr-only"
                         />
-                        <div className={`text-xs font-semibold ${selected ? 'text-blue-700' : 'text-gray-700'}`}>
+                        <div className={`text-sm font-semibold ${selected ? 'text-blue-700' : 'text-gray-700'}`}>
                           {option.title}
                         </div>
-                        <div className="mt-1 text-[10px] leading-relaxed text-gray-500">
+                        <div className="mt-1 text-xs leading-relaxed text-gray-600">
                           {option.description}
+                        </div>
+                        <div className="mt-1 text-xs leading-relaxed text-amber-700">
+                          {option.caution}
                         </div>
                       </label>
                     )
                   })}
                 </div>
-                {settings.comparison_mode === 'hybrid' && (
-                  <div className="mt-2 rounded bg-amber-50 px-2.5 py-2 text-[10px] leading-relaxed text-amber-700">
-                    통합 비교는 모든 문헌을 한 번에 보내므로 문헌 수와 본문 길이가 크면 응답 시간이 길어질 수 있습니다.
-                  </div>
-                )}
               </div>
-
-              <div className="border rounded-lg overflow-hidden">
-                <div className="flex items-center justify-between px-3 py-2 bg-purple-50">
-                  <div>
-                    <div className="text-xs font-semibold text-purple-800">RAG 단락 필터링</div>
-                    <div className="text-[10px] text-purple-600 mt-0.5">
-                      BGE-M3 Dense + BM25 Hybrid 검색으로 먼저 후보 단락을 고르고, 필요하면 reranker로 다시 정렬해 LLM 입력 토큰을 줄입니다.
-                    </div>
-                  </div>
-                  <label className="relative inline-flex items-center cursor-pointer ml-3 shrink-0">
-                    <input
-                      type="checkbox"
-                      className="sr-only peer"
-                      checked={!!settings.use_rag_retrieval}
-                      onChange={e => set('use_rag_retrieval', e.target.checked)}
-                    />
-                    <div className="w-9 h-5 bg-gray-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-purple-600" />
-                  </label>
-                </div>
-                {settings.use_rag_retrieval && (
-                  <div className="px-3 py-3 bg-white border-t space-y-3">
-                    {status.rag && (
-                      <div className="rounded border border-slate-200 bg-slate-50 px-2 py-1.5 text-[10px] text-slate-600">
-                        실행 상태: dense {status.rag.dense} / Qdrant {status.rag.qdrant} / BM25 {status.rag.bm25} / reranker {status.rag.reranker}
-                        {status.rag.fallback_reason && (
-                          <div className="mt-1 text-amber-700">폴백 사유: {status.rag.fallback_reason}</div>
-                        )}
-                      </div>
-                    )}
-                    <div className="bg-amber-50 border border-amber-100 rounded px-2 py-1.5 text-[10px] text-amber-700">
-                      최초 실행 시 BGE-M3 모델 다운로드가 필요할 수 있습니다. 이후에는 캐시에서 로드합니다.
-                    </div>
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <label className="text-xs font-medium text-gray-600">1차 후보 단락 수</label>
-                        <span className="text-xs font-bold text-purple-700">{settings.rag_top_k ?? 20}개</span>
-                      </div>
-                      <input
-                        type="range"
-                        min="10"
-                        max="30"
-                        step="1"
-                        value={settings.rag_top_k ?? 20}
-                        onChange={e => set('rag_top_k', parseInt(e.target.value))}
-                        className="w-full h-1.5 bg-purple-200 rounded-lg appearance-none cursor-pointer accent-purple-600"
-                      />
-                      <div className="flex justify-between text-[9px] text-gray-400 mt-0.5">
-                        <span>10개</span>
-                        <span>20개 권장</span>
-                        <span>30개</span>
-                      </div>
-                      <div className="mt-1 text-[10px] text-gray-500">
-                        Dense+BM25 검색으로 먼저 뽑아 둘 후보 문단 수입니다.
-                      </div>
-                    </div>
-                    <div className="rounded border border-gray-200 p-2.5 space-y-2">
-                      <label className="flex items-center justify-between gap-3 cursor-pointer">
-                        <span>
-                          <span className="block text-xs font-medium text-gray-700">BGE reranker 사용</span>
-                          <span className="block text-[10px] text-gray-500">추가 LLM 호출 없이 1차 후보 문단의 우선순위를 로컬에서 다시 매깁니다.</span>
-                        </span>
-                        <input
-                          type="checkbox"
-                          checked={!!settings.use_reranker}
-                          onChange={e => set('use_reranker', e.target.checked)}
-                          className="accent-blue-600"
-                        />
-                      </label>
-                      {settings.use_reranker && (
-                        <>
-                          <label className="flex items-center justify-between gap-3 text-xs text-gray-600">
-                            reranker 후 최종 전달 문단 수
-                            <select
-                              value={settings.reranker_top_k ?? 10}
-                              onChange={e => set('reranker_top_k', parseInt(e.target.value))}
-                              className="rounded border bg-white px-2 py-1"
-                            >
-                              {[5, 8, 10, 12, 15].map(value => <option key={value} value={value}>{value}개</option>)}
-                            </select>
-                          </label>
-                          <div className="text-[10px] text-gray-500">
-                            위 1차 후보 중 reranker가 다시 추린 뒤 실제로 LLM에 넣는 문단 수입니다.
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
-          </>
-        </div>
+            </>
+          </div>
 
         <div className="flex items-center justify-between px-5 py-3 border-t bg-gray-50 shrink-0">
           <button
@@ -350,10 +261,6 @@ export default function SettingsModal({ onClose }) {
                   model_parser: '',
                   model_compare: 'claude-sonnet-4-6',
                   model_report: '',
-                  use_rag_retrieval: true,
-                  rag_top_k: 20,
-                  use_reranker: true,
-                  reranker_top_k: 10,
                 })
               }
             }}

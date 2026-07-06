@@ -204,33 +204,3 @@ export async function enhanceClaim(jobId, claimNumber) {
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
-
-// 키워드 추출 (LLM 없음, 즉시)
-
-// 보완문서 검색 — 인용발명 미커버 구성요소 조회 (LLM 없음, 즉시)
-export async function getGapElements(jobId, claimNumber) {
-  const res = await fetch(`${BASE}/analyze/gap_search/${jobId}/${claimNumber}`)
-  if (!res.ok) throw new Error(await res.text())
-  return res.json()
-}
-
-// 보완문서 웹검색 실행 (LLM 1회, 웹검색 도구 사용 — 수 분 소요 가능)
-export async function webSearchGap(jobId, claimNumber) {
-  const res = await fetch(`${BASE}/analyze/gap_search/${jobId}/${claimNumber}/web_search`, { method: 'POST' })
-  if (!res.ok) throw new Error(await res.text())
-  return res.json()
-}
-
-// 검색 전략 캐시 조회 (LLM 없음, 즉시)
-export async function getSearchStrategy(jobId, claimNumber) {
-  const res = await fetch(`${BASE}/analyze/search_strategy/${jobId}/${claimNumber}`)
-  if (!res.ok) throw new Error(await res.text())
-  return res.json()
-}
-
-// 검색 전략 생성 (LLM 1회 — 구성 분해·키워드 확장·DB별 검색식, 1~3분 소요)
-export async function generateSearchStrategy(jobId, claimNumber) {
-  const res = await fetch(`${BASE}/analyze/search_strategy/${jobId}/${claimNumber}`, { method: 'POST' })
-  if (!res.ok) throw new Error(await res.text())
-  return res.json()
-}

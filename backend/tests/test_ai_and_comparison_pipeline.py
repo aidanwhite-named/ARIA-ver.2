@@ -852,9 +852,9 @@ class ConventionalSupportPolicyTests(unittest.TestCase):
             ],
         )
 
-        self.assertIn("인용발명 1에서 확인되지 않는 하위 제한", prompt)
-        self.assertIn("보조 문헌이 있으면 대응 발췌와 출처를 제시", prompt)
-        self.assertIn("보조 문헌이 없으면 없다고만 적은 뒤 같은 의미를 반복하지 않는다", prompt)
+        self.assertIn("주인용발명(인용발명 1)에서 확인되지 않는 하위 제한", prompt)
+        self.assertIn("보강이 된 이후에도 남는 하위 제한", prompt)
+        self.assertIn("외국어 문헌의 괄호 안 따옴표 원문은 반드시 해당 외국어 원문 그대로", prompt)
         self.assertIn("인용발명 2의 직접 대응 여부와 보완 범위는 종합 분석 요약의 차이점에서만 작성합니다.", prompt)
 
     def test_phase1_summary_polish_removes_repeated_fallback_phrasing(self):

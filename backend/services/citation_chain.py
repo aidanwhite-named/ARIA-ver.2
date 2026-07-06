@@ -55,6 +55,11 @@ _SECONDARY_IMPROVE_THRESHOLD = 4  # "실질적 동일" 이상
 # "일부 유사"는 완전 보완 근거로 보지는 않지만, 주지관용 논거보다 문헌 근거로
 # 먼저 검토할 가치가 있으므로 마지막 단계의 보조 인용발명 후보로 인정한다.
 _SECONDARY_SUPPORT_THRESHOLD = 2  # "일부 유사" 이상
+# Dependent claims are often narrower implementation choices. If a newly added
+# document expressly teaches the main implementation axis but leaves a limitation
+# different, keep it in the chain as partial support so the report can explain
+# both the usable teaching and the remaining difference.
+_DEPENDENT_PARTIAL_SUPPORT_THRESHOLD = 0  # "차이" with an actual quote
 # 주인용발명 단독 가중 유사도가 이 이상이면 소프트 공백이 있어도 결합 불필요 (단독 충분)
 SINGLE_SUFFICIENT_SIMILARITY = 91.0
 
@@ -1539,6 +1544,11 @@ def _build_chains_recursive(
                     caches,
                     num_docs,
                     expected_labels=expected_labels,
+                    expected_text_by_label={
+                        normalize_label(element.label): element.text
+                        for element in claim.elements
+                        if normalize_label(element.label)
+                    },
                 )[:MAX_DEPTH_INCREMENT]
             else:
                 # 종속항 자체 대비 근거가 없으면 독립항 점수가 높은 문헌을
@@ -1580,6 +1590,7 @@ def _dependent_added_inv(
     caches: Dict[int, Optional[Dict]],
     num_docs: int,
     expected_labels: Optional[set[str]] = None,
+    expected_text_by_label: Optional[Dict[str, str]] = None,
 ) -> List[int]:
     """종속항 자체 대비 캐시로 추가 인용발명을 선정한다 (독립항 보완성 로직과 동일 기준).
 
@@ -1602,8 +1613,39 @@ def _dependent_added_inv(
                 score = _JUDGMENT_SCORE.get(item.get("judgment", "대응 없음"), 0)
                 inherited_best[label] = max(inherited_best.get(label, 0), score)
 
-    def _best_filler(target_labels: set, min_score: int) -> tuple[Optional[int], int]:
-        best_idx, best_score = None, 0
+    def _technical_tokens(text: str) -> set[str]:
+        tokens = set()
+        for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9+_.-]{2,}|[가-힣]{2,}", text or ""):
+            lowered = token.lower().strip(".,;:()[]{}")
+            if lowered in {"하는", "상기", "입력", "출력", "구성", "특징", "feature", "input", "output"}:
+                continue
+            tokens.add(lowered)
+        return tokens
+
+    def _model_tokens(text: str) -> set[str]:
+        return {
+            token.lower()
+            for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9+_.-]{2,}", text or "")
+            if re.search(r"\d|\+|-|cnn|net|transformer|dit|pvcnn|pointnet|pvconv", token, re.IGNORECASE)
+        }
+
+    claim_model_tokens_by_label = {
+        label: _model_tokens((expected_text_by_label or {}).get(label, ""))
+        for label in all_labels
+    }
+
+    claim_tokens_by_label = {
+        label: _technical_tokens((expected_text_by_label or {}).get(label, ""))
+        for label in all_labels
+    }
+
+    def _best_filler(
+        target_labels: set,
+        min_score: int,
+        *,
+        require_quote: bool = False,
+    ) -> tuple[Optional[int], int]:
+        candidates: list[tuple[int, int]] = []
         for i in range(num_docs):
             if i in inherited:
                 continue
@@ -1613,13 +1655,101 @@ def _dependent_added_inv(
                 label = normalize_label(item.get("label", ""))
                 if label in target_labels:
                     j_score = _JUDGMENT_SCORE.get(item.get("judgment", "대응 없음"), 0)
-                    if j_score >= min_score:
-                        score += j_score
+                    if j_score >= min_score and (not require_quote or bool(item.get("quote"))):
+                        item_score = max(1, j_score)
+                        if require_quote:
+                            evidence_text = " ".join(
+                                str(item.get(field, "") or "")
+                                for field in ("quote", "판단_이유", "similarity_reason")
+                            )
+                            overlap = claim_tokens_by_label.get(label, set()) & _technical_tokens(evidence_text)
+                            item_score += min(5, len(overlap))
+                        score += item_score
                         covered.add(label)
             # 한 종속항에 새 문헌을 두 개 더하는 방식은 금지한다. 따라서
             # 후보 하나가 남은 대상 전부를 커버하는 경우만 채택 가능하다.
-            if covered == target_labels and score > best_score:
-                best_score, best_idx = score, i
+            if covered == target_labels and score > 0:
+                candidates.append((score, i))
+        if not candidates:
+            return None, 0
+        best_score, best_idx = max(candidates, key=lambda item: (item[0], -item[1]))
+        return best_idx, best_score
+
+    def _partial_support_filler(target_labels: set) -> tuple[Optional[int], int]:
+        exact_terms = [
+            term for term in ("dit-3d", "pvcnn", "pointnet++", "pointnet", "pvconv")
+            if any(term in (text or "").lower() for text in (expected_text_by_label or {}).values())
+        ]
+        if exact_terms:
+            exact_candidates: list[tuple[int, int]] = []
+            for i in range(num_docs):
+                if i in inherited:
+                    continue
+                score = 0
+                covered: set[str] = set()
+                for item in _items(i):
+                    label = normalize_label(item.get("label", ""))
+                    if label not in target_labels or not item.get("quote"):
+                        continue
+                    quote_text = str(item.get("quote", "") or "")
+                    for evidence in item.get("evidence", []) or []:
+                        if isinstance(evidence, dict):
+                            quote_text += " " + str(evidence.get("quote", "") or "")
+                    quote_lower = quote_text.lower()
+                    matched_terms = [term for term in exact_terms if term in quote_lower]
+                    if not matched_terms:
+                        continue
+                    j_score = _JUDGMENT_SCORE.get(item.get("judgment", "대응 없음"), 0)
+                    score += max(1, j_score) + 10 * len(matched_terms)
+                    covered.add(label)
+                if covered == target_labels and score > 0:
+                    exact_candidates.append((score, i))
+            if exact_candidates:
+                best_score, best_idx = max(exact_candidates, key=lambda item: (item[0], -item[1]))
+                return best_idx, best_score
+
+        model_candidates: list[tuple[int, int]] = []
+        candidates: list[tuple[int, int]] = []
+        for i in range(num_docs):
+            if i in inherited:
+                continue
+            score = 0
+            model_score = 0
+            covered: set[str] = set()
+            model_covered: set[str] = set()
+            for item in _items(i):
+                label = normalize_label(item.get("label", ""))
+                if label not in target_labels or not item.get("quote"):
+                    continue
+                j_score = _JUDGMENT_SCORE.get(item.get("judgment", "대응 없음"), 0)
+                if j_score < _DEPENDENT_PARTIAL_SUPPORT_THRESHOLD:
+                    continue
+                evidence_text = str(item.get("quote", "") or "")
+                for evidence in item.get("evidence", []) or []:
+                    if isinstance(evidence, dict):
+                        evidence_text += " " + str(evidence.get("quote", "") or "")
+                overlap = claim_tokens_by_label.get(label, set()) & _technical_tokens(evidence_text)
+                model_overlap = claim_model_tokens_by_label.get(label, set()) & _model_tokens(evidence_text)
+                expected_text = ((expected_text_by_label or {}).get(label, "") or "").lower()
+                evidence_lower = evidence_text.lower()
+                direct_model_overlap = any(
+                    token in expected_text and token in evidence_lower
+                    for token in ("dit-3d", "pvcnn", "pointnet++", "pointnet", "pvconv")
+                )
+                has_model_overlap = bool(model_overlap) or direct_model_overlap
+                score += max(1, j_score) + min(2, len(overlap)) + (10 if has_model_overlap else 0)
+                covered.add(label)
+                if has_model_overlap:
+                    model_score += max(1, j_score) + 10 + min(2, len(model_overlap))
+                    model_covered.add(label)
+            if model_covered == target_labels and model_score > 0:
+                model_candidates.append((model_score, i))
+            if covered == target_labels and score > 0:
+                candidates.append((score, i))
+        pool = model_candidates or candidates
+        if not pool:
+            return None, 0
+        best_score, best_idx = max(pool, key=lambda item: (item[0], -item[1]))
         return best_idx, best_score
 
     gaps = {l for l in all_labels if inherited_best.get(l, 0) < _PRIMARY_COVER_THRESHOLD}
@@ -1635,6 +1765,13 @@ def _dependent_added_inv(
             f"청구항 {claim_key} (종속항): 남은 공백 {len(gaps)}개를 "
             "단독으로 모두 보완하는 인용발명이 없어 새 문헌을 추가하지 않음"
         )
+        partial_idx, partial_score = _partial_support_filler(gaps)
+        if partial_idx is not None:
+            logger.info(
+                f"청구항 {claim_key} (종속항): 추가 인용발명 doc[{partial_idx}] 부분 보완 채택 "
+                f"(공백 {len(gaps)}개, 부분 보완점수 {partial_score})"
+            )
+            return [partial_idx]
         return []
 
     # 소프트 공백: 상속 문헌이 '일부 차이'로만 커버한 추가 구성을 '실질적 동일'

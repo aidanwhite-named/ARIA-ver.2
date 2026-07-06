@@ -16,7 +16,6 @@ from typing import Dict, List, Optional
 from backend.models.schemas import ClaimElement, ElementMatch, EvidenceSpan, ExtractedDocument, ParsedClaim, Settings
 from backend.services.ai_engine import call_ai
 from backend.services.prompt_loader import load_prompt, render_prompt
-from backend.services.rag_retriever import format_rag_doc_text, retrieve_with_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +42,7 @@ _ENGINE_BUDGETS = {
 _DEFAULT_BUDGET = (45_000, 60_000, 55_000, 5_000)
 _CHUNK_SIZE = 1_200
 _CACHE_META_KEY = "_meta"
-_CACHE_SCHEMA_VERSION = 4
+_CACHE_SCHEMA_VERSION = 5
 _DEFAULT_DEPENDENT_CANDIDATE_DOC_LIMIT = 3
 _JUDGMENT_RANK = {
     "동일": 5,
@@ -62,132 +61,6 @@ def _budgets(engine: str) -> tuple[int, int, int, int]:
 def _full_doc_text(doc: ExtractedDocument) -> str:
     chunks = _doc_chunks(doc)
     return "\n".join(f"{cid} {text}" for cid, text in chunks)
-
-
-def _rag_enabled(settings: Optional[Settings]) -> bool:
-    return bool(settings is not None and getattr(settings, "use_rag_retrieval", False))
-
-
-def _comparison_mode(value: object) -> str:
-    return "hybrid" if str(value or "").strip().lower() == "hybrid" else "per_doc"
-
-
-def _rag_hits_for_doc(
-    doc: ExtractedDocument,
-    elements: List[ClaimElement],
-    settings: Settings,
-    top_k: Optional[int] = None,
-) -> Optional[List[Dict]]:
-    try:
-        resolved_top_k = int(top_k or getattr(settings, "rag_top_k", 20) or 20)
-    except (TypeError, ValueError):
-        resolved_top_k = 20
-    resolved_top_k = max(1, min(resolved_top_k, 50))
-    top_k_per_element = max(3, min(8, resolved_top_k // max(1, len(elements)) + 2))
-    return retrieve_with_metadata(
-        _retrieval_query_elements(elements),
-        doc,
-        Path(getattr(settings, "rag_uploads_dir", "uploads") or "uploads"),
-        top_k=resolved_top_k,
-        top_k_per_element=top_k_per_element,
-        use_reranker=bool(getattr(settings, "use_reranker", False)),
-        reranker_top_k=int(getattr(settings, "reranker_top_k", 10) or 10),
-    )
-
-
-_RETRIEVAL_QUERY_EXPANSIONS: tuple[tuple[tuple[str, ...], str], ...] = (
-    (
-        ("인밴드", "in-band"),
-        " in-band communication magnetic field communication enhanced in-band",
-    ),
-    (
-        ("아웃밴드", "out-band", "out of band", "대역외"),
-        " out-band out-of-band communication carrier BLE Bluetooth NFC RFID Zigbee Wi-Fi",
-    ),
-    (
-        ("혼용", "함께", "동시에", "hybrid", "mixed"),
-        " mixed mode hybrid mode shared mode simultaneous together both combination",
-    ),
-    (
-        ("모드", "mode"),
-        " mode communication mode power transmission mode",
-    ),
-    (
-        ("표시", "나타내", "지시", "indicat"),
-        " indicate indicator indication information representing identifying",
-    ),
-    (
-        ("제1값", "제2값", "제3값", "값", "value"),
-        " first value second value third value value code bit flag identifier ID 0 1 2 3",
-    ),
-    (
-        ("특정 요청", "srq", "specific request", "요청 패킷"),
-        " SRQ specific request packet request message response message",
-    ),
-    (
-        ("패킷", "packet", "메시지", "message"),
-        " packet message data packet control packet configuration packet",
-    ),
-)
-
-
-def _retrieval_query_elements(elements: List[ClaimElement]) -> List[ClaimElement]:
-    """Broaden short Korean claim phrases before RAG lookup without changing comparison labels."""
-    expanded: list[ClaimElement] = []
-    for elem in elements or []:
-        text = getattr(elem, "text", "") or ""
-        lowered = text.lower()
-        additions: list[str] = []
-        for triggers, expansion in _RETRIEVAL_QUERY_EXPANSIONS:
-            if any(trigger.lower() in lowered for trigger in triggers):
-                additions.append(expansion)
-        if additions:
-            expanded.append(elem.model_copy(update={"text": text + " " + " ".join(additions)}))
-        else:
-            expanded.append(elem)
-    return expanded
-
-
-def _expand_rag_hits_with_neighbors(
-    hits: List[Dict],
-    doc: ExtractedDocument,
-    settings: Optional[Settings],
-) -> Dict[str, str]:
-    """선택 문단의 앞뒤 문단을 함께 붙여 기능 문맥 손실을 줄인다."""
-    if not hits:
-        return {}
-
-    try:
-        neighbor_count = int(getattr(settings, "rag_context_neighbors", 1) or 0)
-    except (TypeError, ValueError):
-        neighbor_count = 1
-    neighbor_count = max(0, min(neighbor_count, 2))
-
-    chunks = _doc_chunks(doc)
-    if not chunks:
-        return {}
-
-    order_lookup = {
-        str(chunk_id).strip("[]"): idx
-        for idx, (chunk_id, _text) in enumerate(chunks)
-    }
-    selected_orders: set[int] = set()
-
-    for hit in hits:
-        para_no = str(hit.get("paragraph_no") or "").strip("[]")
-        para_id = str(hit.get("paragraph_id") or "").strip("[]")
-        idx = order_lookup.get(para_no or para_id)
-        if idx is None:
-            continue
-        start = max(0, idx - neighbor_count)
-        end = min(len(chunks), idx + neighbor_count + 1)
-        selected_orders.update(range(start, end))
-
-    selected: Dict[str, str] = {}
-    for idx in sorted(selected_orders):
-        chunk_id, text = chunks[idx]
-        selected[str(chunk_id)] = text
-    return selected
 
 
 def select_candidate_doc_indices_for_elements(
@@ -325,22 +198,13 @@ def _build_doc_text(
     relevant_limit = min(max_chars, relevant_default) if max_chars else relevant_default
 
     full_text = "\n".join(f"{cid} {text}" for cid, text in chunks)
-    if not elements or len(full_text) <= hard_limit:
+    if not elements:
         return full_text[:hard_limit]
 
-    if _rag_enabled(settings) and elements:
-        hits = _rag_hits_for_doc(doc, elements, settings)
-        if hits:
-            selected = _expand_rag_hits_with_neighbors(hits, doc, settings)
-            if not selected:
-                selected = {hit["paragraph_id"]: hit["original_text"] for hit in hits}
-            rag_text = format_rag_doc_text(selected)
-            logger.info(
-                f"{doc.filename}: full text too long ({len(full_text)} chars); "
-                f"RAG selected {len(selected)} paragraphs including neighbors ({len(rag_text)} chars)"
-            )
-            return rag_text[:hard_limit]
-        logger.warning(f"{doc.filename}: RAG returned no hits; using keyword context fallback")
+    # RAG branch removed. Directly using full text or keyword context.
+
+    if len(full_text) <= hard_limit:
+        return full_text[:hard_limit]
 
     keywords = _claim_keywords(elements)
     if not keywords:
@@ -607,17 +471,18 @@ def load_comparisons(job_dir: str, doc_idx: int) -> Optional[Dict]:
         return None
 
 
+def _comparison_mode(value: object) -> str:
+    return "hybrid" if str(value or "").strip().lower() == "hybrid" else "per_doc"
+
+
 def _cache_is_compatible(
     cache: Optional[Dict],
-    require_rag: bool,
     comparison_mode: Optional[str] = None,
 ) -> bool:
     if not cache:
         return False
     meta = cache.get(_CACHE_META_KEY, {})
     if meta.get("schema_version") != _CACHE_SCHEMA_VERSION:
-        return False
-    if require_rag and not bool(meta.get("use_rag_retrieval")):
         return False
     if comparison_mode is not None:
         cached_mode = _comparison_mode(meta.get("comparison_mode", "per_doc"))
@@ -638,10 +503,6 @@ def reset_incompatible_comparison_caches(
     from being mixed with new integrated-mode results in citation-chain scoring.
     """
     expected_mode = _comparison_mode(getattr(settings, "comparison_mode", "per_doc"))
-    expected_rag = bool(getattr(settings, "use_rag_retrieval", False))
-    expected_top_k = int(getattr(settings, "rag_top_k", 20) or 20)
-    expected_reranker = bool(getattr(settings, "use_reranker", False))
-    expected_reranker_top_k = int(getattr(settings, "reranker_top_k", 10) or 10)
     reset_any = False
 
     for doc_idx in range(num_docs):
@@ -651,17 +512,9 @@ def reset_incompatible_comparison_caches(
             continue
         meta = cache.get(_CACHE_META_KEY, {})
         cached_mode = _comparison_mode(meta.get("comparison_mode", "per_doc"))
-        try:
-            cached_top_k = int(meta.get("rag_top_k", 20) or 20)
-        except (TypeError, ValueError):
-            cached_top_k = 20
         incompatible = (
             meta.get("schema_version") != _CACHE_SCHEMA_VERSION
             or cached_mode != expected_mode
-            or bool(meta.get("use_rag_retrieval", False)) != expected_rag
-            or (expected_rag and cached_top_k != expected_top_k)
-            or (expected_rag and bool(meta.get("use_reranker", False)) != expected_reranker)
-            or (expected_rag and expected_reranker and int(meta.get("reranker_top_k", 10) or 10) != expected_reranker_top_k)
         )
         if not incompatible:
             continue
@@ -670,10 +523,6 @@ def reset_incompatible_comparison_caches(
             _CACHE_META_KEY: {
                 "schema_version": _CACHE_SCHEMA_VERSION,
                 "comparison_mode": expected_mode,
-                "use_rag_retrieval": expected_rag,
-                "rag_top_k": expected_top_k,
-                "use_reranker": expected_reranker,
-                "reranker_top_k": expected_reranker_top_k,
             }
         }
         tmp_path = path.with_suffix(path.suffix + ".tmp")
@@ -689,7 +538,6 @@ def get_matches_from_cache(
     prior_docs: List[ExtractedDocument],
     job_dir: str,
     allowed_docs: Optional[List[int]] = None,
-    require_rag: bool = False,
     comparison_mode: Optional[str] = None,
 ) -> tuple[List[ElementMatch], bool]:
     """캐시에서 해당 청구항의 ElementMatch 목록을 반환한다.
@@ -704,7 +552,7 @@ def get_matches_from_cache(
     doc_results = []
     for doc_idx in range(num_docs):
         cache = load_comparisons(job_dir, doc_idx)
-        if _cache_is_compatible(cache, require_rag, comparison_mode) and claim_key in cache:
+        if _cache_is_compatible(cache, comparison_mode) and claim_key in cache:
             doc_results.append(cache[claim_key])
             cached_doc_count += 1
         else:
@@ -718,7 +566,6 @@ def get_cached_doc_indices(
     job_dir: str,
     claim_number: int,
     num_docs: int,
-    require_rag: bool = False,
     comparison_mode: Optional[str] = None,
 ) -> set[int]:
     """Return active document indices that already have comparison cache for a claim."""
@@ -726,7 +573,7 @@ def get_cached_doc_indices(
     cached: set[int] = set()
     for doc_idx in range(num_docs):
         cache = load_comparisons(job_dir, doc_idx)
-        if _cache_is_compatible(cache, require_rag, comparison_mode) and claim_key in cache:
+        if _cache_is_compatible(cache, comparison_mode) and claim_key in cache:
             cached.add(doc_idx)
     return cached
 
@@ -907,10 +754,6 @@ def _merge_into_cache(
         cache[_CACHE_META_KEY] = {
             "schema_version": _CACHE_SCHEMA_VERSION,
             "comparison_mode": _comparison_mode(getattr(settings, "comparison_mode", "per_doc")),
-            "use_rag_retrieval": bool(getattr(settings, "use_rag_retrieval", False)),
-            "rag_top_k": int(getattr(settings, "rag_top_k", 20) or 20),
-            "use_reranker": bool(getattr(settings, "use_reranker", False)),
-            "reranker_top_k": int(getattr(settings, "reranker_top_k", 10) or 10),
         }
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1173,6 +1016,26 @@ def _parse_json_array(
         detail = f" ({'; '.join(invalid_reasons[:3])})" if invalid_reasons else ""
         raise CompareFailed(f"구성대비 응답에 유효한 구성요소 판정이 없습니다.{detail}")
 
+    deduped: Dict[tuple, Dict] = {}
+    for item in normalized:
+        key = (
+            item.get("doc_index"),
+            item["label"],
+        ) if expected_doc_indices is not None else item["label"]
+        current = deduped.get(key)
+        if current is None:
+            deduped[key] = item
+            continue
+
+        current_rank = _JUDGMENT_RANK.get(current.get("judgment", "대응 없음"), 0)
+        item_rank = _JUDGMENT_RANK.get(item.get("judgment", "대응 없음"), 0)
+        current_quote_len = len(current.get("quote", "") or "")
+        item_quote_len = len(item.get("quote", "") or "")
+        if (item_rank, item_quote_len) > (current_rank, current_quote_len):
+            deduped[key] = item
+
+    normalized = list(deduped.values())
+
     if expected_doc_indices is None:
         expected_keys = expected_labels
         actual_keys = {item["label"] for item in normalized}
@@ -1189,14 +1052,11 @@ def _parse_json_array(
         missing_text = ", ".join(
             f"doc_index={doc}/label={label}" for doc, label in missing_pairs
         )
-    duplicate_count = len(normalized) - len(actual_keys)
 
-    if missing_text or duplicate_count or invalid_reasons:
+    if missing_text or invalid_reasons:
         details = []
         if missing_text:
             details.append(f"누락: {missing_text}")
-        if duplicate_count:
-            details.append(f"중복 항목: {duplicate_count}개")
         if invalid_reasons:
             details.append("형식 오류: " + "; ".join(invalid_reasons[:3]))
         raise CompareFailed("구성대비 응답이 완전하지 않습니다. " + " / ".join(details))

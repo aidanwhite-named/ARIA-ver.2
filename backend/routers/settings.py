@@ -5,7 +5,6 @@ from pathlib import Path
 from fastapi import APIRouter
 from backend.models.schemas import ModelListResponse, Settings
 from backend.services.ai_engine import get_engine_status
-from backend.services.rag_retriever import get_rag_runtime_status
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -47,5 +46,4 @@ async def get_models():
 async def get_status():
     s = _load()
     status = get_engine_status(s)
-    status["rag"] = get_rag_runtime_status()
     return status

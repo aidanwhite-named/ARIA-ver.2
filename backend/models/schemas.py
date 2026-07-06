@@ -156,20 +156,9 @@ class Settings(BaseModel):
     model_parser: str = ""    # 청구항 분석 및 보정
     model_compare: str = ""   # 구성요소 대비
     model_report: str = ""    # Phase 1 보고서 생성
-    # RAG 검색 설정(BGE-M3 Hybrid Search)
-    use_rag_retrieval: bool = True  # True: Dense+BM25 검색 / False: 전체 본문 사용
-    rag_top_k: int = 20             # RAG 후보 문단 수
-    use_reranker: bool = True
-    reranker_top_k: int = 10
-    rag_context_neighbors: int = 1  # 선택 문단 앞뒤로 붙일 인접 문단 수
-    dependent_candidate_doc_limit: int = 3  # Dependent claims: RAG-routed docs to compare before batch reporting.
+    dependent_candidate_doc_limit: int = 3  # Dependent claims: docs to compare before batch reporting.
     pdf_primary_parser: str = "pymupdf"
     pdf_fallback_parser: str = "opendataloader_pdf"
-    vector_store: str = "qdrant_local"
-    bm25_backend: str = "sqlite_fts5"
-    metadata_store: str = "sqlite"
-    # 내부 저장 경로
-    rag_uploads_dir: str = "uploads"  # RAG 임베딩 캐시 기준 경로
 
 
 class ModelListResponse(BaseModel):

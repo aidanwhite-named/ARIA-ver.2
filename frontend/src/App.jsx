@@ -8,7 +8,6 @@ import ClaimAnalysisWindow from './components/ClaimAnalysisWindow'
 import FilePanel from './components/FilePanel'
 import ProgressPanel from './components/ProgressPanel'
 import SettingsModal from './components/SettingsModal'
-import KeywordPanel from './components/KeywordPanel'
 import ChatPanel from './components/ChatPanel'
 
 function AriaEmblem() {
@@ -63,7 +62,7 @@ function AriaEmblem() {
 }
 
 
-// ── Phase 2 판정 라벨 색상 ────────────────────────────────────────────────────
+// ── 판정 라벨 색상 ────────────────────────────────────────────────────────────
 const JUDGMENT_COLORS = {
   '동일':       'text-green-700 border-green-500 bg-green-50',
   '실질적동일': 'text-blue-700 border-blue-400 bg-blue-50',
@@ -135,9 +134,9 @@ function Phase1H3({ children }) {
   }
 
   // 종합 분석 요약 섹션
-  if (/종합 분석 요약/.test(text)) {
+  if (/종합\s*분석\s*요약|종합분석요약/.test(text)) {
     return (
-      <h3 className="flex items-center gap-2 mt-8 mb-3 px-3 py-2 bg-slate-100 border border-slate-200 rounded-lg text-sm font-bold text-slate-700">
+      <h3 className="flex items-center gap-2 mt-8 mb-3 px-4 py-3 bg-slate-100 border border-slate-200 rounded-lg text-lg font-bold text-slate-800">
         {children}
       </h3>
     )
@@ -146,7 +145,7 @@ function Phase1H3({ children }) {
   const m = text.match(/^\[(구성요소|추가\s*구성)(?:\s*\(\s*([A-J](?:-\d+)?)\s*\))?\]$/)
   if (m) {
     return (
-      <h3 className="phase1-component-heading mt-7 mb-2 text-sm font-semibold text-gray-800">
+      <h3 className="phase1-component-heading mt-7 mb-3 text-xl font-extrabold text-slate-900">
         {children}
       </h3>
     )
@@ -233,79 +232,30 @@ function renderJudgmentInline(text) {
   return { label, judgment, pct }
 }
 
-function getJudgmentTone(judgment) {
-  const normalized = String(judgment || '').replace(/\s+/g, '')
-  if (normalized === '동일') return 'border-green-300 bg-green-50/60'
-  if (normalized === '실질적동일') return 'border-blue-300 bg-blue-50/60'
-  if (normalized === '일부차이') return 'border-orange-300 bg-orange-50/60'
-  if (normalized === '일부유사') return 'border-amber-300 bg-amber-50/60'
-  if (normalized === '차이' || normalized === '대응없음') return 'border-gray-300 bg-gray-50'
-  return 'border-slate-200 bg-white'
-}
-
-function splitPhase2ComponentBlocks(body) {
-  const lines = String(body || '').split('\n')
-  const blocks = []
-  let current = null
-  let lead = []
-
-  const flushCurrent = () => {
-    if (current) {
-      current.body = current.lines.join('\n').trim()
-      blocks.push(current)
-      current = null
-    }
-  }
-
-  let fallbackLabelCode = 'A'.charCodeAt(0)
-  for (const line of lines) {
-    const judgment = renderJudgmentInline(line.trim())
-    if (judgment) {
-      flushCurrent()
-      let blockLine = line
-      if (!judgment.label) {
-        judgment.label = `(${String.fromCharCode(fallbackLabelCode)})`
-        fallbackLabelCode += 1
-        blockLine = `${judgment.label} ${line.trim()}`
-      }
-      current = { judgment, lines: [blockLine] }
-      continue
-    }
-    if (current) current.lines.push(line)
-    else lead.push(line)
-  }
-  flushCurrent()
-
-  return {
-    lead: lead.join('\n').trim(),
-    blocks: blocks.filter(block => block.body),
-  }
-}
-
 function ReportParagraph({ children }) {
   const text = extractText(children)
   const trimmed = text.trim()
   if (/^\[(구성요소|추가\s*구성)(?:\s*\(\s*[A-J](?:-\d+)?\s*\))?\]$/.test(trimmed)) {
     return <p className="phase1-component-heading">{children}</p>
   }
-  if (/^\[(인용발명 단독\(신규성\)|인용발명 1 \+ 주지관용\(진보성\)|인용발명 1과 2의 결합\(진보성\)|인용발명 1과 2의 결합 및 주지관용\(진보성\))\]$/.test(trimmed)) {
-    return <p className="mt-2 mb-4 text-lg font-bold tracking-tight text-slate-900">{children}</p>
+  if (/^\[(인용발명\s*\d+\s*단독\(신규성\)|인용발명\s*\d+\s*\+\s*주지관용\(진보성\)|인용발명\s*\d+\s*과\s*인용발명\s*\d+\s*의\s*결합(?:\s*및\s*주지관용)?\(진보성\))\]$/.test(trimmed)) {
+    return <p className="mt-2 mb-5 text-xl font-bold tracking-tight text-slate-950">{children}</p>
   }
-  if (/^\[(구성대비|구성요소|종합 판단|유사점|차이점|결론)\]$/.test(trimmed)) {
-    const isMajor = /^\[(구성대비|종합 판단)\]$/.test(trimmed)
+  if (/^\[(구성대비|종합분석요약|구성요소|종합 판단|유사점|차이점|결론)\]$/.test(trimmed)) {
+    const isMajor = /^\[(구성대비|종합분석요약|종합 판단)\]$/.test(trimmed)
     const isDiff = trimmed === '[차이점]'
     const isSimilar = trimmed === '[유사점]'
     const isConclusion = trimmed === '[결론]'
     return (
       <p className={
         isMajor
-          ? 'mt-6 mb-2 px-4 py-3 rounded-xl bg-slate-100 border border-slate-200 text-base font-bold text-slate-800'
+          ? 'mt-6 mb-3 px-4 py-3 rounded-xl bg-slate-100 border border-slate-200 text-lg font-bold text-slate-800'
           : isDiff
             ? 'mt-5 mb-2 px-3 py-2 rounded-lg bg-rose-50 border border-rose-200 text-sm font-bold text-rose-800'
             : isSimilar
               ? 'mt-5 mb-2 px-3 py-2 rounded-lg bg-emerald-50 border border-emerald-200 text-sm font-bold text-emerald-800'
               : isConclusion
-                ? 'mt-5 mb-2 px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-sm font-bold text-amber-800'
+                ? 'mt-6 mb-3 px-4 py-3 rounded-lg bg-amber-50 border border-amber-200 text-xl font-extrabold text-amber-900'
                 : 'mt-4 mb-1 text-sm font-semibold text-slate-700'
       }>
         {children}
@@ -328,55 +278,6 @@ function ReportParagraph({ children }) {
     )
   }
   return <p className="my-1 text-sm leading-relaxed">{children}</p>
-}
-
-function Phase2Markdown({ body }) {
-  return (
-    <div className="report-content prose max-w-none">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeRaw]}
-        components={{ p: ReportParagraph, h3: Phase1H3, li: Phase1ListItem }}
-      >
-        {preprocessReport(body)}
-      </ReactMarkdown>
-    </div>
-  )
-}
-
-function Phase2CompositionBody({ body }) {
-  const { lead, blocks } = splitPhase2ComponentBlocks(body)
-  if (blocks.length === 0) return <Phase2Markdown body={body} />
-
-  return (
-    <div>
-      {lead && <Phase2Markdown body={lead} />}
-      <div className="space-y-3">
-        {blocks.map((block, index) => (
-          <section
-            key={`${block.judgment.label}-${index}`}
-            className={`rounded-xl border px-4 py-3 shadow-sm ${getJudgmentTone(block.judgment.judgment)}`}
-          >
-            <Phase2Markdown body={block.body} />
-          </section>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-function Phase2SectionCard({ title, body }) {
-  const isComposition = title === '[구성대비]'
-  return (
-    <section className="mb-5 rounded-2xl border border-slate-200 bg-white shadow-sm">
-      <div className="border-b border-slate-200 px-5 py-4">
-        <h3 className="text-base font-bold tracking-tight text-slate-800">{title}</h3>
-      </div>
-      <div className="px-5 py-4">
-        {isComposition ? <Phase2CompositionBody body={body} /> : <Phase2Markdown body={body} />}
-      </div>
-    </section>
-  )
 }
 
 function preprocessReport(md) {
@@ -508,6 +409,150 @@ function preprocessReport(md) {
     }).join('\n')
   }
 
+  function mergeClaimIntoJudgmentCards(text) {
+    const judgmentRe = String.raw`((?:\([A-J](?:-\d+)?\)\s*)?(?:동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음)(?:\s+\d+%)?)`
+    const claimRe = String.raw`<div class="phase1-field phase1-field-claim"><div class="phase1-field-label">청구항 구성<\/div>(?:<div class="phase1-field-body">([\s\S]*?)<\/div>)?<\/div>`
+    return text.replace(
+      new RegExp(`^${judgmentRe}\\s*\\n+${claimRe}`, 'gm'),
+      (_, judgment, claimBody = '') => (
+        `<div class="phase1-judgment-card">` +
+        `<div class="phase1-judgment-line">${escapeHtml(judgment)}</div>` +
+        (claimBody ? `<div class="phase1-judgment-claim">${claimBody}</div>` : '') +
+        `</div>`
+      )
+    )
+  }
+
+  function mergeSummaryIntoReasonCards(text) {
+    const summaryRe = String.raw`<div class="phase1-field phase1-field-summary"><div class="phase1-field-label">인용발명 대응 부분 요약<\/div>(?:<div class="phase1-field-body">([\s\S]*?)<\/div>)?<\/div>`
+    const reasonRe = String.raw`<div class="phase1-field phase1-field-reason"><div class="phase1-field-label">(판단 이유|판단 근거)<\/div>(?:<div class="phase1-field-body">([\s\S]*?)<\/div>)?<\/div>`
+    return text.replace(
+      new RegExp(`${summaryRe}\\s*\\n*${reasonRe}`, 'g'),
+      (_, summaryBody = '', reasonLabel, reasonBody = '') => {
+        const summary = summaryBody
+          ? `<div class="phase1-reason-summary"><div class="phase1-reason-subtitle">인용발명 대응 부분 요약</div>${summaryBody}</div>`
+          : ''
+        return (
+          `<div class="phase1-field phase1-field-reason">` +
+          `<div class="phase1-field-label">${reasonLabel}</div>` +
+          `<div class="phase1-field-body">${reasonBody}${summary}</div>` +
+          `</div>`
+        )
+      }
+    )
+  }
+
+  function normalizeSummaryItems(text) {
+    const labels = '(유사점 요약|차이점|결론)'
+    const lines = text.split('\n')
+    const result = []
+    let i = 0
+
+    while (i < lines.length) {
+      const line = lines[i]
+      const match = line.match(new RegExp(`^-\\s*${labels}\\s*:\\s*(.*)$`))
+      if (!match) {
+        result.push(line)
+        i += 1
+        continue
+      }
+
+      const label = match[1]
+      const bodyLines = []
+      if (match[2].trim()) bodyLines.push(match[2].trim())
+      i += 1
+
+      while (i < lines.length) {
+        const current = lines[i]
+        const trimmed = current.trim()
+        if (!trimmed) {
+          if (bodyLines.length > 0) {
+            i += 1
+            break
+          }
+          i += 1
+          continue
+        }
+        if (
+          /^-\s*(유사점 요약|차이점|결론)\s*:/.test(trimmed) ||
+          /^\[(유사점|차이점|결론|종합분석요약)\]$/.test(trimmed) ||
+          /^#{1,6}\s/.test(trimmed)
+        ) {
+          break
+        }
+        bodyLines.push(trimmed)
+        i += 1
+      }
+
+      const heading =
+        label === '유사점 요약'
+          ? '[유사점]'
+          : label === '차이점'
+            ? '[차이점]'
+            : '[결론]'
+      result.push(`${heading}\n\n${bodyLines.join('\n').trim()}`)
+    }
+
+    return result.join('\n')
+  }
+
+  function moveSimilarDiffBelowConclusion(text) {
+    const lines = text.split('\n')
+    const out = []
+    let i = 0
+
+    function normalizeHeading(line) {
+      const trimmed = line.trim()
+      if (/^\[(유사점|유사점\s*요약)\]$/.test(trimmed)) return '[유사점]'
+      if (/^\[(차이점)\]$/.test(trimmed)) return '[차이점]'
+      if (/^\[(결론)\]$/.test(trimmed)) return '[결론]'
+      return null
+    }
+
+    function readBlock(start) {
+      const heading = normalizeHeading(lines[start])
+      const body = []
+      let j = start + 1
+      while (j < lines.length && !normalizeHeading(lines[j])) {
+        body.push(lines[j])
+        j += 1
+      }
+      return { heading, body, next: j }
+    }
+
+    while (i < lines.length) {
+      const firstHeading = normalizeHeading(lines[i])
+      if (!firstHeading) {
+        out.push(lines[i])
+        i += 1
+        continue
+      }
+
+      const blocks = {}
+      let cursor = i
+      while (cursor < lines.length) {
+        const heading = normalizeHeading(lines[cursor])
+        if (!heading) break
+        const block = readBlock(cursor)
+        blocks[heading] = block
+        cursor = block.next
+      }
+
+      if (!blocks['[결론]'] || (!blocks['[유사점]'] && !blocks['[차이점]'])) {
+        out.push(lines[i])
+        i += 1
+        continue
+      }
+
+      for (const key of ['[결론]', '[유사점]', '[차이점]']) {
+        if (blocks[key]) out.push(blocks[key].heading, ...blocks[key].body)
+      }
+      i = cursor
+    }
+
+    return out.join('\n')
+  }
+
   const judgmentPrefix = String.raw`\([A-J](?:-\d+)?\)(?:\s*(?:및|,)\s*\([A-J](?:-\d+)?\))*\s+(?:동일|실질적동일|실질적\s+동일|일부차이|일부\s+차이|일부유사|일부\s+유사|차이|대응\s+없음)(?:\s+\d+%)?`
   // CLI 에이전트가 새어 보낸 도구 호출 줄(update_topic(...) 등) 제거 — 캐시·히스토리 구보고서까지 정리
   md = md.replace(/^[ \t]*[a-z][a-z0-9_]*\([a-z_]+\s*=\s*['"].*\)[ \t]*-*[ \t]*$/gm, '')
@@ -522,6 +567,9 @@ function preprocessReport(md) {
   )
   md = keepFirstComponentHeader(md)
   md = normalizePhase1Fields(md)
+  md = mergeClaimIntoJudgmentCards(md)
+  md = mergeSummaryIntoReasonCards(md)
+  md = normalizeSummaryItems(md)
   md = md.replace(
     /([^\n])\s+(-\s*(유사점 요약|차이점|결론)\s*:)/g,
     '$1\n\n$2'
@@ -559,6 +607,7 @@ function preprocessReport(md) {
     /\s+((?:다만|따라서)\s+)/g,
     '\n\n$1'
   )
+  md = moveSimilarDiffBelowConclusion(md)
   const lines = md.split('\n')
   const result = []
   for (let i = 0; i < lines.length; i++) {
@@ -572,8 +621,11 @@ function preprocessReport(md) {
 }
 
 function preprocessPhase1Report(md) {
-  const hiddenHeadingRe = /^\s*(?:#{1,6}\s*)?\[(?:구성요소|추가\s*구성)(?:\s*\([A-J](?:-\d+)?\))?\]\s*$/gm
-  return preprocessReport(String(md || '').replace(hiddenHeadingRe, ''))
+  return preprocessReport(
+    String(md || '')
+      .replace(/^###\s+claim\s+(\d+)\s*$/gim, '### 청구항 $1')
+      .replace(/^\s*#{1,6}\s*(?:[^\w\r\n]*)?\s*종합\s*분석\s*요약\s*$/gim, '[종합분석요약]')
+  )
 }
 
 // ── [확장 포인트 1] 청구항 헤더 패턴 ─────────────────────────────────────────
@@ -598,6 +650,9 @@ const EXPLICIT_CLAIM_HEADER_PATTERNS = [
 // 새 종속 표현 발견 시 여기에 추가
 const DEPENDENT_REF_PATTERNS = [
   /청구항\s*\d+에\s*있어서/,
+  /청구항\s*\d+\s*내지\s*청구항\s*\d+.*있어서/,
+  /청구항\s*\d+\s*내지\s*\d+.*있어서/,
+  /청구항\s*\d+\s*또는\s*청구항\s*\d+.*있어서/,
   /제\s*\d+\s*항에\s*있어서/,
   /제\s*\d+\s*항\s*내지\s*제\s*\d+\s*항.*있어서/,   // "제1항 내지 제3항 중 어느 한 항에 있어서"
   /제\s*\d+\s*항\s*또는\s*제\s*\d+\s*항.*있어서/,   // "제1항 또는 제2항에 있어서"
@@ -678,47 +733,6 @@ function splitClaims(text) {
   }
 
   return null  // 단일 청구항
-}
-
-// Phase 1 / Phase 2 분리
-function splitPhases(md) {
-  if (!md) return { phase1: '', phase2: '' }
-  // "# [Phase 2]" 또는 "# [Phase 2]" 로 시작하는 줄을 기준으로 분리
-  const idx = md.search(/^#\s*\[Phase\s*2\]/m)
-  if (idx === -1) return { phase1: md, phase2: '' }
-  return {
-    phase1: md.slice(0, idx).trimEnd(),
-    phase2: md.slice(idx).trimStart(),
-  }
-}
-
-function splitPhase2Sections(md) {
-  if (!md) return null
-  const trimmed = md.trim()
-  const compositionMarker = '[구성대비]'
-  const judgmentMarker = '[종합 판단]'
-  const rejectedMarker = '## 관련도 A 인용발명'
-  const rejectedIdx = trimmed.indexOf(rejectedMarker)
-  const phase2Only = rejectedIdx === -1 ? trimmed : trimmed.slice(0, rejectedIdx).trimEnd()
-  const compositionIdx = phase2Only.indexOf(compositionMarker)
-  const judgmentIdx = phase2Only.indexOf(judgmentMarker)
-  if (compositionIdx === -1 || judgmentIdx === -1 || judgmentIdx <= compositionIdx) return null
-
-  const header = phase2Only.slice(0, compositionIdx).trim()
-  const headerLines = header.split('\n').map(line => line.trim()).filter(Boolean)
-  const phaseTitleLine = headerLines.find(line => /^#\s*\[Phase\s*2\]/i.test(line)) || ''
-  const inventionHeaderLine = headerLines.find(line => /^\[.+\]$/.test(line) && !/^\[Phase\s*2\]$/i.test(line)) || ''
-  const phaseTitle = phaseTitleLine.replace(/^#\s*\[Phase\s*2\]\s*/i, '').trim()
-  const inventionHeader = inventionHeaderLine.replace(/^\[|\]$/g, '').trim()
-
-  return {
-    header,
-    phaseTitle,
-    inventionHeader,
-    compositionBody: phase2Only.slice(compositionIdx + compositionMarker.length, judgmentIdx).trim(),
-    judgmentBody: phase2Only.slice(judgmentIdx + judgmentMarker.length).trim(),
-    rejectedBody: rejectedIdx === -1 ? '' : trimmed.slice(rejectedIdx + rejectedMarker.length).trim(),
-  }
 }
 
 // ── 히스토리 로드/저장 헬퍼 ──────────────────────────────────────────────────
@@ -843,7 +857,6 @@ export default function App() {
   const [claimNumber, setClaimNumber] = useState(1)
   const [claims, setClaims] = useState([])
   const [report, setReport] = useState('')
-  const [reportTab, setReportTab] = useState('phase1')  // 'phase1' | 'phase2' | 'keywords'
   const [usedInventions, setUsedInventions] = useState([])  // 실제 사용된 인용발명 목록
   const [allReports, setAllReports] = useState({})  // { claimNum: { report_md, usedInventions } }
   const [activeClaimNumView, setActiveClaimNumView] = useState(null)
@@ -851,7 +864,6 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false)
   const [showClaimAnalysis, setShowClaimAnalysis] = useState(false)
 
-  // 키워드 상태
   // 히스토리
   const [history, setHistory] = useState(loadHistory)
   const [showHistory, setShowHistory] = useState(false)
@@ -870,7 +882,6 @@ export default function App() {
     setUploadProgress(0)
     setClaims([])
     setReport('')
-    setReportTab('phase1')
     setUsedInventions([])
     setAllReports({})
     setActiveClaimNumView(null)
@@ -915,7 +926,6 @@ export default function App() {
     setClaimText('')
     setClaimNumber(1)
     setReport('')
-    setReportTab('phase1')
     setUsedInventions([])
     setAllReports({})
     setActiveClaimNumView(null)
@@ -940,7 +950,6 @@ export default function App() {
       setClaimText('')
       setClaimNumber(1)
       setReport('')
-      setReportTab('phase1')
       setUsedInventions([])
       setAllReports({})
       setActiveClaimNumView(null)
@@ -954,14 +963,39 @@ export default function App() {
   }
 
   async function loadHistoryItem(item) {
-    const cleanReport = sanitizeReportText(item.report)
-    setReport(cleanReport)
-    setReportTab('phase1')
-    setUsedInventions(item.usedInventions || [])
-    setAllReports({ [item.claimNumber]: { report_md: cleanReport, usedInventions: item.usedInventions || [] } })
-    setActiveClaimNumView(item.claimNumber)
-    setClaimNumber(item.claimNumber)
+    const selectedClaimNumber = Number(item.claimNumber)
+    const relatedItems = item.jobId
+      ? history.filter(h => h.jobId === item.jobId && h.report)
+      : [item]
+    const reportsByClaim = {}
+    for (const h of relatedItems) {
+      const claimKey = Number(h.claimNumber)
+      if (!Number.isFinite(claimKey) || reportsByClaim[claimKey]) continue
+      reportsByClaim[claimKey] = {
+        report_md: sanitizeReportText(h.report),
+        usedInventions: h.usedInventions || [],
+      }
+    }
+    if (!reportsByClaim[selectedClaimNumber]) {
+      reportsByClaim[selectedClaimNumber] = {
+        report_md: sanitizeReportText(item.report),
+        usedInventions: item.usedInventions || [],
+      }
+    }
+    const selectedReport = reportsByClaim[selectedClaimNumber]
+    if (!selectedReport?.report_md) {
+      addLog(`[히스토리] 청구항 ${selectedClaimNumber}에 저장된 보고서 본문이 없습니다.`)
+      return
+    }
+    setReport(selectedReport.report_md)
+    setUsedInventions(selectedReport.usedInventions)
+    setAllReports(reportsByClaim)
+    setActiveClaimNumView(selectedClaimNumber)
+    setClaimNumber(selectedClaimNumber)
     setClaimText(item.claimTextPreview)
+    addLog(
+      `[히스토리] 청구항 ${Object.keys(reportsByClaim).sort((a, b) => Number(a) - Number(b)).join(', ')} 보고서를 복원했습니다.`
+    )
 
     if (item.jobId) {
       try {
@@ -1021,7 +1055,6 @@ export default function App() {
     setGenerating(true)
     cancelRef.current = { requested: false, es: null, abort: null, reject: null }
     setReport('')
-    setReportTab('phase1')
     setError('')
     setUsedInventions([])
     setAllReports({})
@@ -1068,7 +1101,7 @@ export default function App() {
               setReport(cleanReport)
               setUsedInventions(data.used_inventions || [])
               if (data.timings) {
-                const order = ['comparison', 'citation chain', 'quote verification', 'phase1', 'phase2', 'finalize', 'total']
+                const order = ['comparison', 'citation chain', 'quote verification', 'phase1', 'finalize', 'total']
                 const summary = order
                   .filter(key => data.timings[key] != null)
                   .map(key => `${key} ${Number(data.timings[key]).toFixed(1)}s`)
@@ -1147,7 +1180,6 @@ export default function App() {
             }
             const cleanReport = sanitizeReportText(r.report_md)
             setReport(cleanReport)
-            setReportTab('phase1')
             setUsedInventions(r.used_inventions || [])
             setActiveClaimNumView(claim.claim_number)
             setAllReports(prev => ({
@@ -1413,7 +1445,6 @@ export default function App() {
                       const r = allReports[num]
                       setReport(sanitizeReportText(r.report_md))
                       setUsedInventions(r.usedInventions)
-                      setReportTab('phase1')
                       setActiveClaimNumView(Number(num))
                     }}
                     className={[
@@ -1428,163 +1459,47 @@ export default function App() {
                 ))}
               </div>
             )}
-            {/* 헤더 + 탭 */}
-            <div className="px-5 py-0 border-b flex items-center justify-between">
-              <div className="flex items-center gap-0">
-                {[
-                  { key: 'phase1', label: '📝 Phase 1 — 구성요소 대비' },
-                  { key: 'phase2', label: '📑 Phase 2 — 최종 보고서' },
-                  { key: 'keywords', label: '🔍 키워드·보완검색' },
-                ].map(({ key, label }) => {
-                  const { phase2 } = splitPhases(report)
-                  // Phase 2 탭: 생성 중이거나 이미 있으면 활성화
-                  const phase2Loading = generating && report && !phase2
-                  const disabled =
-                    (key === 'phase2' && !phase2 && !phase2Loading) ||
-                    (key === 'keywords' && !jobId)
-                  return (
-                    <button
-                      key={key}
-                      onClick={() => !disabled && setReportTab(key)}
-                      className={[
-                        'px-4 py-3 text-xs font-medium border-b-2 transition-colors',
-                        reportTab === key
-                          ? key === 'keywords'
-                            ? 'border-violet-500 text-violet-700'
-                            : 'border-blue-600 text-blue-700'
-                          : disabled
-                            ? 'border-transparent text-gray-300 cursor-default'
-                            : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300',
-                      ].join(' ')}
-                    >
-                      {label}
-                      {key === 'phase2' && phase2Loading && (
-                        <span className="ml-1 inline-block w-3 h-3 border border-blue-400 border-t-transparent rounded-full animate-spin align-middle" />
-                      )}
-                    </button>
-                  )
-                })}
-              </div>
-              {report && reportTab !== 'keywords' && (
-                <button
-                  onClick={() => setShowChat(v => !v)}
-                  className={[
-                    'text-xs font-medium rounded-lg px-3 py-1.5 border transition-colors',
-                    showChat
-                      ? 'bg-blue-600 text-white border-blue-600'
-                      : 'text-blue-700 border-blue-200 hover:bg-blue-50',
-                  ].join(' ')}
-                >
-                  💬 보고서에 질문
-                </button>
-              )}
-            </div>
-            {reportTab === 'keywords' ? (
-              <div className="flex-1 overflow-hidden relative">
-                <KeywordPanel
-                  jobId={jobId}
-                  claimNumber={activeClaimNumView || claimNumber}
-                  isVisible={reportTab === 'keywords'}
-                />
-              </div>
-            ) : (
-            <div className="flex-1 overflow-y-auto px-8 py-6 relative">
+            <div className="flex-1 overflow-y-auto px-6 py-4 relative">
               {generating && !report ? (
                 <div className="flex items-center gap-3 text-blue-500 text-sm">
                   <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
                   인용발명과 청구항을 순차 대비하고 있습니다.
                 </div>
-              ) : report ? (() => {
-                const { phase1, phase2 } = splitPhases(report)
-                // Phase 2 생성 중일 때 탭 전환하면 로딩 표시
-                const isPhase2 = reportTab === 'phase2'
-                const content = isPhase2 ? phase2 : phase1
-                const phase2Sections = isPhase2 ? splitPhase2Sections(content) : null
-                // Phase 2 탭인데 아직 내용 없으면 생성 중 메시지
-                if (isPhase2 && !phase2) {
-                  return (
-                    <div className="flex items-center gap-3 text-blue-500 text-sm">
-                      <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
-                      Phase 2 최종 보고서 작성 중... Phase 1 탭에서 먼저 확인하실 수 있습니다.
-                    </div>
-                  )
-                }
-                return (
-                  <>
-                    {isPhase2 && phase2Sections ? (
-                      <>
-                        {usedInventions.length > 0 && (
-                          <section className="mb-5 rounded-2xl border border-slate-200 bg-slate-50 shadow-sm">
-                            <div className="border-b border-slate-200 px-5 py-4">
-                              {phase2Sections.phaseTitle && (
-                                <p className="text-lg font-bold tracking-tight text-slate-900">{phase2Sections.phaseTitle}</p>
-                              )}
-                              {phase2Sections.inventionHeader && (
-                                <p className="mt-1 text-sm font-semibold text-slate-600">{phase2Sections.inventionHeader}</p>
-                              )}
-                            </div>
-                            <div className="flex flex-wrap gap-2 px-5 py-4">
-                              {usedInventions.map((inv, i) => (
-                                <span
-                                  key={i}
-                                  className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm"
-                                >
-                                  <span className="text-base font-bold text-slate-800">{inv.name}</span>
-                                  <span className="text-slate-300">:</span>
-                                  <span className="font-medium text-slate-600">{inv.filename}</span>
-                                </span>
-                              ))}
-                            </div>
-                          </section>
-                        )}
-                        <Phase2SectionCard title="[구성대비]" body={phase2Sections.compositionBody} />
-                        <Phase2SectionCard title="[종합 판단]" body={phase2Sections.judgmentBody} />
-                        {phase2Sections.rejectedBody && (
-                          <Phase2SectionCard title="관련도 A 인용발명" body={phase2Sections.rejectedBody} />
-                        )}
-                      </>
-                    ) : (
-                      <>
-                        {/* 구성대비에 사용된 인용발명 표시 */}
-                        {usedInventions.length > 0 && (
-                          <section className="mb-5 rounded-2xl border border-slate-200 bg-slate-50 shadow-sm">
-                            <div className="border-b border-slate-200 px-5 py-4">
-                              <p className="text-lg font-bold tracking-tight text-slate-900">구성요소 대비</p>
-                            </div>
-                            <div className="flex flex-wrap gap-2 px-5 py-4">
-                              {usedInventions.map((inv, i) => (
-                                <span
-                                  key={i}
-                                  className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm"
-                                >
-                                  <span className="text-base font-bold text-slate-800">{inv.name}</span>
-                                  <span className="text-slate-300">:</span>
-                                  <span className="font-medium text-slate-600">{inv.filename}</span>
-                                </span>
-                              ))}
-                            </div>
-                          </section>
-                        )}
-                        <div className="report-content phase1-report-content prose max-w-none">
-                          <ReactMarkdown
-                            remarkPlugins={[remarkGfm]}
-                            rehypePlugins={[rehypeRaw]}
-                            components={{ p: ReportParagraph, h3: Phase1H3, li: Phase1ListItem }}
+              ) : report ? (
+                <>
+                  {usedInventions.length > 0 && (
+                    <section className="mb-4 flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                      <p className="text-sm font-bold tracking-tight text-slate-900 shrink-0">인용발명</p>
+                      <div className="flex min-w-0 flex-1 flex-wrap gap-1.5">
+                        {usedInventions.map((inv, i) => (
+                          <span
+                            key={i}
+                            className="inline-flex min-w-0 items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs"
                           >
-                            {preprocessPhase1Report(content)}
-                          </ReactMarkdown>
-                        </div>
-                      </>
-                    )}
-                  </>
-                )
-              })() : (
+                            <span className="font-bold text-slate-800 shrink-0">{inv.name}</span>
+                            <span className="text-slate-300">:</span>
+                            <span className="min-w-0 truncate font-medium text-slate-600">{inv.filename}</span>
+                          </span>
+                        ))}
+                      </div>
+                    </section>
+                  )}
+                  <div className="report-content phase1-report-content prose max-w-none">
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      rehypePlugins={[rehypeRaw]}
+                      components={{ p: ReportParagraph, h3: Phase1H3, li: Phase1ListItem }}
+                    >
+                      {preprocessPhase1Report(report)}
+                    </ReactMarkdown>
+                  </div>
+                </>
+              ) : (
                 <div className="h-full flex items-center justify-center text-gray-400 text-sm">
                   청구항을 입력하고 보고서를 생성하세요.
                 </div>
               )}
             </div>
-            )}
           </div>
         </main>
 
@@ -1608,6 +1523,7 @@ export default function App() {
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
       <ChatPanel
         open={showChat}
+        onOpen={() => setShowChat(true)}
         onClose={() => setShowChat(false)}
         jobId={jobId}
         claimNumber={activeClaimNumView || claimNumber}

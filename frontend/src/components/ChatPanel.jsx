@@ -2,20 +2,14 @@ import { useState, useEffect, useRef } from 'react'
 import { chatAboutReport } from '../api/client'
 
 // Phase 1 분석 결과에 대한 Q&A 채팅 (질문 전용 — 보고서 수정 없음).
-// 우측 슬라이드 드로어. 청구항이 바뀌면 대화가 초기화된다.
-export default function ChatPanel({ open, onClose, jobId, claimNumber, reportMd }) {
+// 닫힌 상태에서는 우측 하단 말풍선 버튼, 열린 상태에서는 플로팅 패널로 표시한다.
+export default function ChatPanel({ open, onOpen, onClose, jobId, claimNumber, reportMd }) {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [webSearch, setWebSearch] = useState(false)
   const scrollRef = useRef(null)
-  const helpExamples = [
-    '구성 (C)가 왜 대응 없음인지 설명해줘',
-    '인용발명 2보다 인용발명 1을 우선 본 이유를 설명해줘',
-  ]
-  const searchHint = '미대응 구성 검색은 키워드 탭의 보완문서 웹검색 버튼이 더 빠르고 안정적입니다.'
-
   // 청구항 전환 시 대화 초기화
   useEffect(() => {
     setMessages([])
@@ -53,10 +47,23 @@ export default function ChatPanel({ open, onClose, jobId, claimNumber, reportMd 
     }
   }
 
-  if (!open) return null
+  if (!reportMd) return null
+
+  if (!open) {
+    return (
+      <button
+        onClick={onOpen}
+        className="fixed bottom-6 right-6 z-40 flex h-14 w-14 items-center justify-center rounded-full border border-blue-500 bg-blue-600 text-2xl text-white shadow-2xl shadow-blue-900/20 transition hover:bg-blue-700 focus:outline-none focus:ring-4 focus:ring-blue-200"
+        aria-label="보고서 질문 열기"
+        title="보고서에 질문"
+      >
+        💬
+      </button>
+    )
+  }
 
   return (
-    <div className="fixed inset-y-0 right-0 z-40 w-[400px] bg-white border-l border-gray-200 shadow-2xl flex flex-col">
+    <div className="fixed bottom-6 right-6 z-40 flex h-[min(640px,calc(100vh-48px))] w-[min(400px,calc(100vw-32px))] flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-2xl">
       {/* 헤더 */}
       <div className="px-4 py-3 border-b flex items-center justify-between bg-slate-50 shrink-0">
         <div className="flex flex-col">
@@ -77,7 +84,7 @@ export default function ChatPanel({ open, onClose, jobId, claimNumber, reportMd 
       {/* 메시지 영역 */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
         <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] text-slate-500 leading-relaxed">
-          보고서 설명과 근거 확인용 채팅입니다. {searchHint}
+          보고서 설명과 근거 확인용 채팅입니다.
         </div>
         {messages.length === 0 && !loading && (
           <div className="text-xs text-slate-400 leading-relaxed mt-4">
@@ -128,7 +135,6 @@ export default function ChatPanel({ open, onClose, jobId, claimNumber, reportMd 
             className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
           />
           <span>웹검색 포함</span>
-          <span className="text-slate-400">저장된 보완문서 결과는 항상 참조</span>
         </label>
         <div className="flex items-end gap-2">
           <textarea

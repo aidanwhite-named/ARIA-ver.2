@@ -370,7 +370,10 @@ def _find_dense_short_paragraph_start(text: str) -> Optional[int]:
         if normalized[idx][1] == normalized[idx - 1][1] + 1:
             consecutive += 1
             if consecutive >= 5:
-                return normalized[run_start][0]
+                start_pos = normalized[run_start][0]
+                if len(text) >= 10000 and start_pos > len(text) * 0.3:
+                    return None
+                return start_pos
         else:
             consecutive = 1
             run_start = idx
@@ -465,11 +468,24 @@ def _extract_title(text: str, filename: str) -> str:
 
 
 def _find_page_no(pages: Dict[str, str], para_no: str, para_text: str) -> Optional[int]:
-    marker_variants = [f"[{para_no}]", f"【{para_no}】", f"({para_no})", para_no]
-    needle = (para_text or "").strip()[:40]
+    # Strip leading marker prefix like [1] or [0001]
+    clean_text = re.sub(rf"^\[\s*{re.escape(para_no)}\s*\]\s*", "", para_text or "").strip()
+    needle = clean_text[:40]
+    if needle:
+        for page_key, page_text in pages.items():
+            if needle in (page_text or ""):
+                try:
+                    return int(page_key)
+                except ValueError:
+                    pass
+
+    marker_variants = [f"[{para_no}]", f"【{para_no}】", f"({para_no})"]
+    if len(para_no) > 2:
+        marker_variants.append(para_no)
+
     for page_key, page_text in pages.items():
         page = page_text or ""
-        if any(marker in page for marker in marker_variants) or (needle and needle in page):
+        if any(marker in page for marker in marker_variants):
             try:
                 return int(page_key)
             except ValueError:
