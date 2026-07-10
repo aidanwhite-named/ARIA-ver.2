@@ -28,17 +28,20 @@ from backend.services.ai_engine import (
 from backend.services.citation_extractor import (
     CompareFailed,
     _build_hybrid_docs_block,
+    _claim_keywords,
     _comparison_safe_elements,
     _parse_json_array,
     _select_best_matches,
     _shorten_quote,
     analyze_claim_elements_hybrid,
+    normalize_label,
     verify_quotes,
 )
 from backend.services.citation_chain import (
     CITATION_CHAIN_POLICY_VERSION,
     _apply_conventional_support_policy,
     _conventionality_basis,
+    _score_prior_cache,
     build_citation_chain_from_comparisons,
     get_claim_chain_info,
 )
@@ -53,10 +56,27 @@ from backend.services.report_generator import (
     _make_phase1_b_prompt,
     _make_phase1_prompt,
     build_rejected_inventions_section,
+    format_rejection_basis_header,
     generate_dependent_report,
     parse_manual_claim_locally,
     polish_phase1_summary_text,
 )
+
+
+class RejectionBasisHeaderTests(unittest.TestCase):
+    def test_single_reference_with_remaining_differences_is_not_labeled_novelty(self):
+        header = format_rejection_basis_header(
+            "인용발명 1",
+            is_novelty=False,
+        )
+        self.assertEqual(header, "[인용발명 1 단독(진보성 검토)]")
+
+    def test_single_reference_with_all_identical_elements_is_labeled_novelty(self):
+        header = format_rejection_basis_header(
+            "인용발명 1",
+            is_novelty=True,
+        )
+        self.assertEqual(header, "[인용발명 1 단독(신규성)]")
 
 
 def _varint(value: int) -> bytes:
@@ -214,6 +234,37 @@ class ComparisonParsingTests(unittest.TestCase):
         self.assertEqual([match.judgment for match in matches], ["실질적 동일", "대응 없음"])
         self.assertEqual(matches[0].similarity_reason, "구조와 기능이 대응한다.")
 
+    def test_preamble_label_variants_are_normalized(self):
+        self.assertEqual(normalize_label("P"), "P")
+        self.assertEqual(normalize_label("(P)"), "P")
+        self.assertEqual(normalize_label("[PREAMBLE]"), "P")
+        self.assertEqual(normalize_label("(P) 전제부"), "P")
+
+    def test_hybrid_matrix_accepts_parenthesized_preamble_labels(self):
+        elements = [ClaimElement(label="P", text="image processing apparatus")]
+        response = json.dumps(
+            [
+                {
+                    "label": "(P)",
+                    "doc_index": doc_index,
+                    "found": False,
+                    "quote": "",
+                    "chunk_id": "",
+                    "judgment": "대응 없음",
+                    "판단_이유": "대응 기재가 없다.",
+                }
+                for doc_index in range(3)
+            ],
+            ensure_ascii=False,
+        )
+
+        parsed = _parse_json_array(response, elements, expected_doc_indices=[0, 1, 2])
+
+        self.assertEqual(
+            [(item["doc_index"], item["label"]) for item in parsed],
+            [(0, "P"), (1, "P"), (2, "P")],
+        )
+
     def test_agy_alias_schema_without_quotes_is_rejected(self):
         elements = [ClaimElement(label="A", text="sensor")]
         response = json.dumps(
@@ -286,6 +337,103 @@ class ComparisonParsingTests(unittest.TestCase):
         self.assertEqual(len(parsed), 1)
         self.assertEqual(parsed[0]["judgment"], "실질적 동일")
         self.assertEqual(parsed[0]["quote"], "pressure sensor")
+
+    def test_hybrid_grouped_document_results_are_flattened(self):
+        elements = [ClaimElement(label="A", text="sensor")]
+        response = json.dumps(
+            [
+                {
+                    "doc_index": 0,
+                    "results": [
+                        {
+                            "claim_element": "A",
+                            "found": True,
+                            "quote": "pressure sensor",
+                            "chunk_id": "[0010]",
+                            "judgment": "일부 유사",
+                            "판단 이유": "센서 기능은 관련되나 세부 제어 제한은 확인되지 않는다.",
+                        }
+                    ],
+                },
+                {
+                    "doc_index": 1,
+                    "results": [
+                        {
+                            "claim_element": "A",
+                            "found": False,
+                            "quote": "",
+                            "chunk_id": "",
+                            "judgment": "대응 없음",
+                            "reason": "대응 기재가 없다.",
+                        }
+                    ],
+                },
+            ],
+            ensure_ascii=False,
+        )
+
+        parsed = _parse_json_array(response, elements, expected_doc_indices=[0, 1])
+
+        self.assertEqual([(item["doc_index"], item["label"]) for item in parsed], [(0, "A"), (1, "A")])
+        self.assertEqual(parsed[0]["판단_이유"], "센서 기능은 관련되나 세부 제어 제한은 확인되지 않는다.")
+
+    def test_hybrid_object_response_with_evidence_is_not_parsed_as_evidence_array(self):
+        elements = [ClaimElement(label="A", text="sensor")]
+        response = json.dumps(
+            {
+                "comparisons": [
+                    {
+                        "label": "A",
+                        "doc_index": 0,
+                        "found": True,
+                        "quote": "pressure sensor",
+                        "chunk_id": "[0010]",
+                        "judgment": "일부 유사",
+                        "판단_이유": "센서 기능은 관련되나 제어 조건은 확인되지 않는다.",
+                        "evidence": [
+                            {"limitation": "센서", "quote": "pressure sensor", "chunk_id": "[0010]"}
+                        ],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+
+        parsed = _parse_json_array(response, elements, expected_doc_indices=[0])
+
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["label"], "A")
+        self.assertEqual(parsed[0]["evidence"][0]["limitation"], "센서")
+
+    def test_hybrid_document_object_with_label_keys_is_flattened(self):
+        elements = [ClaimElement(label="A", text="sensor"), ClaimElement(label="B", text="controller")]
+        response = json.dumps(
+            [
+                {
+                    "doc_index": 0,
+                    "A": {
+                        "found": False,
+                        "quote": "",
+                        "chunk_id": "",
+                        "judgment": "대응 없음",
+                        "reason": "대응 기재가 없다.",
+                    },
+                    "B": {
+                        "found": True,
+                        "quote": "controller",
+                        "chunk_id": "[0020]",
+                        "judgment": "일부 차이",
+                        "판단 이유": "제어부는 관련되나 세부 알고리즘은 확인되지 않는다.",
+                    },
+                }
+            ],
+            ensure_ascii=False,
+        )
+
+        parsed = _parse_json_array(response, elements, expected_doc_indices=[0])
+
+        self.assertEqual([(item["doc_index"], item["label"]) for item in parsed], [(0, "A"), (0, "B")])
+        self.assertEqual(parsed[1]["판단_이유"], "제어부는 관련되나 세부 알고리즘은 확인되지 않는다.")
 
     def test_quote_verification_handles_ellipsis_and_rejects_negative_doc_index(self):
         docs = [ExtractedDocument(raw_text="first relevant passage and second relevant passage")]
@@ -520,49 +668,62 @@ class IntegratedComparisonTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(cache["_meta"]["comparison_mode"], "hybrid")
                 self.assertIn("1", cache)
 
-    async def test_invalid_hybrid_schema_fails_without_retry(self):
+    async def test_invalid_hybrid_schema_falls_back_to_per_document(self):
         elements = [ClaimElement(label="A", text="sensor")]
         docs = [
             ExtractedDocument(filename="first.pdf", raw_text="[T1] first sensor passage"),
             ExtractedDocument(filename="second.pdf", raw_text="[T1] second sensor passage"),
         ]
-        invalid_response = json.dumps(
-            [{"doc_index": 0, "claim_element": "A", "found": True, "judgment": "일부 유사"}],
-            ensure_ascii=False,
-        )
+        invalid_response = "internal analysis without a JSON array"
+        per_doc_responses = [
+            json.dumps(
+                [
+                    {
+                        "label": "A",
+                        "found": True,
+                        "quote": "first sensor passage",
+                        "chunk_id": "[T1]",
+                        "judgment": "\uc2e4\uc9c8\uc801 \ub3d9\uc77c",
+                        "similarity_reason": "first document discloses the sensor.",
+                    }
+                ],
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                [
+                    {
+                        "label": "A",
+                        "found": False,
+                        "quote": "",
+                        "chunk_id": "",
+                        "judgment": "\ub300\uc751 \uc5c6\uc74c",
+                        "similarity_reason": "second document has no corresponding feature.",
+                    }
+                ],
+                ensure_ascii=False,
+            ),
+        ]
         settings = Settings(engine="agy", comparison_mode="hybrid", use_rag_retrieval=False)
 
         with tempfile.TemporaryDirectory() as temp_dir:
             with patch(
                 "backend.services.citation_extractor.call_ai",
                 new_callable=AsyncMock,
-                return_value=invalid_response,
+                side_effect=[invalid_response, *per_doc_responses],
             ) as mocked_call:
-                with self.assertRaises(CompareFailed):
-                    await analyze_claim_elements_hybrid(
-                        elements, docs, settings, job_dir=temp_dir, claim_number=1
-                    )
+                matches = await analyze_claim_elements_hybrid(
+                    elements, docs, settings, job_dir=temp_dir, claim_number=1
+                )
 
-            mocked_call.assert_awaited_once()
-            self.assertFalse(list(Path(temp_dir).glob("comparisons_*.json")))
-    async def test_hybrid_failure_does_not_fall_back_to_per_document(self):
-        elements = [ClaimElement(label="A", text="sensor")]
-        docs = [
-            ExtractedDocument(filename="first.pdf", raw_text="[T1] first sensor passage"),
-            ExtractedDocument(filename="second.pdf", raw_text="[T1] unrelated passage"),
-        ]
-        invalid_response = "internal analysis without a JSON array"
-        settings = Settings(engine="agy", comparison_mode="hybrid", use_rag_retrieval=False)
+            self.assertEqual(mocked_call.await_count, 3)
+            self.assertTrue(matches[0].found)
+            self.assertEqual(matches[0].cited_invention_index, 0)
+            for doc_idx in range(2):
+                cache = json.loads(
+                    (Path(temp_dir) / f"comparisons_{doc_idx}.json").read_text(encoding="utf-8")
+                )
+                self.assertIn("1", cache)
 
-        with patch(
-            "backend.services.citation_extractor.call_ai",
-            new_callable=AsyncMock,
-            return_value=invalid_response,
-        ) as mocked_call:
-            with self.assertRaises(CompareFailed):
-                await analyze_claim_elements_hybrid(elements, docs, settings)
-
-        mocked_call.assert_awaited_once()
     async def test_oversized_hybrid_context_keeps_every_document(self):
         elements = [ClaimElement(label="A", text="needle")]
         docs = [
@@ -580,6 +741,20 @@ class IntegratedComparisonTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(block.count("[doc_index="), len(docs))
         for idx, doc in enumerate(docs):
             self.assertIn(f"[doc_index={idx}] {doc.filename}", block)
+
+    async def test_mixed_mode_compacts_long_documents_by_default(self):
+        elements = [ClaimElement(label="A", text="needle")]
+        docs = [
+            ExtractedDocument(filename="doc-0.pdf", raw_text=("A" * 70_000) + " needle"),
+            ExtractedDocument(filename="doc-1.pdf", raw_text=("B" * 70_000) + " needle"),
+        ]
+        settings = Settings(engine="agy", comparison_mode="mixed")
+
+        block = _build_hybrid_docs_block(docs, elements, settings=settings)
+
+        self.assertEqual(block.count("[doc_index="), len(docs))
+        self.assertLess(len(block), 90_000)
+        self.assertLess(len(block), sum(len(doc.raw_text) for doc in docs))
 
 
 class BatchStatusHeartbeatTests(unittest.IsolatedAsyncioTestCase):
@@ -673,6 +848,7 @@ class DependentReportGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "ok")
         prompt = mocked_call.await_args.args[0]
         self.assertIn("단일 추가 문헌 커버 상태: 일부 추가 구성 미대응", prompt)
+        self.assertIn("`청구항 추가 구성:`에는 종속항 원문의 `제~항에 있어서,` 문구를 포함", prompt)
 
 
 class ConventionalSupportPolicyTests(unittest.TestCase):
@@ -852,8 +1028,8 @@ class ConventionalSupportPolicyTests(unittest.TestCase):
             ],
         )
 
-        self.assertIn("주인용발명(인용발명 1)에서 확인되지 않는 하위 제한", prompt)
-        self.assertIn("보강이 된 이후에도 남는 하위 제한", prompt)
+        self.assertIn("인용발명 1에서 확인되지 않는 하위 제한", prompt)
+        self.assertIn("보강 후 실질적인 차이가 남는 경우", prompt)
         self.assertIn("외국어 문헌의 괄호 안 따옴표 원문은 반드시 해당 외국어 원문 그대로", prompt)
         self.assertIn("인용발명 2의 직접 대응 여부와 보완 범위는 종합 분석 요약의 차이점에서만 작성합니다.", prompt)
 
@@ -872,7 +1048,7 @@ class ConventionalSupportPolicyTests(unittest.TestCase):
 
         polished = polish_phase1_summary_text(raw)
 
-        self.assertIn("보조 인용발명도 확인되지 않습니다.", polished)
+        self.assertIn("인용발명도 확인되지 않습니다.", polished)
         self.assertIn("세부 처리 조건이 부재하고", polished)
         self.assertIn("추가 문헌 근거 없이 통상의 기술자가 용이하게 도출할 수 있는지는 별도로 검토해야 합니다.", polished)
         self.assertNotIn("다만 이 구성에 대한", polished)
@@ -982,6 +1158,42 @@ class ConventionalSupportPolicyTests(unittest.TestCase):
         self.assertEqual(result["chains"]["1"]["total"], [result["primary_inv_idx"]])
         self.assertEqual(result["combination_rationale_type"], "insufficient_support")
         self.assertEqual(result["confidence"]["1"]["uncovered_labels"], ["D"])
+
+    def test_quoted_difference_is_kept_as_secondary_evidence_for_primary_gap(self):
+        claim = ParsedClaim(
+            claim_number=1,
+            text="visual text generation claim",
+            elements=[
+                ClaimElement(label="A", text="프롬프트를 레이아웃 조건으로 변환", importance="5"),
+                ClaimElement(label="B", text="OCR 오류 영역 식별", importance="3"),
+            ],
+        )
+        caches = [
+            {"1": [
+                self._item("A", "대응 없음"),
+                self._item("B", "동일", "OCR mismatch detection"),
+            ]},
+            {"1": [
+                self._item("A", "차이", "layout of keywords extracted from text prompts"),
+                self._item("B", "대응 없음"),
+            ]},
+        ]
+        docs = [ExtractedDocument(filename=f"doc-{idx}.pdf") for idx in range(2)]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for idx, cache in enumerate(caches):
+                (Path(temp_dir) / f"comparisons_{idx}.json").write_text(
+                    json.dumps(cache, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+            result = build_citation_chain_from_comparisons(temp_dir, [claim], docs)
+
+        self.assertEqual(result["chains"]["1"]["total"], [0, 1])
+        self.assertEqual(result["secondary_reason"], "support")
+        matrix = result["gap_evidence_matrix"]["1"]["elements"]
+        self.assertEqual(matrix[0]["label"], "A")
+        self.assertEqual(matrix[0]["candidate_evidence"][0]["doc_idx"], 1)
+        self.assertIn("layout of keywords", matrix[0]["candidate_evidence"][0]["quote"])
 
     def test_secondary_selection_prefers_broader_consistent_gap_coverage_over_single_strong_point(self):
         claim = ParsedClaim(
@@ -1491,6 +1703,58 @@ class DependentCitationChainPolicyTests(unittest.TestCase):
                 )
             return build_citation_chain_from_comparisons(temp_dir, claims, docs)
 
+    def test_conditioned_selection_keywords_prioritize_generic_structure(self):
+        elements = [
+            ClaimElement(
+                label="B",
+                text="입력 데이터의 유형을 고려하여 제1 처리 서비스 또는 제2 변환 서비스 중 적어도 하나를 수행하는 단계",
+                importance="3",
+            )
+        ]
+
+        keywords = _claim_keywords(elements)
+
+        self.assertLess(keywords.index("선택"), keywords.index("데이터의"))
+        self.assertLess(keywords.index("분기"), keywords.index("처리"))
+        self.assertIn("condition", keywords)
+
+    def test_conditioned_selection_element_is_core_weighted_for_primary_score(self):
+        claim = ParsedClaim(
+            claim_number=1,
+            claim_type="independent",
+            text="방법",
+            elements=[
+                ClaimElement(label="A", text="입력 데이터를 수신하는 단계", importance="3"),
+                ClaimElement(
+                    label="B",
+                    text="입력 데이터의 유형을 고려하여 제1 처리 서비스 또는 제2 변환 서비스 중 적어도 하나를 수행하는 단계",
+                    importance="3",
+                ),
+            ],
+        )
+        cache = {
+            "1": [
+                {"label": "A", "judgment": "대응 없음"},
+                {"label": "B", "judgment": "일부 차이"},
+            ]
+        }
+
+        _score, _match_count, detail = _score_prior_cache(cache, [claim])
+
+        # B의 명시 importance는 3이지만 조건 기반 선택식이므로 핵심 가중치(4)로 승격된다.
+        self.assertAlmostEqual(detail["core_coverage"], 0.55, places=2)
+
+    def test_local_claim_parser_marks_conditioned_selection_as_core(self):
+        parsed = asyncio.run(parse_manual_claim_locally(
+            "처리 장치가 (A) 입력 데이터를 수신하는 단계 (B) 입력 데이터의 유형을 고려하여 제1 처리 서비스 또는 제2 변환 서비스 중 적어도 하나를 수행하는 단계 및 (C) 결과를 출력하는 단계를 포함하는 방법",
+            1,
+            "independent",
+            None,
+        ))
+
+        importance_by_label = {element.label: element.importance for element in parsed.elements}
+        self.assertEqual(importance_by_label["B"], "5")
+
     def test_missing_parent_claim_uses_only_child_feature_evidence(self):
         claims = [
             ParsedClaim(
@@ -1598,7 +1862,7 @@ class DependentCitationChainPolicyTests(unittest.TestCase):
         self.assertEqual(mapping["3"], "인용발명 4")
         self.assertEqual(mapping["4"], "인용발명 5")
 
-    def test_two_new_references_are_not_combined_for_one_dependent_claim(self):
+    def test_only_one_partial_reference_is_added_for_one_dependent_claim(self):
         claims = [
             ParsedClaim(
                 claim_number=1,
@@ -1644,10 +1908,10 @@ class DependentCitationChainPolicyTests(unittest.TestCase):
 
         self.assertEqual(set(independent_total), {0, 1})
         self.assertEqual(chain["inherited"], independent_total)
-        self.assertEqual(chain["added"], [])
-        self.assertEqual(chain["total"], independent_total)
+        self.assertEqual(chain["added"], [2])
+        self.assertEqual(chain["total"], independent_total + [2])
         self.assertFalse(chain["coverage_complete"])
-        self.assertEqual(chain["uncovered_labels"], ["C", "D"])
+        self.assertEqual(chain["uncovered_labels"], ["D"])
 
     def test_dependent_claim_keeps_quoted_difference_as_partial_added_reference(self):
         claims = [

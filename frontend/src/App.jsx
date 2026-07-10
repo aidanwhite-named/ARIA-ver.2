@@ -2,8 +2,9 @@ import { useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeRaw from 'rehype-raw'
-import { addManualClaim, streamPrepare, streamReport, reportBatchDependent, getDependentBatchStatus, uploadFiles, getContextInfo, clearContext, checkJobStatus, detectCategory, deleteJob, deleteAllJobs, cancelGeneration } from './api/client'
+import { addManualClaim, streamPrepare, streamReport, reportBatchDependent, getDependentBatchStatus, uploadFiles, getContextInfo, clearContext, checkJobStatus, detectCategory, deleteJob, deleteAllJobs, cancelGeneration, getMissingPriorArt } from './api/client'
 import ClaimAnalysisWindow from './components/ClaimAnalysisWindow'
+import MissingPriorArtSearch from './components/MissingPriorArtSearch'
 
 import FilePanel from './components/FilePanel'
 import ProgressPanel from './components/ProgressPanel'
@@ -80,9 +81,18 @@ const SIMILARITY_STYLES = {
   '차이':           { badge: 'bg-gray-100 text-gray-700 border border-gray-300' },
 }
 
+function similarityPresentation(pct) {
+  const value = Number.parseInt(String(pct || '').replace('%', ''), 10)
+  if (value >= 95) return { symbol: '🔵', row: 'bg-blue-50 border-l-4 border-blue-500' }
+  if (value >= 90) return { symbol: '🟢', row: 'bg-green-50 border-l-4 border-green-500' }
+  if (value >= 85) return { symbol: '🟠', row: 'bg-orange-50 border-l-4 border-orange-500' }
+  if (value >= 80) return { symbol: '🟡', row: 'bg-amber-50 border-l-4 border-amber-400' }
+  return { symbol: '⚪', row: 'bg-white border-l-4 border-gray-300' }
+}
+
 function normalizeReportStatusIcons(text) {
   return String(text || '')
-    .replace(/[🔵🟠🟢🟡⚪🔴\uFFFD�]+/g, '')
+    .replace(/[\uFFFD�]+/g, '')
     .replace(/(^|\r?\n)\s*[�\uFFFD]+\s*(?=최종 보고서)/g, '$1')
     .replace(/[ \t]{2,}/g, ' ')
     .replace(/[ \t]+(\r?\n)/g, '$1')
@@ -90,7 +100,64 @@ function normalizeReportStatusIcons(text) {
 }
 
 function sanitizeReportText(text) {
-  return normalizeReportStatusIcons(text)
+  return String(text || '')
+}
+
+const RELATED_A_TAB_KEY = '__relatedA'
+const RELATED_A_TAB_LABEL = '관련도 A 인용발명'
+
+function splitRelatedAReport(text) {
+  const md = sanitizeReportText(text)
+  const match = md.match(/^##\s*관련도\s*A\s*인용발명\s*$/m)
+  if (!match) return { reportMd: md, relatedMd: '' }
+  const beforeHeading = md.slice(0, match.index)
+  const sepIndex = beforeHeading.lastIndexOf('\n---\n')
+  const reportMd = (sepIndex >= 0 ? md.slice(0, sepIndex) : beforeHeading).trim()
+  const relatedStart = sepIndex >= 0 ? sepIndex + '\n---\n'.length : match.index
+  const relatedMd = md.slice(relatedStart).trim()
+  return { reportMd, relatedMd }
+}
+
+function relatedATabMarkdown(prevMd, claimNumber, relatedMd) {
+  const clean = sanitizeReportText(relatedMd).trim()
+  if (!clean) return prevMd || ''
+  const section = `### 청구항 ${claimNumber}\n\n${clean}`
+  const prev = sanitizeReportText(prevMd).trim()
+  if (!prev) return section
+  if (prev.includes(section)) return prev
+  return `${prev}\n\n---\n\n${section}`
+}
+
+function addReportEntryWithRelated(reports, claimNumber, reportMd, usedInventions = [], relatedMd = '') {
+  const { reportMd: cleanReport, relatedMd: extractedRelated } = splitRelatedAReport(reportMd)
+  const next = {
+    ...reports,
+    [claimNumber]: {
+      report_md: cleanReport,
+      usedInventions,
+    },
+  }
+  const mergedRelated = relatedATabMarkdown(
+    next[RELATED_A_TAB_KEY]?.report_md,
+    claimNumber,
+    relatedMd || extractedRelated,
+  )
+  if (mergedRelated) {
+    next[RELATED_A_TAB_KEY] = {
+      report_md: mergedRelated,
+      usedInventions: [],
+      isRelatedATab: true,
+    }
+  }
+  return next
+}
+
+function reportTabKeys(allReports) {
+  const keys = Object.keys(allReports || {})
+  const claimKeys = keys
+    .filter(key => key !== RELATED_A_TAB_KEY)
+    .sort((a, b) => Number(a) - Number(b))
+  return allReports?.[RELATED_A_TAB_KEY] ? [...claimKeys, RELATED_A_TAB_KEY] : claimKeys
 }
 
 // ── Phase 1 필드 라벨 스타일 ─────────────────────────────────────────────────
@@ -142,7 +209,7 @@ function Phase1H3({ children }) {
     )
   }
 
-  const m = text.match(/^\[(구성요소|추가\s*구성)(?:\s*\(\s*([A-J](?:-\d+)?)\s*\))?\]$/)
+  const m = text.match(/^\[(구성요소|추가\s*구성|전제부)(?:\s*\(\s*([A-JP](?:-\d+)?)\s*\))?\]$/)
   if (m) {
     return (
       <h3 className="phase1-component-heading mt-7 mb-3 text-xl font-extrabold text-slate-900">
@@ -159,10 +226,10 @@ function Phase1ListItem({ children }) {
 
   // 유사도 라인 감지 — 이모지·기존 바탕색 지시 잔재도 흡수
   const newSimMatch = text.match(
-    /^(?:유사도\s*:\s*)?\(([A-J](?:-\d+)?)\)\s*(동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음)?\s*(\d+%)?/
+    /^(?:유사도\s*:\s*)?\(([A-JP](?:-\d+)?)\)\s*(동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음|대응안됨|대응 안됨)?\s*(\d+%)?/
   )
   const oldSimMatch = text.match(
-    /^유사도\s*:\s*(동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음)?\s*(\d+%)?/
+    /^유사도\s*:\s*(동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음|대응안됨|대응 안됨)?\s*(\d+%)?/
   )
   if (newSimMatch || oldSimMatch) {
     const elementLabel = newSimMatch ? newSimMatch[1] : ''
@@ -170,9 +237,9 @@ function Phase1ListItem({ children }) {
     const normalizedLabel = labelText.replace(/\s+/g, '') === '대응없음' ? '차이' : labelText.replace(/\s+/g, '')
     const pct = newSimMatch ? (newSimMatch[3] || '') : (oldSimMatch?.[2] || '')
     const style = SIMILARITY_STYLES[normalizedLabel] || SIMILARITY_STYLES['차이']
-    const rowColor = SIMILARITY_ROW_COLORS[normalizedLabel] || SIMILARITY_ROW_COLORS['차이']
+    const presentation = similarityPresentation(pct)
     return (
-      <li className={`flex items-center gap-2 py-2 px-3 rounded-r my-1.5 list-none -ml-5 ${rowColor}`}>
+      <li className={`flex items-center gap-2 py-2 px-3 rounded-r my-1.5 list-none -ml-5 ${presentation.row}`}>
         {elementLabel && <span className="text-xs font-semibold text-gray-700 shrink-0">({elementLabel})</span>}
         {normalizedLabel
           ? (
@@ -184,6 +251,7 @@ function Phase1ListItem({ children }) {
         }
         {pct && (
           <span className="inline-flex items-center gap-1 text-xs text-gray-500 font-mono whitespace-nowrap shrink-0">
+            <span aria-hidden="true">{presentation.symbol}</span>
             <span className="shrink-0">{pct}</span>
           </span>
         )}
@@ -219,10 +287,10 @@ function escapeHtml(value) {
 
 function renderJudgmentInline(text) {
   const match = text.match(
-    /^(\([A-J](?:-\d+)?\)(?:\s*(?:및|,)\s*\([A-J](?:-\d+)?\))*)\s+(동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음)(?:\s+(\d+%))?\s*$/
+    /^(\([A-JP](?:-\d+)?\)(?:\s*(?:및|,)\s*\([A-JP](?:-\d+)?\))*)\s+(동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음|대응안됨|대응 안됨)(?:\s+(\d+%))?\s*$/
   )
   const fallbackMatch = !match && text.match(
-    /^(동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음)(?:\s+(\d+%))?\s*$/
+    /^(동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음|대응안됨|대응 안됨)(?:\s+(\d+%))?\s*$/
   )
   if (!match && !fallbackMatch) return null
   const label = match ? match[1] : ''
@@ -235,14 +303,14 @@ function renderJudgmentInline(text) {
 function ReportParagraph({ children }) {
   const text = extractText(children)
   const trimmed = text.trim()
-  if (/^\[(구성요소|추가\s*구성)(?:\s*\(\s*[A-J](?:-\d+)?\s*\))?\]$/.test(trimmed)) {
+  if (/^\[(구성요소|추가\s*구성|전제부)(?:\s*\(\s*[A-JP](?:-\d+)?\s*\))?\]$/.test(trimmed)) {
     return <p className="phase1-component-heading">{children}</p>
   }
   if (/^\[(인용발명\s*\d+\s*단독\(신규성\)|인용발명\s*\d+\s*\+\s*주지관용\(진보성\)|인용발명\s*\d+\s*과\s*인용발명\s*\d+\s*의\s*결합(?:\s*및\s*주지관용)?\(진보성\))\]$/.test(trimmed)) {
     return <p className="mt-2 mb-5 text-xl font-bold tracking-tight text-slate-950">{children}</p>
   }
-  if (/^\[(구성대비|종합분석요약|구성요소|종합 판단|유사점|차이점|결론)\]$/.test(trimmed)) {
-    const isMajor = /^\[(구성대비|종합분석요약|종합 판단)\]$/.test(trimmed)
+  if (/^\[(구성대비|종합분석요약|구성요소|종합 판단|유사점|차이점|결론|정량평가 - 분석 보조지표|종속항 추가한정 평가)\]$/.test(trimmed)) {
+    const isMajor = /^\[(구성대비|종합분석요약|종합 판단|정량평가 - 분석 보조지표|종속항 추가한정 평가)\]$/.test(trimmed)
     const isDiff = trimmed === '[차이점]'
     const isSimilar = trimmed === '[유사점]'
     const isConclusion = trimmed === '[결론]'
@@ -268,12 +336,12 @@ function ReportParagraph({ children }) {
   const judgmentInline = renderJudgmentInline(trimmed)
   if (judgmentInline) {
     const { label, judgment, pct } = judgmentInline
-    const color = JUDGMENT_COLORS[judgment] || 'text-gray-500 border-gray-300 bg-gray-50'
+    const presentation = similarityPresentation(pct)
     return (
-      <p className={`flex items-center gap-2 font-semibold text-sm border-l-4 pl-3 py-0.5 rounded-r mt-4 mb-1 overflow-x-auto ${color}`}>
+      <p className={`flex items-center gap-2 font-semibold text-sm pl-3 py-0.5 rounded-r mt-4 mb-1 overflow-x-auto ${presentation.row}`}>
         {label && <span className="shrink-0">{label}</span>}
         <span className="shrink-0">{judgment}</span>
-        {pct && <span className="shrink-0 font-mono">{pct}</span>}
+        {pct && <span className="shrink-0 font-mono">{presentation.symbol} {pct}</span>}
       </p>
     )
   }
@@ -299,7 +367,7 @@ function preprocessReport(md) {
 
   function normalizePhase1Fields(text) {
     const fieldRe = /^-\s*(?:\*\*)?(청구항 구성|인용발명\s*대응 원문|인용발명 대응 부분 요약|판단 이유|판단 근거|차이점|유사점 요약)(?:\*\*)?\s*:\s*(.*)$/
-    const sectionHeaderRe = /^#{1,6}\s*\[(구성요소|추가\s*구성)(?:\s*\([A-J](?:-\d+)?\))?\]\s*$/
+    const sectionHeaderRe = /^#{1,6}\s*\[(구성요소|추가\s*구성|전제부)(?:\s*\([A-JP](?:-\d+)?\))?\]\s*$/
     const lines = text.split('\n')
     const result = []
     let i = 0
@@ -334,7 +402,7 @@ function preprocessReport(md) {
           fieldRe.test(current) ||
           /^#{1,6}\s/.test(trimmed) ||
           sectionHeaderRe.test(trimmed) ||
-          (label !== '차이점' && /^\([A-J](?:-\d+)?\)\s/.test(trimmed)) ||
+          (label !== '차이점' && /^\([A-JP](?:-\d+)?\)\s/.test(trimmed)) ||
           /^-\s*(유사점 요약|차이점|결론)\s*:/.test(trimmed)
         ) {
           break
@@ -359,7 +427,7 @@ function preprocessReport(md) {
 
     while (i < lines.length) {
       const line = lines[i]
-      if (!/^\([A-J](?:-\d+)?\)\s/.test(line.trim())) {
+      if (!/^\([A-JP](?:-\d+)?\)\s/.test(line.trim())) {
         result.push(line)
         i += 1
         continue
@@ -375,7 +443,7 @@ function preprocessReport(md) {
           break
         }
         if (
-          /^\([A-J](?:-\d+)?\)\s/.test(trimmed) ||
+          /^\([A-JP](?:-\d+)?\)\s/.test(trimmed) ||
           /^\[결론\]$/.test(trimmed) ||
           /^-?\s*(유사점 요약|차이점|결론)\s*:/.test(trimmed)
         ) {
@@ -410,7 +478,7 @@ function preprocessReport(md) {
   }
 
   function mergeClaimIntoJudgmentCards(text) {
-    const judgmentRe = String.raw`((?:\([A-J](?:-\d+)?\)\s*)?(?:동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음)(?:\s+\d+%)?)`
+    const judgmentRe = String.raw`((?:\([A-JP](?:-\d+)?\)\s*)?(?:동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음|대응안됨|대응 안됨)(?:\s+\d+%)?)`
     const claimRe = String.raw`<div class="phase1-field phase1-field-claim"><div class="phase1-field-label">청구항 구성<\/div>(?:<div class="phase1-field-body">([\s\S]*?)<\/div>)?<\/div>`
     return text.replace(
       new RegExp(`^${judgmentRe}\\s*\\n+${claimRe}`, 'gm'),
@@ -553,16 +621,16 @@ function preprocessReport(md) {
     return out.join('\n')
   }
 
-  const judgmentPrefix = String.raw`\([A-J](?:-\d+)?\)(?:\s*(?:및|,)\s*\([A-J](?:-\d+)?\))*\s+(?:동일|실질적동일|실질적\s+동일|일부차이|일부\s+차이|일부유사|일부\s+유사|차이|대응\s+없음)(?:\s+\d+%)?`
+  const judgmentPrefix = String.raw`\([A-JP](?:-\d+)?\)(?:\s*(?:및|,)\s*\([A-JP](?:-\d+)?\))*\s+(?:동일|실질적동일|실질적\s+동일|일부차이|일부\s+차이|일부유사|일부\s+유사|차이|대응\s+없음|대응안됨|대응\s+안됨)(?:\s+\d+%)?`
   // CLI 에이전트가 새어 보낸 도구 호출 줄(update_topic(...) 등) 제거 — 캐시·히스토리 구보고서까지 정리
   md = md.replace(/^[ \t]*[a-z][a-z0-9_]*\([a-z_]+\s*=\s*['"].*\)[ \t]*-*[ \t]*$/gm, '')
   md = md.replace(
-    /([^\n])\s*(#{3,6}\s*\[(?:구성요소|추가\s*구성)(?:\s*\([A-J](?:-\d+)?\))?\])/g,
+    /([^\n])\s*(#{3,6}\s*\[(?:구성요소|추가\s*구성|전제부)(?:\s*\([A-JP](?:-\d+)?\))?\])/g,
     '$1\n\n$2'
   )
   md = md.replace(/^(#{3,6})(?=\[(?:구성요소|추가\s*구성))/gm, '$1 ')
   md = md.replace(
-    /^#{1,6}\s*(\[(?:구성요소|추가\s*구성)(?:\s*\([A-J](?:-\d+)?\))?\])\s*$/gm,
+    /^#{1,6}\s*(\[(?:구성요소|추가\s*구성|전제부)(?:\s*\([A-JP](?:-\d+)?\))?\])\s*$/gm,
     '$1'
   )
   md = keepFirstComponentHeader(md)
@@ -595,11 +663,11 @@ function preprocessReport(md) {
     '$1\n\n$2'
   )
   md = md.replace(
-    /([^\n])\n(\([A-J](?:-\d+)?\))/g,
+    /([^\n])\n(\([A-JP](?:-\d+)?\))/g,
     '$1\n\n$2'
   )
   md = md.replace(
-    /^(\([A-J](?:-\d+)?\)(?:\s*(?:및|,)\s*\([A-J](?:-\d+)?\))*\s+(?:동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음)(?:\s+\d+%)?)\s+(\S.*)$/gm,
+    /^(\([A-JP](?:-\d+)?\)(?:\s*(?:및|,)\s*\([A-JP](?:-\d+)?\))*\s+(?:동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음|대응안됨|대응 안됨)(?:\s+\d+%)?)\s+(\S.*)$/gm,
     (_, judgment, body) => `${judgment}\n\n${body}`
   )
   md = normalizeDifferenceEntries(md)
@@ -612,7 +680,7 @@ function preprocessReport(md) {
   const result = []
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
-    const isJudgment = /^\([A-J](?:-\d+)?\)\s/.test(line)
+    const isJudgment = /^\([A-JP](?:-\d+)?\)\s/.test(line)
     if (isJudgment && result.length > 0 && result[result.length - 1] !== '') result.push('')
     result.push(line)
     if (isJudgment && i < lines.length - 1 && lines[i + 1] !== '') result.push('')
@@ -626,6 +694,36 @@ function preprocessPhase1Report(md) {
       .replace(/^###\s+claim\s+(\d+)\s*$/gim, '### 청구항 $1')
       .replace(/^\s*#{1,6}\s*(?:[^\w\r\n]*)?\s*종합\s*분석\s*요약\s*$/gim, '[종합분석요약]')
   )
+}
+
+function extractRejectionBasisHeader(md) {
+  const match = String(md || '').match(
+    /^\s*\[인용발명\s*\d+\s*과\s*인용발명\s*\d+\s*의\s*결합(?:\s*및\s*주지관용)?\s*\(진보성\)\]\s*$/m
+  )
+  return match ? match[0].trim() : ''
+}
+
+function removeRejectionBasisHeader(md) {
+  return String(md || '').replace(
+    /^\s*\[인용발명\s*\d+\s*과\s*인용발명\s*\d+\s*의\s*결합(?:\s*및\s*주지관용)?\s*\(진보성\)\]\s*$/m,
+    ''
+  ).replace(/^\s*\n/, '')
+}
+
+function extractQuantitativeAssessment(md) {
+  const source = String(md || '')
+  const match = source.match(/^\s*\[정량평가\s*-\s*분석 보조지표\]\s*$/m)
+  if (!match) return ''
+  const start = match.index + match[0].length
+  const next = source.slice(start).search(/^\s*\[[^\]]+\]\s*$/m)
+  return source.slice(start, next >= 0 ? start + next : source.length).trim()
+}
+
+function removeQuantitativeAssessment(md) {
+  return String(md || '').replace(
+    /^\s*\[정량평가\s*-\s*분석 보조지표\]\s*$[\s\S]*?(?=^\s*\[[^\]]+\]\s*$|\s*$)/m,
+    ''
+  ).replace(/^\s*\n/, '')
 }
 
 // ── [확장 포인트 1] 청구항 헤더 패턴 ─────────────────────────────────────────
@@ -739,14 +837,22 @@ function splitClaims(text) {
 function loadHistory() {
   try {
     return JSON.parse(localStorage.getItem('aria_history') || '[]')
-      .map(item => ({ ...item, report: sanitizeReportText(item.report || '') }))
+      .map(item => ({
+        ...item,
+        report: sanitizeReportText(item.report || ''),
+        relatedInventionsMd: sanitizeReportText(item.relatedInventionsMd || ''),
+      }))
   }
   catch { return [] }
 }
 function saveHistory(list) {
   localStorage.setItem(
     'aria_history',
-    JSON.stringify(list.map(item => ({ ...item, report: sanitizeReportText(item.report || '') })))
+    JSON.stringify(list.map(item => ({
+      ...item,
+      report: sanitizeReportText(item.report || ''),
+      relatedInventionsMd: sanitizeReportText(item.relatedInventionsMd || ''),
+    })))
   )
 }
 
@@ -818,6 +924,11 @@ function HistoryPanel({ history, onSelect, onDelete, onClearLocal, onClearAll, o
                     <span className="text-xs font-semibold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full shrink-0">
                       청구항 {item.claimNumber}
                     </span>
+                    {item.missingPriorArt && (
+                      <span className="text-[10px] font-medium text-indigo-700 bg-indigo-50 px-1.5 py-0.5 rounded-full shrink-0">
+                        선행기술 검색
+                      </span>
+                    )}
                     {item.usedInventions && item.usedInventions.length > 0 && (
                       <span className="text-[10px] text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded-full shrink-0">
                         {item.usedInventions.map(inv => inv.name).join(' + ')}
@@ -843,6 +954,41 @@ function HistoryPanel({ history, onSelect, onDelete, onClearLocal, onClearAll, o
   )
 }
 
+function MissingPriorArtResultPage({ result, onBack }) {
+  return (
+    <div className="mx-auto max-w-5xl px-6 py-5">
+      <div className="mb-5 flex items-center gap-3 border-b border-slate-200 pb-4">
+        <button
+          type="button"
+          onClick={onBack}
+          className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+        >
+          ← 보고서로
+        </button>
+        <div>
+          <h2 className="text-lg font-bold text-slate-900">미커버 구성 선행기술 검색 결과</h2>
+          <p className="text-xs text-slate-500">청구항 {result.claim_number} · {result.searched_at}</p>
+        </div>
+      </div>
+      <div className="mb-4 flex flex-wrap items-center gap-2 text-xs">
+        <span className="font-semibold text-slate-700">검색 구성</span>
+        {(result.target_labels || []).map(label => (
+          <span key={label} className="rounded-full bg-indigo-100 px-2 py-0.5 font-medium text-indigo-700">{label}</span>
+        ))}
+        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-slate-600">
+          {(result.search_axes || []).join(' · ')}
+        </span>
+        {result.expanded && (
+          <span className="rounded-full bg-amber-100 px-2 py-0.5 font-medium text-amber-700">후보 부족으로 자동 확장</span>
+        )}
+      </div>
+      <div className="prose prose-sm max-w-none rounded-xl border border-slate-200 bg-white p-5 text-slate-700">
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{result.result_md || ''}</ReactMarkdown>
+      </div>
+    </div>
+  )
+}
+
 // ── 메인 앱 ───────────────────────────────────────────────────────────────────
 export default function App() {
   const [priorFiles, setPriorFiles] = useState([])
@@ -863,6 +1009,12 @@ export default function App() {
   const [error, setError] = useState('')
   const [showSettings, setShowSettings] = useState(false)
   const [showClaimAnalysis, setShowClaimAnalysis] = useState(false)
+  const [missingPriorArt, setMissingPriorArt] = useState(null)
+  const [showMissingPriorArt, setShowMissingPriorArt] = useState(false)
+  const rejectionBasisHeader = extractRejectionBasisHeader(report)
+  const reportWithoutRejectionBasisHeader = removeRejectionBasisHeader(report)
+  const quantitativeAssessment = extractQuantitativeAssessment(reportWithoutRejectionBasisHeader)
+  const reportForDisplay = removeQuantitativeAssessment(reportWithoutRejectionBasisHeader)
 
   // 히스토리
   const [history, setHistory] = useState(loadHistory)
@@ -888,12 +1040,29 @@ export default function App() {
     setContextClaims([])
     setUseCtx(true)
     setError('')
+    setMissingPriorArt(null)
+    setShowMissingPriorArt(false)
   }
 
   // 히스토리 저장
   function addHistoryItem(item) {
     setHistory(prev => {
       const updated = [item, ...prev].slice(0, 50)
+      saveHistory(updated)
+      return updated
+    })
+  }
+
+  function handleMissingPriorArtResult(result) {
+    setMissingPriorArt(result)
+    setShowMissingPriorArt(true)
+    setHistory(prev => {
+      const claimNo = Number(result.claim_number)
+      const updated = prev.map(item =>
+        item.jobId === jobId && Number(item.claimNumber) === claimNo
+          ? { ...item, missingPriorArt: result }
+          : item
+      )
       saveHistory(updated)
       return updated
     })
@@ -932,6 +1101,8 @@ export default function App() {
     setContextClaims([])
     setUseCtx(true)
     setError('')
+    setMissingPriorArt(null)
+    setShowMissingPriorArt(false)
     addLog('[히스토리] 히스토리 목록 및 연관된 서버 데이터를 모두 삭제했습니다.')
   }
 
@@ -967,20 +1138,26 @@ export default function App() {
     const relatedItems = item.jobId
       ? history.filter(h => h.jobId === item.jobId && h.report)
       : [item]
-    const reportsByClaim = {}
+    let reportsByClaim = {}
     for (const h of relatedItems) {
       const claimKey = Number(h.claimNumber)
       if (!Number.isFinite(claimKey) || reportsByClaim[claimKey]) continue
-      reportsByClaim[claimKey] = {
-        report_md: sanitizeReportText(h.report),
-        usedInventions: h.usedInventions || [],
-      }
+      reportsByClaim = addReportEntryWithRelated(
+        reportsByClaim,
+        claimKey,
+        h.report,
+        h.usedInventions || [],
+        h.relatedInventionsMd || '',
+      )
     }
     if (!reportsByClaim[selectedClaimNumber]) {
-      reportsByClaim[selectedClaimNumber] = {
-        report_md: sanitizeReportText(item.report),
-        usedInventions: item.usedInventions || [],
-      }
+      reportsByClaim = addReportEntryWithRelated(
+        reportsByClaim,
+        selectedClaimNumber,
+        item.report,
+        item.usedInventions || [],
+        item.relatedInventionsMd || '',
+      )
     }
     const selectedReport = reportsByClaim[selectedClaimNumber]
     if (!selectedReport?.report_md) {
@@ -993,6 +1170,14 @@ export default function App() {
     setActiveClaimNumView(selectedClaimNumber)
     setClaimNumber(selectedClaimNumber)
     setClaimText(item.claimTextPreview)
+    let restoredSearch = item.missingPriorArt || null
+    if (!restoredSearch && item.jobId) {
+      try {
+        restoredSearch = await getMissingPriorArt(item.jobId, selectedClaimNumber)
+      } catch (_) {}
+    }
+    setMissingPriorArt(restoredSearch)
+    setShowMissingPriorArt(Boolean(restoredSearch))
     addLog(
       `[히스토리] 청구항 ${Object.keys(reportsByClaim).sort((a, b) => Number(a) - Number(b)).join(', ')} 보고서를 복원했습니다.`
     )
@@ -1097,7 +1282,9 @@ export default function App() {
               setUsedInventions(data.used_inventions || [])
             },
             onDone: async data => {
-              const cleanReport = sanitizeReportText(data.report_md)
+              const relatedInventionsMd = sanitizeReportText(data.related_inventions_md || '')
+              const { reportMd: cleanReport, relatedMd: extractedRelated } = splitRelatedAReport(data.report_md)
+              const cleanRelated = relatedInventionsMd || extractedRelated
               setReport(cleanReport)
               setUsedInventions(data.used_inventions || [])
               if (data.timings) {
@@ -1108,19 +1295,20 @@ export default function App() {
                   .join(' | ')
                 if (summary) addLog(`[timing] ${summary}`)
               }
-              setAllReports(prev => ({
-                ...prev,
-                [claim.claim_number]: {
-                  report_md: cleanReport,
-                  usedInventions: data.used_inventions || []
-                }
-              }))
+              setAllReports(prev => addReportEntryWithRelated(
+                prev,
+                claim.claim_number,
+                cleanReport,
+                data.used_inventions || [],
+                cleanRelated,
+              ))
               addHistoryItem({
                 id: Date.now() + claim.claim_number,
                 jobId: jobId,
                 claimNumber: claim.claim_number,
                 claimTextPreview: text.slice(0, 100),
                 report: cleanReport,
+                relatedInventionsMd: cleanRelated,
                 usedInventions: data.used_inventions || [],
                 createdAt: new Date().toISOString(),
               })
@@ -1178,23 +1366,26 @@ export default function App() {
               addLog(`경고: 청구항 ${claim.claim_number} 보고서가 누락되었습니다.`)
               continue
             }
-            const cleanReport = sanitizeReportText(r.report_md)
+            const relatedInventionsMd = sanitizeReportText(r.related_inventions_md || '')
+            const { reportMd: cleanReport, relatedMd: extractedRelated } = splitRelatedAReport(r.report_md)
+            const cleanRelated = relatedInventionsMd || extractedRelated
             setReport(cleanReport)
             setUsedInventions(r.used_inventions || [])
             setActiveClaimNumView(claim.claim_number)
-            setAllReports(prev => ({
-              ...prev,
-              [claim.claim_number]: {
-                report_md: cleanReport,
-                usedInventions: r.used_inventions || [],
-              },
-            }))
+            setAllReports(prev => addReportEntryWithRelated(
+              prev,
+              claim.claim_number,
+              cleanReport,
+              r.used_inventions || [],
+              cleanRelated,
+            ))
             addHistoryItem({
               id: Date.now() + claim.claim_number,
               jobId: jobId,
               claimNumber: claim.claim_number,
               claimTextPreview: text.slice(0, 100),
               report: cleanReport,
+              relatedInventionsMd: cleanRelated,
               usedInventions: r.used_inventions || [],
               createdAt: new Date().toISOString(),
             })
@@ -1240,6 +1431,10 @@ export default function App() {
     } catch (_) {}
     c.reject?.(new Error('사용자 취소'))
   }
+
+  const tabKeys = reportTabKeys(allReports)
+  const isRelatedATabActive = activeClaimNumView === RELATED_A_TAB_KEY
+  const activeClaimForActions = typeof activeClaimNumView === 'number' ? activeClaimNumView : claimNumber
 
   return (
     <div className="min-h-screen flex flex-col bg-gray-100">
@@ -1435,26 +1630,27 @@ export default function App() {
         <main className="flex-1 overflow-hidden">
           <div className="bg-white rounded-xl border border-gray-200 shadow-sm flex flex-col h-full">
             {/* 청구항 전환 탭 — 복수 청구항 생성 시만 표시 */}
-            {Object.keys(allReports).length > 1 && (
+            {tabKeys.length > 1 && (
               <div className="px-5 py-2 flex items-center gap-2 border-b bg-slate-50">
                 <span className="text-xs text-slate-500 font-medium shrink-0">청구항</span>
-                {Object.keys(allReports).sort((a, b) => Number(a) - Number(b)).map(num => (
+                {tabKeys.map(num => (
                   <button
                     key={num}
                     onClick={() => {
                       const r = allReports[num]
                       setReport(sanitizeReportText(r.report_md))
                       setUsedInventions(r.usedInventions)
-                      setActiveClaimNumView(Number(num))
+                      setActiveClaimNumView(num === RELATED_A_TAB_KEY ? RELATED_A_TAB_KEY : Number(num))
+                      if (num === RELATED_A_TAB_KEY) setShowMissingPriorArt(false)
                     }}
                     className={[
                       'text-xs px-3 py-1 rounded-full border transition-colors font-medium',
-                      activeClaimNumView === Number(num)
+                      activeClaimNumView === (num === RELATED_A_TAB_KEY ? RELATED_A_TAB_KEY : Number(num))
                         ? 'bg-blue-600 text-white border-blue-600'
                         : 'text-slate-600 border-slate-300 hover:bg-slate-100',
                     ].join(' ')}
                   >
-                    청구항 {num}
+                    {num === RELATED_A_TAB_KEY ? RELATED_A_TAB_LABEL : `청구항 ${num}`}
                   </button>
                 ))}
               </div>
@@ -1465,11 +1661,21 @@ export default function App() {
                   <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
                   인용발명과 청구항을 순차 대비하고 있습니다.
                 </div>
+              ) : !isRelatedATabActive && showMissingPriorArt && missingPriorArt ? (
+                <MissingPriorArtResultPage
+                  result={missingPriorArt}
+                  onBack={() => setShowMissingPriorArt(false)}
+                />
               ) : report ? (
                 <>
-                  {usedInventions.length > 0 && (
+                  {!isRelatedATabActive && usedInventions.length > 0 && (
                     <section className="mb-4 flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
                       <p className="text-sm font-bold tracking-tight text-slate-900 shrink-0">인용발명</p>
+                      {rejectionBasisHeader && (
+                        <p className="basis-full order-first mb-1 text-base font-extrabold tracking-tight text-slate-950">
+                          {rejectionBasisHeader}
+                        </p>
+                      )}
                       <div className="flex min-w-0 flex-1 flex-wrap gap-1.5">
                         {usedInventions.map((inv, i) => (
                           <span
@@ -1484,13 +1690,33 @@ export default function App() {
                       </div>
                     </section>
                   )}
+                  {!isRelatedATabActive && quantitativeAssessment && (
+                    <section className="mb-4 rounded-lg border border-violet-200 bg-violet-50/60 px-4 py-3">
+                      <p className="mb-2 text-sm font-bold tracking-tight text-violet-900">정량평가</p>
+                      <div className="prose prose-sm max-w-none text-violet-950">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{quantitativeAssessment}</ReactMarkdown>
+                      </div>
+                    </section>
+                  )}
+                  {!isRelatedATabActive && (
+                    <MissingPriorArtSearch
+                      jobId={jobId}
+                      claimNumber={activeClaimForActions}
+                      savedResult={
+                        Number(missingPriorArt?.claim_number) === Number(activeClaimForActions)
+                          ? missingPriorArt
+                          : null
+                      }
+                      onResult={handleMissingPriorArtResult}
+                    />
+                  )}
                   <div className="report-content phase1-report-content prose max-w-none">
                     <ReactMarkdown
                       remarkPlugins={[remarkGfm]}
                       rehypePlugins={[rehypeRaw]}
                       components={{ p: ReportParagraph, h3: Phase1H3, li: Phase1ListItem }}
                     >
-                      {preprocessPhase1Report(report)}
+                      {preprocessPhase1Report(reportForDisplay)}
                     </ReactMarkdown>
                   </div>
                 </>
@@ -1526,7 +1752,7 @@ export default function App() {
         onOpen={() => setShowChat(true)}
         onClose={() => setShowChat(false)}
         jobId={jobId}
-        claimNumber={activeClaimNumView || claimNumber}
+        claimNumber={activeClaimForActions}
         reportMd={report}
       />
       {showClaimAnalysis && jobId && (

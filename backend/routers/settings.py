@@ -47,3 +47,9 @@ async def get_status():
     s = _load()
     status = get_engine_status(s)
     return status
+
+
+@router.post("/status")
+async def check_status(settings: Settings):
+    status = get_engine_status(settings)
+    return status

@@ -37,3 +37,9 @@ Thumbs.db
 cases/
 deleted_diff.txt
 
+# Vite 임시 파일
+frontend/vite.config.js.timestamp-*
+
+# 임시 디렉토리
+tmp/
+

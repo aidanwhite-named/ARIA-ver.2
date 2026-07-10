@@ -12,6 +12,8 @@
 - v5: 종속항은 부모 체인을 그대로 상속하고, 해당 종속항의 남은 구성을
        하나의 문헌이 모두 보완할 때에만 새 인용발명 1개를 추가
 - v6: 종속항 결론·프롬프트 계약 변경에 맞춰 기존 보고서 캐시를 한 번 갱신
+- v7: 판정 퍼센트 밴드와 동일/실질적 동일 구별 기준 정리에 맞춰 캐시 갱신
+- v8: 조건 기반 선택식 구성은 상위개념·복수대안·선택구조 중심으로 검색/주인용 선정
 """
 from __future__ import annotations
 import json
@@ -22,13 +24,14 @@ from typing import Dict, List, Optional
 
 from backend.models.schemas import ExtractedDocument, ParsedClaim
 from backend.services.citation_extractor import normalize_label
+from backend.services.quantitative_assessment import assess_claims
 
 logger = logging.getLogger(__name__)
 
 MAX_INDEPENDENT_REFS = 2   # 독립항에 사용할 최대 인용발명 수
 MAX_INDEPENDENT_REFS_WITH_CONVENTIONAL_SUPPORT = 3
 MAX_DEPTH_INCREMENT = 1    # 종속항 1단계당 추가 허용 인용발명 수
-CITATION_CHAIN_POLICY_VERSION = 6
+CITATION_CHAIN_POLICY_VERSION = 13
 
 # 판정 점수표 (높을수록 유사)
 _JUDGMENT_SCORE = {
@@ -52,9 +55,9 @@ _SOFT_GAP_SCORE = 3
 # 소프트 공백 보강 인정 기준: 보조 문헌이 주인용발명보다 명확히 좋은 판정일 때만
 _SECONDARY_IMPROVE_THRESHOLD = 4  # "실질적 동일" 이상
 # 보조 문헌의 불완전한 명시 근거 기준.
-# "일부 유사"는 완전 보완 근거로 보지는 않지만, 주지관용 논거보다 문헌 근거로
-# 먼저 검토할 가치가 있으므로 마지막 단계의 보조 인용발명 후보로 인정한다.
-_SECONDARY_SUPPORT_THRESHOLD = 2  # "일부 유사" 이상
+# `차이`라도 실제 발췌가 있으면 청구항 전체에는 못 미치지만 주인용발명의 빠진
+# 하위 제한을 설명하는 문헌일 수 있으므로 마지막 단계의 보조 후보로 남긴다.
+_SECONDARY_SUPPORT_THRESHOLD = 0
 # Dependent claims are often narrower implementation choices. If a newly added
 # document expressly teaches the main implementation axis but leaves a limitation
 # different, keep it in the chain as partial support so the report can explain
@@ -210,6 +213,23 @@ _FUNCTIONAL_VERB_RE = re.compile(
     r"store|compare|determin|generat|transmit|convert|detect|process|drive)",
     re.IGNORECASE,
 )
+_SELECTION_OR_RE = re.compile(
+    r"(?:또는|중\s*적어도\s*하나|하나\s*이상|및/또는|\band/or\b|\bor\b|at\s+least\s+one\s+of)",
+    re.IGNORECASE,
+)
+_SELECTION_CONDITION_RE = re.compile(
+    r"(?:에\s*따라|를\s*고려하여|을\s*고려하여|에\s*기초하여|를\s*판단하여|을\s*판단하여|"
+    r"인\s*경우|에\s*대응하여|선택|전환|분기|종류|유형|모드|"
+    r"based\s+on|according\s+to|depending\s+on|in\s+response\s+to|select|switch|branch|"
+    r"type|mode|condition|alternative)",
+    re.IGNORECASE,
+)
+
+
+def _is_conditioned_selection_element(text: str) -> bool:
+    """Return True when an OR limitation may really claim conditional selection."""
+    source = text or ""
+    return bool(_SELECTION_OR_RE.search(source) and _SELECTION_CONDITION_RE.search(source))
 
 
 def _conventionality_basis(element) -> Optional[str]:
@@ -240,7 +260,10 @@ def _element_weight_map(claims: List[ParsedClaim]) -> Dict[tuple[str, str], int]
     for claim in claims:
         claim_key = str(claim.claim_number)
         for element in claim.elements:
-            weights[(claim_key, normalize_label(element.label))] = _importance_value(element.importance)
+            weight = _importance_value(element.importance)
+            if _is_conditioned_selection_element(element.text):
+                weight = max(weight, _CORE_IMPORTANCE_THRESHOLD)
+            weights[(claim_key, normalize_label(element.label))] = weight
     return weights
 
 
@@ -283,11 +306,16 @@ def _comparison_rows(cache: Optional[Dict], claims: List[ParsedClaim]) -> list[D
             label = normalize_label(element.label)
             item = by_label.get(label, {})
             judgment = item.get("judgment", "대응 없음")
+            importance = _importance_value(element.importance)
+            selection_structure = _is_conditioned_selection_element(element.text)
+            if selection_structure:
+                importance = max(importance, _CORE_IMPORTANCE_THRESHOLD)
             rows.append({
                 "claim_key": str(claim.claim_number),
                 "label": label,
                 "element_index": idx,
-                "importance": _importance_value(element.importance),
+                "importance": importance,
+                "selection_structure": selection_structure,
                 "item": item,
                 "judgment": judgment,
                 "rank": _JUDGMENT_SCORE.get(judgment, 0),
@@ -298,11 +326,7 @@ def _comparison_rows(cache: Optional[Dict], claims: List[ParsedClaim]) -> list[D
 
 
 def _score_prior_cache(cache: Optional[Dict], claims: List[ParsedClaim]) -> tuple[float, int, Dict]:
-    """인용발명별 주 인용발명 후보 점수와 의미 있는 매칭 수를 계산한다.
-
-    주인용발명은 결합 거절의 출발점이므로, 핵심 구성 하나의 보유 여부보다
-    청구항 전체 구조에 대한 가까운 정도를 우선한다.
-    """
+    """기술분야 어휘에 의존하지 않고 주 문헌 후보를 평가한다."""
     if not cache:
         return 0.0, 0, {}
 
@@ -311,41 +335,41 @@ def _score_prior_cache(cache: Optional[Dict], claims: List[ParsedClaim]) -> tupl
         return 0.0, 0, {}
 
     element_coverage = _weighted_average(rows)
-    core_rows = [r for r in rows if r["importance"] >= _CORE_IMPORTANCE_THRESHOLD]
-    if not core_rows:
-        core_rows = [r for r in rows if r["element_index"] < 2] or rows
-    core_coverage = _weighted_average(core_rows)
-
-    strong_weight = sum(r["importance"] for r in rows if r["rank"] >= _PRIMARY_COVER_THRESHOLD)
     total_weight = sum(r["importance"] for r in rows) or 1
-    match_ratio = strong_weight / total_weight
-
-    # Purpose/effect-specific fields are not yet stored in comparisons_*.json.
-    # Use conservative local proxies so candidate ranking remains deterministic
-    # and token-free until a later extraction step provides direct metrics.
-    field_target = min(1.0, 0.70 * element_coverage + 0.30 * match_ratio)
-    purpose_rows = [r for r in rows if r["importance"] >= _CORE_IMPORTANCE_THRESHOLD or r["element_index"] == 0]
-    purpose_problem = _weighted_average(purpose_rows or rows)
-    effect_function = min(1.0, 0.65 * element_coverage + 0.35 * core_coverage)
-    embodiment_context = min(1.0, 0.60 * element_coverage + 0.40 * match_ratio)
-
-    main_score = (
-        0.30 * core_coverage
-        + 0.25 * field_target
-        + 0.20 * purpose_problem
-        + 0.15 * effect_function
-        + 0.10 * embodiment_context
+    evidence_adjusted = sum(
+        r["importance"] * r["similarity"] * (
+            0.55
+            + 0.25 * bool(r["item"].get("quote"))
+            + 0.10 * bool(r["item"].get("chunk_id") or r["item"].get("paragraph_no"))
+            + 0.10 * bool(r["item"].get("판단_이유") or r["item"].get("similarity_reason"))
+        )
+        for r in rows
+    ) / total_weight
+    strong_breadth = sum(
+        r["importance"] for r in rows if r["similarity"] >= 0.85
+    ) / total_weight
+    critical_gap_weight = sum(
+        r["importance"] for r in rows
+        if r["importance"] >= _CORE_IMPORTANCE_THRESHOLD and r["similarity"] < 0.35
+    ) / total_weight
+    core_rows = [r for r in rows if r["importance"] >= _CORE_IMPORTANCE_THRESHOLD]
+    core_coverage = _weighted_average(core_rows) if core_rows else 0.0
+    main_score = max(
+        0.0,
+        0.55 * element_coverage
+        + 0.25 * evidence_adjusted
+        + 0.20 * strong_breadth
+        - 0.20 * critical_gap_weight,
     )
     match_count = sum(1 for r in rows if r["rank"] >= _SECONDARY_FILL_THRESHOLD)
     detail = {
         "main_score": round(main_score, 4),
-        "core_coverage": round(core_coverage, 4),
         "element_coverage": round(element_coverage, 4),
-        "field_target_proximity": round(field_target, 4),
-        "purpose_problem_proximity": round(purpose_problem, 4),
-        "effect_function_proximity": round(effect_function, 4),
-        "embodiment_context_proximity": round(embodiment_context, 4),
-        "match_ratio": round(match_ratio, 4),
+        "evidence_adjusted_coverage": round(evidence_adjusted, 4),
+        "strong_breadth": round(strong_breadth, 4),
+        "critical_gap_weight": round(critical_gap_weight, 4),
+        "core_coverage": round(core_coverage, 4),
+        "formula": "0.55*coverage + 0.25*evidence + 0.20*strong_breadth - 0.20*critical_gap",
     }
 
     return round(main_score * 100, 2), match_count, detail
@@ -478,8 +502,10 @@ def _compute_supporting_evidence_score(
         if item is None or not item.get("quote"):
             continue
         j_score = _JUDGMENT_SCORE.get(item.get("judgment", "대응 없음"), 0)
-        if j_score >= _SECONDARY_SUPPORT_THRESHOLD:
-            score += j_score * (weights or {}).get((claim_key, label), 3)
+        judgment = item.get("judgment", "대응 없음")
+        if judgment != "대응 없음" and j_score >= _SECONDARY_SUPPORT_THRESHOLD:
+            # `차이`의 점수 0이 실제 발췌 근거까지 소거하지 않도록 최소 증거점수 1을 준다.
+            score += max(1, j_score) * (weights or {}).get((claim_key, label), 3)
     return score
 
 
@@ -781,7 +807,7 @@ def _apply_conventional_support_policy(
     return list(dict.fromkeys(conventional_doc_order))
 
 
-def _score_secondary_candidate(
+def _score_secondary_candidate_base(
     cache: Optional[Dict],
     primary_cache: Optional[Dict],
     claims: List[ParsedClaim],
@@ -793,8 +819,9 @@ def _score_secondary_candidate(
     if not cache or not targets:
         return 0.0, {}
 
-    weighted_fill = 0.0
-    weighted_quote = 0.0
+    weighted_gain = 0.0
+    weighted_residual = 0.0
+    weighted_evidence = 0.0
     denominator = 0.0
     hard_fill = 0
     soft_fill = 0
@@ -811,9 +838,20 @@ def _score_secondary_candidate(
         judgment = item.get("judgment", "대응 없음") if item else "대응 없음"
         sim = _similarity_for_judgment(judgment)
         rank = _JUDGMENT_SCORE.get(judgment, 0)
-        weighted_fill += base_weight * sim
-        if item and item.get("quote") and sim >= 0.35:
-            weighted_quote += base_weight
+        primary_item = _cache_item(primary_cache, claim_key, label)
+        primary_sim = _similarity_for_judgment(
+            primary_item.get("judgment", "대응 없음")
+        ) if primary_item else 0.0
+        gain = max(0.0, sim - primary_sim)
+        weighted_gain += base_weight * gain
+        weighted_residual += base_weight * sim
+        evidence_factor = (
+            0.55
+            + 0.25 * bool(item and item.get("quote"))
+            + 0.10 * bool(item and (item.get("chunk_id") or item.get("paragraph_no")))
+            + 0.10 * bool(item and (item.get("판단_이유") or item.get("similarity_reason")))
+        )
+        weighted_evidence += base_weight * gain * evidence_factor
         if rank >= _SECONDARY_FILL_THRESHOLD and (claim_key, label) in primary_gaps:
             hard_fill += 1
             filled_labels.append(label)
@@ -821,25 +859,13 @@ def _score_secondary_candidate(
             soft_fill += 1
             filled_labels.append(label)
 
-        primary_item = _cache_item(primary_cache, claim_key, label)
-        primary_sim = _similarity_for_judgment(primary_item.get("judgment", "대응 없음")) if primary_item else 0.0
         if 0.15 < primary_sim <= 0.55 and sim >= 0.85:
             specific_fill += 1
 
-    gap_fill = weighted_fill / denominator if denominator else 0.0
-    quote_explicitness = weighted_quote / denominator if denominator else 0.0
-    _, _, primary_like_detail = _score_prior_cache(cache, claims)
-    field_problem = float(primary_like_detail.get("field_target_proximity", 0.0))
-    applicability = min(1.0, 0.65 * field_problem + 0.35 * gap_fill)
-    reportability = min(1.0, 0.70 * quote_explicitness + 0.30 * gap_fill)
-
-    sub_score = (
-        0.55 * gap_fill
-        + 0.20 * quote_explicitness
-        + 0.10 * field_problem
-        + 0.10 * applicability
-        + 0.05 * reportability
-    )
+    marginal_gain = weighted_gain / denominator if denominator else 0.0
+    residual_coverage = weighted_residual / denominator if denominator else 0.0
+    evidence_gain = weighted_evidence / denominator if denominator else 0.0
+    sub_score = 0.60 * marginal_gain + 0.20 * residual_coverage + 0.20 * evidence_gain
 
     rationale_types: list[str] = []
     if hard_fill:
@@ -848,39 +874,30 @@ def _score_secondary_candidate(
         rationale_types.append("known_tech_application")
     if specific_fill:
         rationale_types.append("specific_selection")
-    if hard_fill and field_problem >= 0.35:
-        rationale_types.append("problem_solution")
-    if applicability >= 0.55:
-        rationale_types.append("obvious_to_try")
-    if gap_fill > 0 and field_problem < 0.35:
-        rationale_types.append("design_variation")
     if len(set(filled_labels)) >= 2:
         rationale_types.append("aggregation")
-    if not rationale_types and quote_explicitness > 0:
+    if not rationale_types and evidence_gain > 0:
         rationale_types.append("supporting_evidence")
 
     warnings: list[str] = []
-    if field_problem < 0.25 and gap_fill > 0:
-        warnings.append("기술분야/문제 관련성이 낮을 수 있으므로 보고서에서 결합 가능성을 별도 점검해야 합니다.")
-    if gap_fill > 0 and applicability < 0.35:
-        warnings.append("적용 가능성 또는 예측 가능성이 약할 수 있으므로 무리한 결합 단정은 피해야 합니다.")
+    if marginal_gain > 0 and evidence_gain < marginal_gain * 0.75:
+        warnings.append("점수 증가분에 비해 발췌·위치·판단 근거가 부족하므로 원문 근거를 점검해야 합니다.")
 
     if hard_fill:
         reason = "hard"
     elif soft_fill:
         reason = "soft"
-    elif quote_explicitness > 0:
+    elif evidence_gain > 0:
         reason = "support"
     else:
         reason = None
 
     detail = {
         "sub_score": round(sub_score, 4),
-        "gap_fill": round(gap_fill, 4),
-        "quote_explicitness": round(quote_explicitness, 4),
-        "field_problem_relatedness": round(field_problem, 4),
-        "applicability_predictability": round(applicability, 4),
-        "reportability": round(reportability, 4),
+        "marginal_gain": round(marginal_gain, 4),
+        "residual_coverage": round(residual_coverage, 4),
+        "evidence_adjusted_gain": round(evidence_gain, 4),
+        "formula": "0.60*marginal_gain + 0.20*residual_coverage + 0.20*evidence_adjusted_gain",
         "hard_fill_count": hard_fill,
         "soft_fill_count": soft_fill,
         "candidate_rationale_types": list(dict.fromkeys(rationale_types)),
@@ -890,7 +907,57 @@ def _score_secondary_candidate(
     return round(sub_score * 100, 2), detail
 
 
-def _score_secondary_candidate_v2(
+def _build_gap_evidence_matrix(
+    caches: Dict[int, Optional[Dict]],
+    claims: List[ParsedClaim],
+    primary_idx: int,
+    num_docs: int,
+) -> Dict[str, Dict]:
+    """사건별 공백·보완 근거를 사람이 재검토할 수 있는 형태로 보존한다."""
+    matrix: Dict[str, Dict] = {}
+    for claim in claims:
+        claim_key = str(claim.claim_number)
+        rows = []
+        for element in claim.elements:
+            label = normalize_label(element.label)
+            primary_item = _cache_item(caches.get(primary_idx), claim_key, label) or {}
+            candidates = []
+            for doc_idx in range(num_docs):
+                if doc_idx == primary_idx:
+                    continue
+                item = _cache_item(caches.get(doc_idx), claim_key, label) or {}
+                evidence = [
+                    {
+                        "limitation": str(ev.get("limitation", "") or ""),
+                        "quote": str(ev.get("quote", "") or ""),
+                        "chunk_id": str(ev.get("chunk_id", "") or ""),
+                    }
+                    for ev in (item.get("evidence") or [])
+                    if isinstance(ev, dict) and ev.get("quote")
+                ]
+                if item.get("quote") or evidence:
+                    candidates.append({
+                        "doc_idx": doc_idx,
+                        "judgment": item.get("judgment", "대응 없음"),
+                        "reason": item.get("판단_이유", item.get("similarity_reason", "")),
+                        "quote": item.get("quote", ""),
+                        "chunk_id": item.get("chunk_id", ""),
+                        "evidence": evidence,
+                    })
+            rows.append({
+                "label": element.label,
+                "claim_limitation": element.text,
+                "importance": element.importance,
+                "primary_judgment": primary_item.get("judgment", "대응 없음"),
+                "primary_reason": primary_item.get("판단_이유", primary_item.get("similarity_reason", "")),
+                "primary_evidence": primary_item.get("evidence") or [],
+                "candidate_evidence": candidates,
+            })
+        matrix[claim_key] = {"elements": rows}
+    return matrix
+
+
+def _score_secondary_candidate(
     cache: Optional[Dict],
     primary_cache: Optional[Dict],
     claims: List[ParsedClaim],
@@ -898,7 +965,7 @@ def _score_secondary_candidate_v2(
     soft_gaps: set,
     weights: Optional[Dict[tuple[str, str], int]] = None,
 ) -> tuple[float, Dict]:
-    base_score, detail = _score_secondary_candidate(
+    base_score, detail = _score_secondary_candidate_base(
         cache,
         primary_cache,
         claims,
@@ -1242,7 +1309,7 @@ def build_citation_chain_from_comparisons(
         for i in range(num_docs):
             if i == primary_inv_idx:
                 continue
-            sub_score, sub_detail = _score_secondary_candidate_v2(
+            sub_score, sub_detail = _score_secondary_candidate(
                 caches[i],
                 caches[primary_inv_idx],
                 independent_claims,
@@ -1427,7 +1494,7 @@ def build_citation_chain_from_comparisons(
         "policy_version": CITATION_CHAIN_POLICY_VERSION,
         "primary_inv_idx": primary_inv_idx,
         "primary_inv_name": doc_name_mapping[str(primary_inv_idx)],
-        "scoring_method": "main_score_closest_starting_point_sub_score_gap_filler",
+        "scoring_method": "generic_evidence_weighted_coverage_v1",
         "inv_scores": {str(k): v for k, v in inv_scores.items()},
         "inv_match_counts": {str(k): v for k, v in inv_match_counts.items()},
         "primary_score_details": {str(k): v for k, v in primary_score_details.items()},
@@ -1435,6 +1502,9 @@ def build_citation_chain_from_comparisons(
         "secondary_candidate_scores": {str(k): v for k, v in secondary_candidate_scores.items()},
         "secondary_candidate_details": {str(k): v for k, v in secondary_candidate_details.items()},
         "secondary_candidates": secondary_candidates,
+        "gap_evidence_matrix": _build_gap_evidence_matrix(
+            caches, claims, primary_inv_idx, num_docs
+        ),
         "doc_name_mapping": doc_name_mapping,
         "primary_gaps_count": gap_count,
         "soft_gaps_count": soft_gap_count,
@@ -1455,6 +1525,11 @@ def build_citation_chain_from_comparisons(
             "require_one_new_reference_to_cover_all_remaining_elements": True,
         },
         "confidence": confidence,
+        "quantitative_assessment": assess_claims(
+            claims,
+            [caches.get(i) for i in range(num_docs)],
+            chains,
+        ),
         "chains": chains,
     }
 
@@ -1538,7 +1613,7 @@ def _build_chains_recursive(
                     for element in claim.elements
                     if normalize_label(element.label)
                 }
-                added = _dependent_added_inv(
+                added, dependent_trace = _dependent_added_inv(
                     key,
                     inherited,
                     caches,
@@ -1549,7 +1624,13 @@ def _build_chains_recursive(
                         for element in claim.elements
                         if normalize_label(element.label)
                     },
-                )[:MAX_DEPTH_INCREMENT]
+                    expected_importance_by_label={
+                        normalize_label(element.label): _importance_value(element.importance)
+                        for element in claim.elements
+                        if normalize_label(element.label)
+                    },
+                )
+                added = added[:MAX_DEPTH_INCREMENT]
             else:
                 # 종속항 자체 대비 근거가 없으면 독립항 점수가 높은 문헌을
                 # 임의로 추가하지 않는다. 새 문헌은 해당 종속항 구성과의
@@ -1560,6 +1641,12 @@ def _build_chains_recursive(
                     if normalize_label(element.label)
                 }
                 added = []
+                dependent_trace = {
+                    "assessment_scope": "additional_limitations",
+                    "selection_basis": "comparison_evidence_missing",
+                    "candidate_scores": [],
+                    "selected_document": None,
+                }
             total = inherited + added
             uncovered_labels = _dependent_uncovered_labels(
                 key,
@@ -1577,6 +1664,24 @@ def _build_chains_recursive(
                 "coverage_complete": not uncovered_labels,
                 "uncovered_labels": sorted(uncovered_labels),
                 "max_new_references": MAX_DEPTH_INCREMENT,
+                "decision_trace": {
+                    **dependent_trace,
+                    "parent_claim": parent_num,
+                    "parent_available": parent_available,
+                    "inherited_documents": inherited,
+                    "added_documents": added,
+                    "coverage_complete": not uncovered_labels,
+                    "remaining_uncovered_labels": sorted(uncovered_labels),
+                    "decision_status": (
+                        "parent_context_missing"
+                        if parent_num and not parent_available
+                        else "additional_limitations_covered"
+                        if not uncovered_labels
+                        else "partial_support_remaining_gap"
+                        if added
+                        else "no_single_reference_covers_remaining_gaps"
+                    ),
+                },
             }
 
 
@@ -1591,14 +1696,9 @@ def _dependent_added_inv(
     num_docs: int,
     expected_labels: Optional[set[str]] = None,
     expected_text_by_label: Optional[Dict[str, str]] = None,
-) -> List[int]:
-    """종속항 자체 대비 캐시로 추가 인용발명을 선정한다 (독립항 보완성 로직과 동일 기준).
-
-    상속 문헌이 _PRIMARY_COVER_THRESHOLD 미만으로 남긴 추가 구성(공백)을
-    _SECONDARY_FILL_THRESHOLD 이상으로 모두 채우는 단일 문헌 중 보완점수
-    최고를 고른다. 서로 다른 두 문헌을 합쳐야만 공백이 채워지는 경우에는
-    어느 문헌도 추가하지 않는다.
-    """
+    expected_importance_by_label: Optional[Dict[str, int]] = None,
+) -> tuple[List[int], Dict]:
+    """추가 한정에 대한 순수 증가분과 근거 품질로 새 문헌 하나를 선정한다."""
     def _items(doc_idx: int) -> list:
         items = (caches.get(doc_idx) or {}).get(claim_key, [])
         return items if isinstance(items, list) else []
@@ -1613,181 +1713,131 @@ def _dependent_added_inv(
                 score = _JUDGMENT_SCORE.get(item.get("judgment", "대응 없음"), 0)
                 inherited_best[label] = max(inherited_best.get(label, 0), score)
 
-    def _technical_tokens(text: str) -> set[str]:
-        tokens = set()
-        for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9+_.-]{2,}|[가-힣]{2,}", text or ""):
-            lowered = token.lower().strip(".,;:()[]{}")
-            if lowered in {"하는", "상기", "입력", "출력", "구성", "특징", "feature", "input", "output"}:
-                continue
-            tokens.add(lowered)
-        return tokens
-
-    def _model_tokens(text: str) -> set[str]:
-        return {
-            token.lower()
-            for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9+_.-]{2,}", text or "")
-            if re.search(r"\d|\+|-|cnn|net|transformer|dit|pvcnn|pointnet|pvconv", token, re.IGNORECASE)
-        }
-
-    claim_model_tokens_by_label = {
-        label: _model_tokens((expected_text_by_label or {}).get(label, ""))
-        for label in all_labels
-    }
-
-    claim_tokens_by_label = {
-        label: _technical_tokens((expected_text_by_label or {}).get(label, ""))
-        for label in all_labels
-    }
-
-    def _best_filler(
-        target_labels: set,
-        min_score: int,
-        *,
-        require_quote: bool = False,
-    ) -> tuple[Optional[int], int]:
-        candidates: list[tuple[int, int]] = []
-        for i in range(num_docs):
-            if i in inherited:
-                continue
-            score = 0
-            covered: set[str] = set()
-            for item in _items(i):
-                label = normalize_label(item.get("label", ""))
-                if label in target_labels:
-                    j_score = _JUDGMENT_SCORE.get(item.get("judgment", "대응 없음"), 0)
-                    if j_score >= min_score and (not require_quote or bool(item.get("quote"))):
-                        item_score = max(1, j_score)
-                        if require_quote:
-                            evidence_text = " ".join(
-                                str(item.get(field, "") or "")
-                                for field in ("quote", "판단_이유", "similarity_reason")
-                            )
-                            overlap = claim_tokens_by_label.get(label, set()) & _technical_tokens(evidence_text)
-                            item_score += min(5, len(overlap))
-                        score += item_score
-                        covered.add(label)
-            # 한 종속항에 새 문헌을 두 개 더하는 방식은 금지한다. 따라서
-            # 후보 하나가 남은 대상 전부를 커버하는 경우만 채택 가능하다.
-            if covered == target_labels and score > 0:
-                candidates.append((score, i))
-        if not candidates:
-            return None, 0
-        best_score, best_idx = max(candidates, key=lambda item: (item[0], -item[1]))
-        return best_idx, best_score
-
-    def _partial_support_filler(target_labels: set) -> tuple[Optional[int], int]:
-        exact_terms = [
-            term for term in ("dit-3d", "pvcnn", "pointnet++", "pointnet", "pvconv")
-            if any(term in (text or "").lower() for text in (expected_text_by_label or {}).values())
-        ]
-        if exact_terms:
-            exact_candidates: list[tuple[int, int]] = []
-            for i in range(num_docs):
-                if i in inherited:
-                    continue
-                score = 0
-                covered: set[str] = set()
-                for item in _items(i):
-                    label = normalize_label(item.get("label", ""))
-                    if label not in target_labels or not item.get("quote"):
-                        continue
-                    quote_text = str(item.get("quote", "") or "")
-                    for evidence in item.get("evidence", []) or []:
-                        if isinstance(evidence, dict):
-                            quote_text += " " + str(evidence.get("quote", "") or "")
-                    quote_lower = quote_text.lower()
-                    matched_terms = [term for term in exact_terms if term in quote_lower]
-                    if not matched_terms:
-                        continue
-                    j_score = _JUDGMENT_SCORE.get(item.get("judgment", "대응 없음"), 0)
-                    score += max(1, j_score) + 10 * len(matched_terms)
-                    covered.add(label)
-                if covered == target_labels and score > 0:
-                    exact_candidates.append((score, i))
-            if exact_candidates:
-                best_score, best_idx = max(exact_candidates, key=lambda item: (item[0], -item[1]))
-                return best_idx, best_score
-
-        model_candidates: list[tuple[int, int]] = []
-        candidates: list[tuple[int, int]] = []
-        for i in range(num_docs):
-            if i in inherited:
-                continue
-            score = 0
-            model_score = 0
-            covered: set[str] = set()
-            model_covered: set[str] = set()
-            for item in _items(i):
-                label = normalize_label(item.get("label", ""))
-                if label not in target_labels or not item.get("quote"):
-                    continue
-                j_score = _JUDGMENT_SCORE.get(item.get("judgment", "대응 없음"), 0)
-                if j_score < _DEPENDENT_PARTIAL_SUPPORT_THRESHOLD:
-                    continue
-                evidence_text = str(item.get("quote", "") or "")
-                for evidence in item.get("evidence", []) or []:
-                    if isinstance(evidence, dict):
-                        evidence_text += " " + str(evidence.get("quote", "") or "")
-                overlap = claim_tokens_by_label.get(label, set()) & _technical_tokens(evidence_text)
-                model_overlap = claim_model_tokens_by_label.get(label, set()) & _model_tokens(evidence_text)
-                expected_text = ((expected_text_by_label or {}).get(label, "") or "").lower()
-                evidence_lower = evidence_text.lower()
-                direct_model_overlap = any(
-                    token in expected_text and token in evidence_lower
-                    for token in ("dit-3d", "pvcnn", "pointnet++", "pointnet", "pvconv")
-                )
-                has_model_overlap = bool(model_overlap) or direct_model_overlap
-                score += max(1, j_score) + min(2, len(overlap)) + (10 if has_model_overlap else 0)
-                covered.add(label)
-                if has_model_overlap:
-                    model_score += max(1, j_score) + 10 + min(2, len(model_overlap))
-                    model_covered.add(label)
-            if model_covered == target_labels and model_score > 0:
-                model_candidates.append((model_score, i))
-            if covered == target_labels and score > 0:
-                candidates.append((score, i))
-        pool = model_candidates or candidates
-        if not pool:
-            return None, 0
-        best_score, best_idx = max(pool, key=lambda item: (item[0], -item[1]))
-        return best_idx, best_score
-
     gaps = {l for l in all_labels if inherited_best.get(l, 0) < _PRIMARY_COVER_THRESHOLD}
-    if gaps:
-        best_idx, best_score = _best_filler(gaps, _SECONDARY_FILL_THRESHOLD)
-        if best_idx is not None:
-            logger.info(
-                f"청구항 {claim_key} (종속항): 추가 인용발명 doc[{best_idx}] 선정 "
-                f"(공백 {len(gaps)}개, 보완점수 {best_score})"
-            )
-            return [best_idx]
-        logger.info(
-            f"청구항 {claim_key} (종속항): 남은 공백 {len(gaps)}개를 "
-            "단독으로 모두 보완하는 인용발명이 없어 새 문헌을 추가하지 않음"
-        )
-        partial_idx, partial_score = _partial_support_filler(gaps)
-        if partial_idx is not None:
-            logger.info(
-                f"청구항 {claim_key} (종속항): 추가 인용발명 doc[{partial_idx}] 부분 보완 채택 "
-                f"(공백 {len(gaps)}개, 부분 보완점수 {partial_score})"
-            )
-            return [partial_idx]
-        return []
-
-    # 소프트 공백: 상속 문헌이 '일부 차이'로만 커버한 추가 구성을 '실질적 동일'
-    # 이상으로 개시하는 문헌이 있으면 추가한다 (독립항 3.5단계와 동일 기준).
-    # → 차이점 극복 논리를 주지관용 대신 문헌 근거로 작성할 수 있게 한다.
     soft_gaps = {l for l in all_labels if inherited_best.get(l, 0) == _SOFT_GAP_SCORE}
-    if soft_gaps:
-        best_idx, best_score = _best_filler(soft_gaps, _SECONDARY_IMPROVE_THRESHOLD)
-        if best_idx is not None:
-            logger.info(
-                f"청구항 {claim_key} (종속항): 추가 인용발명 doc[{best_idx}] 선정(소프트) "
-                f"(약점 {len(soft_gaps)}개, 보강점수 {best_score})"
-            )
-            return [best_idx]
+    targets = gaps or soft_gaps
+    trace = {
+        "assessment_scope": "additional_limitations",
+        "additional_labels": sorted(all_labels),
+        "inherited_best_scores": inherited_best,
+        "hard_gaps": sorted(gaps),
+        "soft_gaps": sorted(soft_gaps),
+        "candidate_scores": [],
+        "selected_document": None,
+        "selection_basis": "covered_by_inherited" if not targets else "no_candidate",
+    }
+    if not targets:
+        return [], trace
 
-    return []
+    candidates = []
+    for doc_idx in range(num_docs):
+        if doc_idx in inherited:
+            continue
+        by_label = {
+            normalize_label(item.get("label", "")): item
+            for item in _items(doc_idx)
+        }
+        total_weight = 0.0
+        weighted_gain = 0.0
+        evidence_gain = 0.0
+        strongly_covered = set()
+        improved = set()
+        label_details = []
+        for label in sorted(targets):
+            item = by_label.get(label, {})
+            rank = _JUDGMENT_SCORE.get(item.get("judgment", "대응 없음"), 0)
+            inherited_rank = inherited_best.get(label, 0)
+            weight = float((expected_importance_by_label or {}).get(label, 3))
+            gain = max(0, rank - inherited_rank) / 5.0
+            evidence_factor = (
+                0.55
+                + 0.25 * bool(item.get("quote"))
+                + 0.10 * bool(item.get("chunk_id") or item.get("paragraph_no"))
+                + 0.10 * bool(item.get("판단_이유") or item.get("similarity_reason"))
+            )
+            total_weight += weight
+            weighted_gain += weight * gain
+            evidence_gain += weight * gain * evidence_factor
+            if rank >= (_SECONDARY_FILL_THRESHOLD if gaps else _SECONDARY_IMPROVE_THRESHOLD):
+                strongly_covered.add(label)
+            if rank > inherited_rank and item.get("quote"):
+                improved.add(label)
+            label_details.append({
+                "label": label,
+                "inherited_rank": inherited_rank,
+                "candidate_rank": rank,
+                "gain": round(gain * 100, 1),
+                "has_quote": bool(item.get("quote")),
+            })
+        denominator = total_weight or 1.0
+        marginal_gain = weighted_gain / denominator
+        evidence_adjusted_gain = evidence_gain / denominator
+        full_cover = strongly_covered == targets
+        candidate_score = 0.75 * marginal_gain + 0.25 * evidence_adjusted_gain
+        candidate = {
+            "doc_idx": doc_idx,
+            "score": round(candidate_score * 100, 2),
+            "marginal_gain": round(marginal_gain * 100, 1),
+            "evidence_adjusted_gain": round(evidence_adjusted_gain * 100, 1),
+            "full_cover": full_cover,
+            "strongly_covered_labels": sorted(strongly_covered),
+            "improved_with_quote_labels": sorted(improved),
+            "labels": label_details,
+        }
+        trace["candidate_scores"].append(candidate)
+        if candidate_score > 0 and improved:
+            candidates.append(candidate)
+
+    full_candidates = [candidate for candidate in candidates if candidate["full_cover"]]
+    if full_candidates:
+        pool = full_candidates
+    elif candidates:
+        # 완전 보완 문헌이 없더라도 직접 근거가 있는 문헌 하나만 부분 근거로
+        # 보존하고, 나머지 공백은 coverage_complete/uncovered_labels에 남긴다.
+        pool = candidates
+    elif len(targets) == 1:
+        # 판정이 `차이`라 점수 증가분은 없어도 단일 추가 한정의 직접 발췌는
+        # 보고서에서 검토할 가치가 있으므로 마지막 부분 근거로 보존한다.
+        target_label = next(iter(targets))
+        pool = []
+        for doc_idx in range(num_docs):
+            if doc_idx in inherited:
+                continue
+            item = next(
+                (
+                    value for value in _items(doc_idx)
+                    if normalize_label(value.get("label", "")) == target_label
+                ),
+                None,
+            )
+            if item and item.get("quote"):
+                rank = _JUDGMENT_SCORE.get(item.get("judgment", "대응 없음"), 0)
+                pool.append({
+                    "doc_idx": doc_idx,
+                    "score": float(rank),
+                    "full_cover": False,
+                })
+    else:
+        pool = []
+    if not pool:
+        return [], trace
+    selected = max(pool, key=lambda candidate: (candidate["score"], -candidate["doc_idx"]))
+    trace["selected_document"] = selected["doc_idx"]
+    trace["selection_basis"] = (
+        "single_document_full_gap_filler"
+        if selected["full_cover"] and gaps
+        else "single_document_soft_gap_improver"
+        if selected["full_cover"]
+        else "partial_support_only"
+    )
+    logger.info(
+        "청구항 %s (종속항): doc[%s] 추가 선정 (%s, 점수 %.2f)",
+        claim_key,
+        selected["doc_idx"],
+        trace["selection_basis"],
+        selected["score"],
+    )
+    return [selected["doc_idx"]], trace
 
 
 def _dependent_uncovered_labels(
@@ -1829,6 +1879,9 @@ def get_claim_chain_info(chain_data: Dict, claim_number: int) -> Optional[Dict]:
     chain_with_mapping = dict(chain)
     chain_with_mapping["doc_name_mapping"] = chain_data.get("doc_name_mapping", {})
     chain_with_mapping["confidence"] = chain_data.get("confidence", {}).get(str(claim_number))
+    chain_with_mapping["quantitative_assessment"] = (
+        chain_data.get("quantitative_assessment", {}).get(str(claim_number))
+    )
     if len(chain_with_mapping.get("total", [])) > 1:
         conventional_support = chain_with_mapping.get("conventional_support") or {}
         if conventional_support.get("position") == 2:

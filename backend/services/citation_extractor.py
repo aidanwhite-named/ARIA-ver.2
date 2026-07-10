@@ -42,7 +42,9 @@ _ENGINE_BUDGETS = {
 _DEFAULT_BUDGET = (45_000, 60_000, 55_000, 5_000)
 _CHUNK_SIZE = 1_200
 _CACHE_META_KEY = "_meta"
-_CACHE_SCHEMA_VERSION = 5
+_CACHE_SCHEMA_VERSION = 9
+_MIXED_TOTAL_BUDGET = 80_000
+_MIXED_MIN_DOC_BUDGET = 8_000
 _DEFAULT_DEPENDENT_CANDIDATE_DOC_LIMIT = 3
 _JUDGMENT_RANK = {
     "동일": 5,
@@ -52,6 +54,23 @@ _JUDGMENT_RANK = {
     "차이": 1,
     "대응 없음": 0,
 }
+
+_SELECTION_OR_RE = re.compile(
+    r"(?:또는|중\s*적어도\s*하나|하나\s*이상|및/또는|\band/or\b|\bor\b|at\s+least\s+one\s+of)",
+    re.IGNORECASE,
+)
+_SELECTION_CONDITION_RE = re.compile(
+    r"(?:에\s*따라|를\s*고려하여|을\s*고려하여|에\s*기초하여|를\s*판단하여|을\s*판단하여|"
+    r"인\s*경우|에\s*대응하여|선택|전환|분기|종류|유형|모드|"
+    r"based\s+on|according\s+to|depending\s+on|in\s+response\s+to|select|switch|branch|"
+    r"type|mode|condition|alternative)",
+    re.IGNORECASE,
+)
+_SELECTION_STRUCTURE_KEYWORDS = [
+    "상위개념", "복수", "대안", "선택", "전환", "분기", "조건", "기준", "판단", "종류", "유형", "모드",
+    "category", "type", "mode", "condition", "criterion", "determine", "select", "switch", "branch",
+    "alternative", "multiple",
+]
 
 
 def _budgets(engine: str) -> tuple[int, int, int, int]:
@@ -90,6 +109,71 @@ _QUOTE_MAX_CHARS = 350
 _QUOTE_HEAD_CHARS = 190
 _QUOTE_TAIL_CHARS = 140
 _ELLIPSIS = " ... "
+_HIGH_JUDGMENTS = {"동일", "실질적 동일"}
+_COMPOSITE_MISSING_RE = re.compile(
+    r"(?:제\s*[12]\s*|최종|결합|조합|함께|모두|각각|별도|"
+    r"산출|계산|판단|선택|전환|제어\s*로직|알고리즘|이미지\s*프레임|프레임\s*기반|"
+    r"second|first|final|combine|combination|respectively|separate|frame|algorithm|logic)",
+    re.IGNORECASE,
+)
+_NON_DISCLOSURE_RE = re.compile(
+    r"(?:확인되지|명시되지|개시되지|부재|차이|불충분|추론|"
+    r"not\s+disclosed|not\s+confirmed|missing|absent|insufficient|inferred)",
+    re.IGNORECASE,
+)
+_TERMINOLOGY_ONLY_RE = re.compile(
+    r"(?:용어|표현|명칭).{0,20}차이(?:만|\s*뿐|\s*불과)",
+    re.IGNORECASE,
+)
+
+
+def _cap_judgment_for_coverage(
+    judgment: str,
+    directness: str,
+    missing_limitations: list[str],
+    reason: str,
+) -> str:
+    """Clamp over-optimistic judgments when sub-limitations are not directly covered.
+
+    The comparison prompt may find a related paragraph and still overstate the final
+    judgment.  This post-processor keeps the expert rule stable: identical/substantial
+    identity is allowed only when every material sub-limitation and its relationship
+    are directly supported by excerpts.
+    """
+    directness = (directness or "").strip().lower()
+    missing_text = " ".join(missing_limitations or [])
+    terminology_only = bool(_TERMINOLOGY_ONLY_RE.search(reason or ""))
+    coverage_problem = bool(missing_limitations) or (
+        not terminology_only and bool(_NON_DISCLOSURE_RE.search(reason or ""))
+    )
+
+    if directness == "absent":
+        if judgment in {"동일", "실질적 동일", "일부 차이"}:
+            return "일부 유사"
+        return judgment
+
+    if directness == "inferred" and judgment in _HIGH_JUDGMENTS:
+        return "일부 차이"
+
+    if not coverage_problem:
+        return judgment
+
+    if judgment in _HIGH_JUDGMENTS:
+        if (
+            len(missing_limitations or []) >= 2
+            or _COMPOSITE_MISSING_RE.search(missing_text)
+            or _COMPOSITE_MISSING_RE.search(reason or "")
+        ):
+            return "일부 유사"
+        return "일부 차이"
+
+    if judgment == "일부 차이" and (
+        len(missing_limitations or []) >= 2
+        or _COMPOSITE_MISSING_RE.search(missing_text)
+    ):
+        return "일부 유사"
+
+    return judgment
 
 
 def _shorten_quote(quote: str) -> str:
@@ -139,9 +223,18 @@ def normalize_label(label: str) -> str:
     청구항 분해/LLM 비교에서 레이블이 'A', '(A) 방법', '(a)', 'A-1' 등 다양하게
     표기되더라도 동일 구성요소로 묶이도록 한다. 표기 변환에 따른 캐시 조회
     실패('일치 없음')로 인해 불필요한 LLM 호출이 발생하는 문제를 방지하기 위함이다."""
-    m = re.search(r'([A-Ja-j])\s*(?:-\s*(\d+))?', label or "")
+    raw = str(label or "").strip()
+    unwrapped = re.sub(r"^[\s(\[{]+|[\s)\]}:：._-]+$", "", raw).strip().upper()
+    if unwrapped in {"P", "PRE", "PREAMBLE", "전제부"}:
+        return "P"
+    if re.match(r"^[\s(\[{]*P[\s)\]}]*(?=$|\s|[:：._-])", raw, re.IGNORECASE):
+        return "P"
+    m = re.match(
+        r"^[\s(\[{]*([A-Ja-j])\s*(?:-\s*(\d+))?[\s)\]}]*(?=$|\s|[:：._-])",
+        raw,
+    )
     if not m:
-        return (label or "").strip().upper()
+        return raw.upper()
     base = m.group(1).upper()
     return f"{base}-{m.group(2)}" if m.group(2) else base
 
@@ -157,7 +250,7 @@ def _comparison_safe_elements(elements: List[ClaimElement]) -> List[ClaimElement
 
     for elem in elements:
         label = normalize_label(elem.label)
-        if not re.fullmatch(r"[A-J](?:-\d+)?", label or "") or label in used:
+        if not re.fullmatch(r"(?:P|[A-J](?:-\d+)?)", label or "") or label in used:
             while auto_idx < len(_COMPARISON_LABELS) and _COMPARISON_LABELS[auto_idx] in used:
                 auto_idx += 1
             label = _COMPARISON_LABELS[auto_idx] if auto_idx < len(_COMPARISON_LABELS) else f"X{len(used) + 1}"
@@ -287,13 +380,17 @@ def _build_hybrid_docs_block(
     if settings is not None:
         engine = settings.engine
     _, _, hybrid_total, hybrid_min = _budgets(engine)
+    mixed_mode = _comparison_mode(getattr(settings, "comparison_mode", "")) == "mixed"
+    if mixed_mode:
+        hybrid_total = min(hybrid_total, _MIXED_TOTAL_BUDGET)
+        hybrid_min = min(hybrid_min, _MIXED_MIN_DOC_BUDGET)
 
     full_blocks = [
         f"[doc_index={doc_idx}] {doc.filename}\n{_full_doc_text(doc)}"
         for doc_idx, doc in enumerate(prior_docs)
     ]
     full_docs_block = "\n\n---\n\n".join(full_blocks)
-    if len(full_docs_block) <= hybrid_total:
+    if not mixed_mode and len(full_docs_block) <= hybrid_total:
         logger.info(
             f"Hybrid comparison: using full text for all {len(prior_docs)} docs "
             f"({len(full_docs_block)} chars)"
@@ -339,6 +436,22 @@ def _claim_keywords(elements: List[ClaimElement]) -> List[str]:
     }
     seen = set()
     keywords = []
+    selection_structural_keywords: List[str] = []
+    for element in elements:
+        element_text = element.text or ""
+        if _SELECTION_OR_RE.search(element_text) and _SELECTION_CONDITION_RE.search(element_text):
+            selection_structural_keywords.extend(_SELECTION_STRUCTURE_KEYWORDS)
+
+    # 선택식+조건/분기 구성은 개별 대안명(A/B)을 1차 검색축으로 삼으면
+    # A만 강한 문헌 또는 B만 강한 문헌이 먼저 뽑힐 수 있다. 따라서 도메인
+    # 중립적인 상위 구조 토큰을 앞에 두고, 원문 토큰은 보조 검색축으로 둔다.
+    for token in selection_structural_keywords:
+        token = token.lower()
+        if token in stopwords or token in seen:
+            continue
+        seen.add(token)
+        keywords.append(token)
+
     for token in tokens:
         if token in stopwords or token in seen:
             continue
@@ -472,7 +585,12 @@ def load_comparisons(job_dir: str, doc_idx: int) -> Optional[Dict]:
 
 
 def _comparison_mode(value: object) -> str:
-    return "hybrid" if str(value or "").strip().lower() == "hybrid" else "per_doc"
+    normalized = str(value or "").strip().lower()
+    if normalized in {"hybrid", "precision"}:
+        return "hybrid"
+    if normalized in {"mixed", "fast", "fast_hybrid"}:
+        return "mixed"
+    return "per_doc"
 
 
 def _cache_is_compatible(
@@ -680,9 +798,14 @@ async def analyze_claim_elements_hybrid(
 
     try:
         hybrid_results = await _batch_judge_hybrid(elements, prior_docs, settings)
-    except CompareFailed:
-        # 응답 형식 오류로 LLM을 자동 재호출하지 않고 사용자가 재시도할 수 있게 전달한다.
-        raise
+    except CompareFailed as exc:
+        logger.warning(
+            "Hybrid comparison failed; falling back to per-document comparison: %s",
+            exc,
+        )
+        for doc_idx, doc in enumerate(prior_docs):
+            original_idx = original_doc_indices[doc_idx] if doc_idx < len(original_doc_indices) else doc_idx
+            doc_results[doc_idx] = await _batch_judge_for_doc(elements, doc, original_idx, settings)
     except Exception as e:
         logger.error(f"Hybrid batch judge error: {e}")
         raise CompareFailed(f"하이브리드 구성대비 LLM 호출 실패: {e}") from e
@@ -879,40 +1002,155 @@ def _select_best_matches(
                 cited_invention_index=best_doc_idx,
                 similarity_reason=best_match.get("판단_이유", best_match.get("similarity_reason", "")),
                 evidence=_evidence_spans(best_match.get("evidence", [])),
+                directness=best_match.get("directness", "direct" if best_match.get("quote") else "absent"),
+                missing_limitations=best_match.get("missing_limitations", []),
             ))
         else:
             matches.append(ElementMatch(
                 label=elem.label, found=False, quote="", chunk_id="",
                 judgment="대응 없음", cited_invention_index=fallback_idx, similarity_reason="",
+                directness="absent", missing_limitations=[],
             ))
     return matches
 
 
-def _extract_json_arrays(text: str) -> List[Dict]:
-    """불규칙하게 섞여 있는 JSON 배열 조각을 추출해 하나로 이어붙인다.
+def _extract_json_payloads(text: str) -> List[Dict]:
+    """Extract top-level JSON arrays or objects from an LLM response.
 
-    Gemini 응답에 설명문이나 중복 배열이 섞여 `Extra data` 파싱 오류가 나는 경우를
-    처리하기 위한 보정 로직이다. greedy 정규식으로 통째로 잡지 않고, 디코더로 배열을
-    순차 추출해 dict 원소만 모은다.
+    Some models return a single object such as {"comparisons": [...]} instead of
+    a bare array.  Looking only for arrays can accidentally capture nested
+    evidence arrays, so decode either object or array from the earliest JSON
+    boundary and let the comparison expander decide what is a real judgment.
     """
     decoder = json.JSONDecoder()
-    items: List[Dict] = []
+    payloads: List[Dict] = []
     idx = 0
-    while True:
-        start = text.find("[", idx)
-        if start == -1:
+    while idx < len(text):
+        starts = [pos for pos in (text.find("[", idx), text.find("{", idx)) if pos != -1]
+        if not starts:
             break
+        start = min(starts)
         try:
-            arr, end = decoder.raw_decode(text, start)
+            value, end = decoder.raw_decode(text, start)
         except json.JSONDecodeError:
             idx = start + 1
             continue
-        if isinstance(arr, list):
-            items.extend(item for item in arr if isinstance(item, dict))
-            idx = end
-        else:
-            idx = start + 1
-    return items
+
+        if isinstance(value, list):
+            payloads.extend(item for item in value if isinstance(item, dict))
+        elif isinstance(value, dict):
+            payloads.append(value)
+        idx = end
+    return payloads
+
+
+def _copy_first_present(item: Dict, canonical_key: str, aliases: List[str]) -> None:
+    if canonical_key in item:
+        return
+    for alias in aliases:
+        if alias in item:
+            item[canonical_key] = item[alias]
+            return
+
+
+def _canonicalize_comparison_item(
+    item: Dict,
+    parent_doc_index: Optional[object] = None,
+) -> Dict:
+    normalized = dict(item)
+    if parent_doc_index is not None and "doc_index" not in normalized:
+        normalized["doc_index"] = parent_doc_index
+    _copy_first_present(
+        normalized,
+        "doc_index",
+        ["document_index", "cited_invention_index", "prior_art_index", "인용발명_index", "문헌_index"],
+    )
+    _copy_first_present(
+        normalized,
+        "label",
+        ["claim_element", "element", "element_label", "구성요소", "구성요소_label"],
+    )
+    _copy_first_present(
+        normalized,
+        "quote",
+        ["citation", "excerpt", "quoted_text", "근거", "인용문", "원문"],
+    )
+    _copy_first_present(
+        normalized,
+        "chunk_id",
+        ["chunk", "chunkId", "paragraph", "paragraph_id", "location", "문단", "위치"],
+    )
+    _copy_first_present(
+        normalized,
+        "judgment",
+        ["판정", "판단", "comparison_judgment"],
+    )
+    _copy_first_present(
+        normalized,
+        "판단_이유",
+        ["판단 이유", "판단이유", "reason", "judgment_reason", "comparison_reason"],
+    )
+    _copy_first_present(
+        normalized,
+        "found",
+        ["matched", "is_found", "disclosed", "대응여부"],
+    )
+    return normalized
+
+
+def _label_from_mapping_key(key: object) -> str:
+    label = normalize_label(str(key or ""))
+    return label if re.fullmatch(r"(?:P|[A-J](?:-\d+)?)", label) else ""
+
+
+def _expand_comparison_items(
+    items: List[Dict],
+    parent_doc_index: Optional[object] = None,
+) -> List[Dict]:
+    expanded: List[Dict] = []
+    nested_keys = (
+        "results", "comparisons", "items", "matches", "elements",
+        "documents", "docs", "document_results", "judgments",
+        "판정", "구성대비", "비교결과", "문헌별_결과", "인용발명별_결과",
+        "구성요소별_판정", "구성요소별결과",
+    )
+
+    for item in items:
+        normalized = _canonicalize_comparison_item(item, parent_doc_index)
+        child_doc_index = normalized.get("doc_index", parent_doc_index)
+        child_items: List[Dict] = []
+        for key in nested_keys:
+            nested = item.get(key)
+            if isinstance(nested, list):
+                child_items.extend(value for value in nested if isinstance(value, dict))
+            elif isinstance(nested, dict):
+                child_items.append(nested)
+
+        for key, value in item.items():
+            label = _label_from_mapping_key(key)
+            if not label:
+                continue
+            if isinstance(value, dict):
+                child = dict(value)
+                child.setdefault("label", label)
+                child_items.append(child)
+            elif isinstance(value, list):
+                for child in value:
+                    if isinstance(child, dict):
+                        child = dict(child)
+                        child.setdefault("label", label)
+                        child_items.append(child)
+
+        if child_items:
+            expanded.extend(_expand_comparison_items(child_items, child_doc_index))
+
+        has_comparison_fields = {
+            "label", "claim_element", "found", "quote", "judgment", "판단_이유", "similarity_reason"
+        }.intersection(normalized)
+        if has_comparison_fields:
+            expanded.append(normalized)
+
+    return expanded
 
 
 def _parse_json_array(
@@ -921,11 +1159,12 @@ def _parse_json_array(
     expected_doc_indices: Optional[List[int]] = None,
 ) -> List[Dict]:
     text = re.sub(r"```(?:json)?", "", response.strip()).replace("```", "").strip()
-    parsed = _extract_json_arrays(text)
+    parsed = _extract_json_payloads(text)
     if not parsed:
         raise CompareFailed(
-            f"구성대비 응답에서 JSON 배열을 찾지 못했습니다. 응답 길이: {len(response)}자"
+            f"구성대비 응답에서 JSON 배열 또는 객체를 찾지 못했습니다. 응답 길이: {len(response)}자"
         )
+    parsed = _expand_comparison_items(parsed)
 
     expected_labels = {normalize_label(element.label) for element in elements}
     expected_docs = set(expected_doc_indices or [])
@@ -941,7 +1180,7 @@ def _parse_json_array(
 
     for item in parsed:
         schema_markers = {
-            "label", "claim_element", "found", "quote", "judgment", "doc_index"
+            "label", "claim_element", "found", "judgment", "doc_index", "판단_이유", "similarity_reason"
         }
         if not schema_markers.intersection(item):
             continue
@@ -984,6 +1223,34 @@ def _parse_json_array(
 
         quote = _shorten_quote(str(item.get("quote", "") or ""))
         evidence = _normalize_evidence(item.get("evidence", []), quote, item.get("chunk_id", ""))
+        directness = str(item.get("directness", "") or "").strip().lower()
+        if directness not in {"direct", "inferred", "absent"}:
+            directness = "direct" if quote else "absent"
+        raw_missing = item.get("missing_limitations", [])
+        if isinstance(raw_missing, str):
+            missing_limitations = [raw_missing.strip()] if raw_missing.strip() else []
+        elif isinstance(raw_missing, list):
+            missing_limitations = [
+                str(value).strip() for value in raw_missing if str(value).strip()
+            ][:5]
+        else:
+            missing_limitations = []
+        reason = str(item.get("판단_이유", item.get("similarity_reason", "")) or "")
+        terminology_only = bool(re.search(
+            r"(?:용어|표현|명칭).{0,20}차이(?:만|에\s*불과)",
+            reason,
+        ))
+        implicit_difference = not terminology_only and bool(re.search(
+            r"(?:확인되지|명시되지|개시되지|부재|차이|불충분|추론)",
+            reason,
+        ))
+        # 객관적 차이, 추론 의존, 핵심 하위 제한 누락이 있으면 과도한 판정을 상한 처리한다.
+        judgment = _cap_judgment_for_coverage(
+            judgment,
+            directness,
+            missing_limitations,
+            reason,
+        )
         found_value = item.get("found", False)
         if isinstance(found_value, str):
             found = found_value.strip().lower() in {"true", "1", "yes"}
@@ -1005,8 +1272,10 @@ def _parse_json_array(
             "quote": quote,
             "chunk_id": str(item.get("chunk_id", "") or ""),
             "judgment": judgment,
-            "판단_이유": str(item.get("판단_이유", item.get("similarity_reason", "")) or ""),
+            "판단_이유": reason,
             "evidence": evidence if found else [],
+            "directness": directness,
+            "missing_limitations": missing_limitations,
         })
         if doc_idx is not None:
             normalized_item["doc_index"] = doc_idx

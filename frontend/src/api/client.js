@@ -151,9 +151,39 @@ export async function getModels() {
   return res.json()
 }
 
-export async function getEngineStatus() {
-  const res = await fetch(`${BASE}/settings/status`)
+export async function getEngineStatus(settings = null) {
+  const options = settings
+    ? {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(settings),
+      }
+    : undefined
+  const res = await fetch(`${BASE}/settings/status`, options)
   if (!res.ok) return { status: 'not_configured', label: '설정 필요' }
+  return res.json()
+}
+
+export async function searchMissingPriorArt(jobId, claimNumber, options = {}) {
+  const res = await fetch(`${BASE}/analyze/search_missing_prior_art/${jobId}/${claimNumber}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      labels: options.labels || [],
+      additional_query: options.additionalQuery || '',
+    }),
+  })
+  if (!res.ok) {
+    throw new Error(parseErrorMessage(await res.text(), '미커버 구성 선행기술 검색 실패'))
+  }
+  return res.json()
+}
+
+export async function getMissingPriorArt(jobId, claimNumber) {
+  const res = await fetch(`${BASE}/analyze/search_missing_prior_art/${jobId}/${claimNumber}`)
+  if (!res.ok) {
+    throw new Error(parseErrorMessage(await res.text(), '저장된 선행기술 검색 결과 조회 실패'))
+  }
   return res.json()
 }
 

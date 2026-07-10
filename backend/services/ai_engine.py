@@ -1077,6 +1077,42 @@ def _candidate_account_paths(engine: str) -> list[Path]:
     return []
 
 
+def _candidate_account_files(engine: str) -> list[Path]:
+    home = _get_fixed_home()
+
+    appdata_str = _normalize_win_path(os.environ.get("APPDATA", ""), home)
+    appdata = Path(appdata_str) if appdata_str else home / "AppData" / "Roaming"
+
+    local_appdata_str = _normalize_win_path(os.environ.get("LOCALAPPDATA", ""), home)
+    local_appdata = Path(local_appdata_str) if local_appdata_str else home / "AppData" / "Local"
+
+    if engine == "claude":
+        return [
+            home / ".claude.json",
+            home / ".claude" / "auth.json",
+            appdata / "Claude" / "auth.json",
+            local_appdata / "Claude" / "auth.json",
+        ]
+    if engine == "openai":
+        return [
+            home / ".codex" / "auth.json",
+            home / ".codex.json",
+            appdata / "OpenAI" / "Codex" / "auth.json",
+            local_appdata / "OpenAI" / "Codex" / "auth.json",
+        ]
+    if engine in ("agy", "gemini"):
+        return [
+            home / ".antigravity" / "auth.json",
+            home / ".gemini" / "google_accounts.json",
+            home / ".gemini" / "oauth_creds.json",
+            home / ".gemini" / "antigravity-cli" / "oauth_creds.json",
+            appdata / "Antigravity" / "auth.json",
+            local_appdata / "Antigravity" / "auth.json",
+            local_appdata / "Google" / "GeminiCLI" / "oauth_creds.json",
+        ]
+    return []
+
+
 def _email_from_json_value(value) -> str:
     if isinstance(value, dict):
         preferred_keys = ("email", "account", "user", "profile", "login")
@@ -1160,6 +1196,35 @@ def _extract_codex_auth_email(path: Path) -> str:
     return ""
 
 
+def _extract_oauth_email(path: Path) -> str:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+
+    direct = _email_from_json_value(payload)
+    if direct:
+        return direct
+
+    token_sources = [payload]
+    for nested_key in ("credentials", "tokens"):
+        nested = payload.get(nested_key)
+        if isinstance(nested, dict):
+            token_sources.append(nested)
+
+    for source in token_sources:
+        for key in ("id_token", "access_token"):
+            claims = _decode_jwt_payload(source.get(key, ""))
+            if not claims:
+                continue
+            email = _email_from_json_value(claims)
+            if email:
+                return email
+    return ""
+
+
 def _iter_small_account_files(root: Path):
     if not root.exists():
         return
@@ -1199,16 +1264,22 @@ def find_cli_account_email(engine: str) -> str:
             _account_cache[engine] = email
             return email
 
-    for root in _candidate_account_paths(engine):
-        for path in _iter_small_account_files(root) or []:
-            try:
-                text = path.read_text(encoding="utf-8", errors="ignore")
-            except Exception:
-                continue
-            email = _email_from_text(text)
+    for path in _candidate_account_files(engine):
+        if not path.exists() or not path.is_file():
+            continue
+        if engine in ("agy", "gemini"):
+            email = _extract_oauth_email(path)
             if email:
                 _account_cache[engine] = email
                 return email
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        email = _email_from_text(text)
+        if email:
+            _account_cache[engine] = email
+            return email
 
     _account_cache[engine] = ""
     return ""
@@ -1226,6 +1297,7 @@ def get_engine_status(settings: Settings) -> dict:
             "installed": True,
             "account_email": account_email,
             "account_label": account_email or "연결 계정 확인 불가",
+            "checked_model": _resolve_model(settings, "parser"),
         }
 
     return {

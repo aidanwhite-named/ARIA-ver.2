@@ -30,6 +30,7 @@ from backend.models.schemas import (
     ChatRequest,
     ExtractedDocument,
     ManualClaimRequest,
+    MissingPriorArtSearchRequest,
     ParsedClaim,
 )
 from backend.paths import CASES_DIR, REPORTS_DIR, UPLOADS_DIR
@@ -61,17 +62,21 @@ from backend.services.report_generator import (
     _dedupe_phase1_sections,
     _strip_agent_tool_calls,
     detect_category_same_claims,
+    enforce_phase1_judgment_headers,
     enhance_claim_parsing_with_llm,
     enhance_purpose_effects_with_llm,
     generate_category_same_report,
     generate_dependent_report,
     generate_dependent_reports_batch,
     generate_independent_phase1_streaming,
+    build_rejected_inventions_section,
     format_rejection_basis_header,
     parse_manual_claim_locally,
     polish_phase1_summary_text,
     sanitize_report_status_icons,
 )
+from backend.services.quantitative_assessment import format_assessment_markdown
+from backend.services.prior_art_search import run_adaptive_prior_art_search
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -170,12 +175,17 @@ def _rejection_basis_header(chain_info, matches) -> str:
     inv1_name = mapping.get(str(inv1_idx), f"인용발명 {inv1_idx + 1}")
     inv2_name = mapping.get(str(inv2_idx), f"인용발명 {inv2_idx + 1}") if inv2_idx is not None else ""
     inv3_name = mapping.get(str(inv3_idx), f"인용발명 {inv3_idx + 1}") if inv3_idx is not None else ""
+    is_novelty = bool(matches) and len(total) == 1 and all(
+        match.cited_invention_index == inv1_idx and match.judgment == "동일"
+        for match in matches
+    )
     return format_rejection_basis_header(
         inv1_name,
         inv2_name,
         inv3_name,
         is_combo=len(total) > 1,
         chain_info=chain_info,
+        is_novelty=is_novelty,
     )
 
 
@@ -194,7 +204,27 @@ def _prepend_rejection_basis_header(report_md: str, chain_info, matches) -> str:
             return report_md
         return f"{lines[0].strip()}\n\n[구성대비]\n\n{chr(10).join(lines[1:]).strip()}"
     header = _rejection_basis_header(chain_info, matches)
-    return f"{header}\n\n[구성대비]\n\n{report_md}" if report_md else f"{header}\n\n[구성대비]"
+    body = f"{header}\n\n[구성대비]\n\n{report_md}" if report_md else f"{header}\n\n[구성대비]"
+    assessment = format_assessment_markdown(
+        (chain_info or {}).get("quantitative_assessment")
+    )
+    if assessment and "[정량평가 - 분석 보조지표]" not in body:
+        body = f"{body}\n\n{assessment}"
+    return body
+
+
+def _build_related_inventions_tab(
+    claim: ParsedClaim,
+    prior_docs: List[ExtractedDocument],
+    chain_info: Optional[dict],
+    job_dir: Path,
+) -> str:
+    return build_rejected_inventions_section(
+        claim,
+        prior_docs,
+        chain_info,
+        str(job_dir),
+    )
 
 
 def _load_settings_with_dir():
@@ -214,6 +244,17 @@ def _ensure_case_dirs(job_id: str) -> Path:
     for name in ("pdfs", "parsed", "chunks", "vector_db", "reports"):
         (case_dir / name).mkdir(parents=True, exist_ok=True)
     return case_dir
+
+
+def _save_chain_audit(job_id: str, chain_data: dict) -> None:
+    """작업 폴더가 정리된 뒤에도 문헌 선정 이유를 사건별로 재현할 수 있게 보존한다."""
+    case_dir = _ensure_case_dirs(job_id)
+    _write_json(case_dir / "parsed" / "citation_chain.json", chain_data)
+    job_dir = _job_dir(job_id)
+    comparisons = {}
+    for path in sorted(job_dir.glob("comparisons_*.json")):
+        comparisons[path.stem] = _load_json(path, {})
+    _write_json(case_dir / "parsed" / "comparison_matrix.json", comparisons)
 
 
 def _file_sha256(path: Path) -> str:
@@ -821,7 +862,7 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                             job_dir=str(job_dir), claim_number=claim_number,
                         )
                     else:
-                        if compare_mode == "hybrid":
+                        if compare_mode in {"mixed", "hybrid"}:
                             yield _ev(
                                 "analyze",
                                 f"comparing {len(prior_docs)} prior docs in integrated mode",
@@ -853,6 +894,7 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
 
             chain_start = time.perf_counter()
             chain_data = build_citation_chain_from_comparisons(str(job_dir), claims, prior_docs)
+            _save_chain_audit(job_id, chain_data)
             async for event in _yield_timing("citation chain", chain_start):
                 yield event
             chain_info = get_claim_chain_info(chain_data, claim_number) if chain_data else None
@@ -867,6 +909,15 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
 
             secondary_matches = None
             total_refs = (chain_info or {}).get("total", [])
+            report_matches = matches
+            if claim.claim_type == "independent" and total_refs:
+                report_matches, _ = get_matches_from_cache(
+                    claim,
+                    prior_docs,
+                    str(job_dir),
+                    allowed_docs=[total_refs[0]],
+                    comparison_mode=compare_mode,
+                )
             if len(total_refs) > 1:
                 secondary_matches = []
                 for sec_idx in total_refs[1:]:
@@ -900,7 +951,7 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
             phase1_chunks: list[str] = []
             if claim.claim_type == "independent":
                 async for chunk in generate_independent_phase1_streaming(
-                    claim, matches, prior_docs, chain_info, settings,
+                    claim, report_matches, prior_docs, chain_info, settings,
                     prev_context=prev_context,
                     secondary_matches=secondary_matches,
                 ):
@@ -910,6 +961,7 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                 phase1_md = polish_phase1_summary_text(
                     sanitize_report_status_icons(_dedupe_phase1_sections(_strip_agent_tool_calls("".join(phase1_chunks))))
                 )
+                phase1_md = enforce_phase1_judgment_headers(phase1_md, report_matches)
             else:
                 async def _emit_progress(message: str) -> None:
                     yield_event = _ev("log", message)
@@ -951,6 +1003,12 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
             same_claims_for_this = [int(k) for k, v in same_pairs.items() if v == claim_number]
             if same_claims_for_this:
                 report_md = sanitize_report_status_icons(generate_category_same_report(claim_number, same_claims_for_this, report_md))
+            related_inventions_md = _build_related_inventions_tab(
+                claim,
+                prior_docs,
+                chain_info,
+                job_dir,
+            )
 
             _save_report(job_id, claim_number, report_md)
             _save_reference_db(job_id, claim, matches, prior_docs, chain_info, report_md)
@@ -969,6 +1027,7 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
             )
             yield _ev("done", {
                 "report_md": report_md,
+                "related_inventions_md": related_inventions_md,
                 "claim_number": claim_number,
                 "used_inventions": used_inventions,
                 "timings": timing_data,
@@ -1100,7 +1159,7 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
                 missing_doc_idxs = target_doc_idxs[:]
             if not missing_doc_idxs and not req.force:
                 return
-            if compare_mode == "hybrid" and len(target_doc_idxs) > 1:
+            if compare_mode in {"mixed", "hybrid"} and len(target_doc_idxs) > 1:
                 selected_docs = [prior_docs[i] for i in target_doc_idxs]
                 await analyze_claim_elements_hybrid(
                     claim.elements, selected_docs, settings,
@@ -1151,7 +1210,7 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
                 message=f"종속항 {len(uncached_targets)}개에 대해 비교 캐시를 생성하고 있습니다.",
                 started_at=started_at,
             )
-            max_parallel = 2 if compare_mode == "hybrid" else 1
+            max_parallel = 2 if compare_mode in {"mixed", "hybrid"} else 1
             semaphore = asyncio.Semaphore(max_parallel)
 
             async def run_limited(claim: ParsedClaim) -> None:
@@ -1180,6 +1239,7 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
             started_at=started_at,
         )
         chain_data = build_citation_chain_from_comparisons(str(job_dir), claims, prior_docs)
+        _save_chain_audit(job_id, chain_data)
         parent_nums: set[int] = set()
         for claim in targets:
             parent_nums.update(_parent_chain_nums(claim, claims_by_num))
@@ -1329,11 +1389,18 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
                     raise RuntimeError(
                         f"청구항 {claim.claim_number} 보고서 본문이 비어 있어 저장을 중단했습니다. 다시 생성해 주세요."
                     )
+                related_inventions_md = _build_related_inventions_tab(
+                    claim,
+                    prior_docs,
+                    chain_info,
+                    job_dir,
+                )
                 _save_report(job_id, claim.claim_number, report_md)
                 _save_reference_db(job_id, claim, matches, prior_docs, chain_info, report_md)
                 _save_context_entry(job_id, claim.claim_number, claim.text, report_md)
                 results[str(claim.claim_number)] = {
                     "report_md": report_md,
+                    "related_inventions_md": related_inventions_md,
                     "used_inventions": _used_inventions_for(chain_info, prior_docs),
                 }
                 _update_dependent_batch_status(
@@ -1427,6 +1494,115 @@ async def chat_about_report(job_id: str, claim_number: int, req: ChatRequest):
         web_search=req.web_search,
     )
     return {"answer": _strip_agent_tool_calls(answer)}
+
+
+@router.post("/search_missing_prior_art/{job_id}/{claim_number}")
+async def search_missing_prior_art(
+    job_id: str,
+    claim_number: int,
+    req: MissingPriorArtSearchRequest,
+):
+    """미커버 구성만 대상으로 공개 선행기술을 검색한다."""
+    job_dir = _job_dir(job_id)
+    if not job_dir.exists():
+        raise HTTPException(status_code=404, detail="작업을 찾을 수 없습니다.")
+
+    settings = _load_settings_with_dir()
+    if settings.engine == "openai":
+        raise HTTPException(
+            status_code=400,
+            detail="현재 OpenAI CLI 실행 경로는 웹 검색 도구를 노출하지 않습니다. Claude 또는 AGY 엔진을 선택해 주세요.",
+        )
+
+    claim = next((c for c in _load_claims(job_id) if c.claim_number == claim_number), None)
+    if claim is None:
+        raise HTTPException(status_code=404, detail=f"청구항 {claim_number}을 찾을 수 없습니다.")
+
+    chain_data = _load_json(job_dir / "citation_chain.json", {})
+    assessment = (
+        chain_data.get("quantitative_assessment", {}).get(str(claim_number), {})
+    )
+    requested = {_label.strip().upper() for _label in req.labels if _label.strip()}
+    missing = (
+        assessment.get("critical_uncovered_labels")
+        or assessment.get("uncovered_labels")
+        or []
+    )
+    target_labels = [
+        element.label
+        for element in claim.elements
+        if (not requested and element.label in missing)
+        or (requested and element.label.upper() in requested)
+    ]
+    if not target_labels:
+        raise HTTPException(
+            status_code=400,
+            detail="검색할 미커버 구성이 없습니다. 보고서를 다시 생성하거나 검색할 구성 라벨을 지정해 주세요.",
+        )
+
+    targets = [
+        {
+            "label": element.label,
+            "text": element.text,
+            "importance": element.importance,
+        }
+        for element in claim.elements
+        if element.label in target_labels
+    ]
+    chain_info = get_claim_chain_info(chain_data, claim_number) or {}
+    used_indices = chain_info.get("total") or []
+    prior_docs = _load_prior_docs(job_id)
+    used_docs = [
+        {
+            "index": idx,
+            "filename": prior_docs[idx].filename,
+            "publication_no": prior_docs[idx].publication_no,
+            "title": prior_docs[idx].title,
+        }
+        for idx in used_indices
+        if 0 <= idx < len(prior_docs)
+    ]
+
+    search_result = await run_adaptive_prior_art_search(
+        claim.text,
+        targets,
+        used_docs,
+        settings,
+        additional_query=req.additional_query,
+    )
+    answer = _strip_agent_tool_calls(search_result.get("result_md", "")).strip()
+    if not answer:
+        raise HTTPException(status_code=502, detail="웹 검색 결과가 비어 있습니다.")
+
+    payload = {
+        "claim_number": claim_number,
+        "target_labels": target_labels,
+        "targets": targets,
+        "used_documents": used_docs,
+        "result_md": answer,
+        "expanded": search_result.get("expanded", False),
+        "search_axes": search_result.get("search_axes", []),
+        "initial_stats": search_result.get("initial_stats", {}),
+        "final_stats": search_result.get("final_stats", {}),
+        "searched_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "engine": settings.engine,
+    }
+    _write_json(
+        _ensure_case_dirs(job_id) / "reports" / f"missing_prior_art_claim{claim_number}.json",
+        payload,
+    )
+    return payload
+
+
+@router.get("/search_missing_prior_art/{job_id}/{claim_number}")
+async def get_missing_prior_art_search(job_id: str, claim_number: int):
+    """저장된 미커버 구성 선행기술 검색 결과를 반환한다."""
+    result_path = (
+        _job_dir(job_id) / "reports" / f"missing_prior_art_claim{claim_number}.json"
+    )
+    if not result_path.exists():
+        raise HTTPException(status_code=404, detail="저장된 선행기술 검색 결과가 없습니다.")
+    return _load_json(result_path, {})
 
 
 @router.post("/cancel")

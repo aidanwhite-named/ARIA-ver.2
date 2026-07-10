@@ -5,7 +5,7 @@ const ENGINES = ['claude', 'openai', 'agy']
 const ENGINE_LABEL = { claude: 'Claude', openai: 'OpenAI Codex', agy: 'AGY CLI' }
 const DEFAULT_SETTINGS = {
   engine: 'claude',
-  comparison_mode: 'per_doc',
+  comparison_mode: 'mixed',
   model_parser: 'claude-haiku-4-5-20251001',
   model_compare: 'claude-sonnet-4-6',
   model_report: 'claude-haiku-4-5-20251001',
@@ -40,8 +40,8 @@ export default function SettingsModal({ onClose }) {
         const validModels = m[s.engine] || []
         const first = validModels[0] || ''
         const sanitized = { ...s }
-        if (!['per_doc', 'hybrid'].includes(sanitized.comparison_mode)) {
-          sanitized.comparison_mode = 'per_doc'
+        if (!['mixed', 'hybrid', 'per_doc'].includes(sanitized.comparison_mode)) {
+          sanitized.comparison_mode = 'mixed'
         }
         for (const key of ['model_parser', 'model_report']) {
           if (!sanitized[key] || (validModels.length > 0 && !validModels.includes(sanitized[key]))) {
@@ -65,6 +65,27 @@ export default function SettingsModal({ onClose }) {
       }
     )
   }, [])
+
+  useEffect(() => {
+    if (!settings) return
+    let cancelled = false
+    setStatus(prev => ({ ...prev, label: '확인 중...', detail: '' }))
+    const timer = setTimeout(() => {
+      getEngineStatus(settings)
+        .then(st => {
+          if (!cancelled) setStatus(st)
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setStatus({ status: 'server_error', label: '백엔드 연결 실패', account_label: '' })
+          }
+        })
+    }, 400)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [settings?.engine, settings?.model_parser])
 
   function set(key, val) {
     setSettings(prev => ({ ...prev, [key]: val }))
@@ -93,7 +114,7 @@ export default function SettingsModal({ onClose }) {
   async function handleSave() {
     try {
       await saveSettings(settings)
-      const st = await getEngineStatus()
+      const st = await getEngineStatus(settings)
       setStatus(st)
       setError('')
       setSaved(true)
@@ -161,6 +182,11 @@ export default function SettingsModal({ onClose }) {
                     {status.label}
                   </span>
                 </div>
+                {status.checked_model && (
+                  <div className="mt-1 text-xs text-gray-500">
+                    확인 모델: <span className="font-medium text-gray-700">{status.checked_model}</span>
+                  </div>
+                )}
                 <div className="mt-1 text-xs text-gray-500">
                   계정: <span className="font-medium text-gray-700">
                     {status.account_label || status.account_email || '연결 계정 확인 불가'}
@@ -203,16 +229,16 @@ export default function SettingsModal({ onClose }) {
                 <div className="grid grid-cols-2 gap-2">
                   {[
                     {
-                      value: 'per_doc',
-                      title: '문헌 각각 비교',
-                      description: '인용발명들의 글자 합이 30만 자 이상일 때 이용.',
-                      caution: '문헌 수만큼 호출되어 토큰 및 시간 비용 증가',
+                      value: 'mixed',
+                      title: '혼합 모드',
+                      description: '기본값. 관련 문단을 먼저 압축한 뒤 전체 문헌을 한 번에 비교합니다.',
+                      caution: '빠른 후보 검토와 보고서 품질의 균형',
                     },
                     {
                       value: 'hybrid',
-                      title: '통합 비교',
-                      description: '속도 우선. 문헌이 적고 짧을 때 권장합니다.',
-                      caution: '본문이 길면 문헌 각각 비교를 이용',
+                      title: '정밀 모드',
+                      description: '기존 통합 비교 방식. 한도 이내이면 인용발명 전문을 그대로 비교합니다.',
+                      caution: '정밀하지만 본문이 길면 시간이 오래 걸림',
                     },
                   ].map(option => {
                     const selected = settings.comparison_mode === option.value
@@ -257,7 +283,7 @@ export default function SettingsModal({ onClose }) {
               if (confirm('모든 설정을 초기화할까요?')) {
                 setSettings({
                   engine: 'claude',
-                  comparison_mode: 'per_doc',
+                  comparison_mode: 'mixed',
                   model_parser: '',
                   model_compare: 'claude-sonnet-4-6',
                   model_report: '',

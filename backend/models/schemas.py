@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Dict, List, Literal, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class PageTextSpan(BaseModel):
@@ -110,6 +110,23 @@ class ParsedClaim(BaseModel):
     preamble: Optional[str] = None   # 청구항 전제부
     closing: Optional[str] = None    # 청구항 종결부
     split_method: str = "regex"      # "labeled" | "regex" | "fallback" | "llm"
+    @model_validator(mode="after")
+    def include_independent_preamble_as_limitation(self):
+        """독립항의 기술적 전제부를 구성대비·점수 산정에서 누락하지 않는다."""
+        if (
+            self.claim_type == "independent"
+            and self.preamble
+            and not any(str(element.label).upper() == "P" for element in self.elements)
+        ):
+            self.elements.insert(
+                0,
+                ClaimElement(
+                    label="P",
+                    text=self.preamble,
+                    importance="5",
+                ),
+            )
+        return self
 
 
 class ElementMatch(BaseModel):
@@ -121,6 +138,8 @@ class ElementMatch(BaseModel):
     cited_invention_index: int = 0
     similarity_reason: str = ""
     evidence: List[EvidenceSpan] = Field(default_factory=list)
+    directness: str = "absent"
+    missing_limitations: List[str] = Field(default_factory=list)
 
 
 class ManualClaimRequest(BaseModel):
@@ -147,11 +166,16 @@ class ChatRequest(BaseModel):
     web_search: bool = False
 
 
+class MissingPriorArtSearchRequest(BaseModel):
+    labels: List[str] = Field(default_factory=list)
+    additional_query: str = ""
+
+
 class Settings(BaseModel):
     model_config = {"extra": "ignore"}  # 이전 버전 설정의 추가 필드는 무시한다.
 
     engine: str = "claude"
-    comparison_mode: Literal["per_doc", "hybrid"] = "per_doc"
+    comparison_mode: Literal["mixed", "hybrid", "per_doc"] = "mixed"
     # 작업별 모델 선택(비어 있으면 엔진 기본 모델 사용)
     model_parser: str = ""    # 청구항 분석 및 보정
     model_compare: str = ""   # 구성요소 대비
