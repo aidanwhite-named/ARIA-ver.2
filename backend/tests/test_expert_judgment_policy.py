@@ -2,7 +2,7 @@ import json
 from backend.models.schemas import ClaimElement, ElementMatch, ParsedClaim
 from backend.services.citation_extractor import _parse_json_array
 from backend.services.prompt_loader import load_prompt
-from backend.services.report_generator import enforce_phase1_judgment_headers
+from backend.services.report_generator import _normalize_report_markdown, enforce_phase1_judgment_headers
 
 
 def test_independent_preamble_is_compared_as_p_limitation():
@@ -37,6 +37,9 @@ def test_missing_limitation_prevents_identical_judgment():
     )
 
     assert parsed[0]["judgment"] == "일부 차이"
+    assert parsed[0]["llm_judgment"] == "동일"
+    assert parsed[0]["judgment_adjusted"] is True
+    assert parsed[0]["judgment_adjustment_reason"] == "directness_inferred"
     assert parsed[0]["missing_limitations"] == ["기준 해상도"]
 
 
@@ -67,8 +70,36 @@ def test_foreign_quote_format_keeps_translation_original_and_paragraph_number():
     prompt = load_prompt("format_phase1_independent.txt", "")
 
     assert "직역 또는 준직역한 한국어 문장" in prompt
-    assert '"quote에 있는 원문 언어 그대로의 발췌"' in prompt
-    assert "단락 [XXXX]" in prompt
+    assert '"원문 발췌"' in prompt
+    assert "실제번호" in prompt
+
+
+def test_report_quote_block_removes_redundant_reporting_ending_only():
+    report = (
+        "### [구성요소]\n\n(A) 실질적동일 92%\n\n"
+        "- **인용발명 대응 원문:**\n"
+        " 인용발명 1에는 송신기가 헤드 유닛에 신호를 송신한다고 기재되어 있습니다.\n\n"
+        "- 판단 이유: 송신기가 기재되어 있습니다."
+    )
+
+    normalized = _normalize_report_markdown(report)
+
+    assert "송신기가 헤드 유닛에 신호를 송신한다." in normalized
+    assert "송신한다고 기재되어 있습니다" not in normalized
+    assert "- 판단 이유: 송신기가 기재되어 있습니다." in normalized
+
+
+def test_comparison_and_report_prompts_forbid_importing_unrecited_limitations():
+    compare_system = load_prompt("system_compare.txt", "")
+    report_system = load_prompt("system_report_base.txt", "")
+    phase1_prompt = load_prompt("prompt_phase1_main.txt", "")
+
+    assert "청구항에 없는 `주된`" in compare_system
+    assert "A가 주된 기준 또는 유일한 기준이어야 한다고 해석하지 않습니다" in compare_system
+    assert "청구항보다 좁은 실시형태" in compare_system
+    assert "청구항에 없는 `주된`" in report_system
+    assert "신규성의 직접 개시 여부와 진보성의 기능적 대응" in report_system
+    assert "신규성의 직접성 부족을 그대로 진보성의 결합 곤란으로 전환하지 마십시오" in phase1_prompt
 
 
 def test_composite_missing_limitation_caps_to_partial_similarity():
@@ -90,7 +121,57 @@ def test_composite_missing_limitation_caps_to_partial_similarity():
     )
 
     assert parsed[0]["judgment"] == "일부 유사"
+    assert parsed[0]["llm_judgment"] == "동일"
+    assert parsed[0]["judgment_adjusted"] is True
+    assert parsed[0]["judgment_adjustment_reason"] == "multiple_or_composite_missing_limitations"
     assert parsed[0]["missing_limitations"] == ["제2 기초 롤 각도", "제1·제2 기초 롤 각도 결합 산출"]
+
+
+def test_unadjusted_judgment_keeps_llm_and_final_values_for_audit():
+    response = json.dumps([{
+        "label": "B",
+        "found": True,
+        "quote": "the camera array is rotated with horizontal motion",
+        "chunk_id": "[0002]",
+        "judgment": "실질적 동일",
+        "판단_이유": "카메라 배열부가 수평 이동과 함께 회전하는 구성이 직접 대응한다.",
+        "directness": "direct",
+        "missing_limitations": [],
+        "evidence": [],
+    }], ensure_ascii=False)
+
+    parsed = _parse_json_array(
+        response,
+        [ClaimElement(label="B", text="카메라 배열부를 회전 및 이동시키는 스테이지")],
+    )
+
+    assert parsed[0]["llm_judgment"] == "실질적 동일"
+    assert parsed[0]["judgment"] == "실질적 동일"
+    assert parsed[0]["judgment_adjusted"] is False
+    assert parsed[0]["judgment_adjustment_reason"] == ""
+
+
+def test_terminology_difference_phrase_does_not_downgrade_direct_match():
+    response = json.dumps([{
+        "label": "A",
+        "found": True,
+        "quote": "Metadata and subtitle text are obtained from the media content.",
+        "chunk_id": "[0022]",
+        "judgment": "실질적 동일",
+        "판단_이유": "영상 자막 등의 텍스트 정보 및 콘텐츠 메타데이터를 획득하는 구성이 용어 차이 외에 실질적으로 동일하게 개시되어 있습니다.",
+        "directness": "direct",
+        "missing_limitations": [],
+        "evidence": [],
+    }], ensure_ascii=False)
+
+    parsed = _parse_json_array(
+        response,
+        [ClaimElement(label="A", text="영상의 텍스트 데이터 및 콘텐츠 메타데이터를 획득")],
+    )
+
+    assert parsed[0]["judgment"] == "실질적 동일"
+    assert parsed[0]["judgment_adjusted"] is False
+    assert parsed[0]["judgment_adjustment_reason"] == ""
 
 
 def test_element_match_preserves_coverage_metadata():

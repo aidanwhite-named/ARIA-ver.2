@@ -13,7 +13,16 @@ const DEFAULT_SETTINGS = {
 const DEFAULT_MODELS = {
   claude: ['claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'],
   openai: ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini'],
-  agy: ['gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemini-3.1-pro-preview'],
+  agy: [
+    'Gemini 3.5 Flash (Medium)',
+    'Gemini 3.5 Flash (High)',
+    'Gemini 3.5 Flash (Low)',
+    'Gemini 3.1 Pro (Low)',
+    'Gemini 3.1 Pro (High)',
+    'Claude Sonnet 4.6 (Thinking)',
+    'Claude Opus 4.6 (Thinking)',
+    'GPT-OSS 120B (Medium)',
+  ],
 }
 
 

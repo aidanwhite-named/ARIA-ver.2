@@ -53,8 +53,7 @@ def test_missing_evidence_is_discounted_without_changing_coverage():
 
 def test_markdown_uses_neutral_metric_labels():
     text = format_assessment_markdown(assess_claim(_claim(), [], []))
-    assert "[정량평가 - 분석 보조지표]" in text
-    assert "법적 결론을 포함하지 않습니다" in text
+    assert text == ""
     assert "거절 성공" not in text
 
 

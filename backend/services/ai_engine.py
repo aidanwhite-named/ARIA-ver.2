@@ -29,8 +29,14 @@ _CLI_TIMEOUT_SECONDS = 3600
 _DEFAULT_MODEL = {
     "claude": "claude-haiku-4-5-20251001",
     "openai": "gpt-5.4-mini",
-    "agy": "gemini-3.5-flash",
-    "gemini": "gemini-3.5-flash",
+    "agy": "Gemini 3.5 Flash (Medium)",
+    "gemini": "Gemini 3.5 Flash (Medium)",
+}
+
+_AGY_MODEL_ALIASES = {
+    "gemini-3.5-flash": "Gemini 3.5 Flash (Medium)",
+    "gemini-3.1-flash-lite": "Gemini 3.5 Flash (Low)",
+    "gemini-3.1-pro-preview": "Gemini 3.1 Pro (Low)",
 }
 
 _BENIGN_STDERR_PATTERNS = (
@@ -94,6 +100,8 @@ def _resolve_model(settings: Settings, agent: str) -> str:
             return _DEFAULT_MODEL["openai"]
         if engine == "agy" and selected.lower().startswith("claude"):
             return _DEFAULT_MODEL["agy"]
+        if engine == "agy":
+            return _AGY_MODEL_ALIASES.get(selected.lower(), selected)
         return selected
     return _DEFAULT_MODEL.get(engine, _DEFAULT_MODEL["claude"])
 
@@ -470,6 +478,8 @@ def _is_agy_internal_text(text: str, prompt_marker: str = "") -> bool:
         return True
     if re.fullmatch(r"[A-Za-z0-9_-]{20,}", text):
         return True
+    if re.fullmatch(r"\d+\([0-9a-f]{40,64}\)?", text, re.IGNORECASE):
+        return True
     if re.search(r"^[A-Za-z]:[\\/]", text) or text.startswith("\\\\"):
         return True
 
@@ -510,8 +520,7 @@ def _select_agy_response_candidate(candidates: list[str]) -> str:
     cleaned = [_clean_agy_payload_text(item) for item in candidates]
     cleaned = [item for item in cleaned if item]
     filtered = [item for item in cleaned if not _is_agy_internal_text(item)]
-    if filtered:
-        cleaned = filtered
+    cleaned = filtered
     if not cleaned:
         return ""
 
@@ -583,6 +592,53 @@ def _read_agy_conversation_response(started_at: float, prompt_marker: str = "") 
                 response = _select_agy_response_candidate(candidates)
                 logger.warning("AGY CLI returned empty stdout; recovered response from %s", db_path)
                 return response
+
+    return ""
+
+
+def _select_agy_conversation_error(candidates: list[str]) -> str:
+    quota_errors = []
+    for item in candidates:
+        cleaned = _clean_agy_payload_text(item)
+        lowered = cleaned.lower()
+        if "resource_exhausted" in lowered or "individual quota reached" in lowered:
+            quota_errors.append(cleaned)
+    if not quota_errors:
+        return ""
+    preferred = [
+        item for item in quota_errors
+        if item.lower().startswith("resource_exhausted")
+    ]
+    return min(preferred or quota_errors, key=len)
+
+
+def _read_agy_conversation_error(started_at: float, prompt_marker: str = "") -> str:
+    """Recover a provider quota error when AGY exits without useful stderr."""
+    for db_path in _iter_recent_agy_conversation_dbs(started_at) or []:
+        try:
+            with closing(sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True, timeout=1)) as conn:
+                if not _conversation_db_matches_prompt(conn, prompt_marker):
+                    continue
+                rows = conn.execute(
+                    """
+                    SELECT step_payload
+                    FROM steps
+                    WHERE step_type = 17 AND step_payload IS NOT NULL
+                    ORDER BY idx DESC
+                    """
+                ).fetchall()
+        except (OSError, sqlite3.Error):
+            logger.debug("Failed to read AGY conversation error: %s", db_path, exc_info=True)
+            continue
+
+        candidates: list[str] = []
+        for (payload,) in rows:
+            if not isinstance(payload, bytes):
+                continue
+            candidates.extend(_iter_protobuf_text_fields(payload))
+        selected = _select_agy_conversation_error(candidates)
+        if selected:
+            return selected
 
     return ""
 
@@ -749,8 +805,6 @@ async def _cli_run(
                     _active_procs.discard(proc)
             stdout = _decode(stdout_b or b"").strip()
             stderr = _decode(stderr_b or b"").strip()
-            if engine == "agy" and proc.returncode == 0 and not stdout:
-                stdout = _read_agy_transcript_response(started_at, prompt_marker)
             return proc.returncode, stdout, stderr, started_at, prompt_marker
 
         try:
@@ -762,12 +816,6 @@ async def _cli_run(
 
             if returncode == 0 and not stdout:
                 raise RuntimeError(_format_empty_response_error(engine, stderr, returncode))
-
-            if engine == "agy":
-                recovered = _read_agy_transcript_response(started_at, prompt_marker)
-                if recovered:
-                    logger.warning("AGY CLI returned rc=%s but recovered response from stored conversation.", returncode)
-                    return recovered
 
             logger.error("%s CLI failed with rc=%s:\n%s", engine, returncode, stderr)
             if engine == "agy" and _is_gemini_unsupported_client_error(stderr_for_user or stderr):
@@ -888,17 +936,6 @@ async def _cli_run_streaming(
                 returncode, stderr_data = item[1], item[2]
                 stderr_text = _decode(stderr_data) if stderr_data else ""
                 if returncode == 0 and not emitted_any:
-                    if engine == "agy":
-                        logger.warning("AGY CLI streaming returned empty stdout; recovering stored response.")
-                        fallback = await loop.run_in_executor(
-                            None,
-                            _read_agy_transcript_response,
-                            started_at,
-                            prompt_marker,
-                        )
-                        if fallback:
-                            yield fallback
-                            break
                     raise RuntimeError(_format_empty_response_error(engine, stderr_text, returncode))
                 if returncode != 0:
                     stderr_for_user = _clean_cli_stderr(stderr_text)
@@ -1004,8 +1041,6 @@ def _probe_cli_ready(engine: str, model: str) -> dict:
 
     stderr = _clean_cli_stderr(result.stderr or "")
     stdout = (result.stdout or "").strip()
-    if engine == "agy" and result.returncode == 0 and not stdout:
-        stdout = _read_agy_transcript_response(started_at, "Say OK")
     if result.returncode == 0 and stdout:
         probe = {"status": "cli_ready", "label": "CLI 호출 가능", "detail": ""}
     elif result.returncode == 0 and not stdout:

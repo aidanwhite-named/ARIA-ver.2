@@ -31,7 +31,7 @@ export default function MissingPriorArtSearch({ jobId, claimNumber, savedResult,
         <div className="min-w-0 flex-1">
           <p className="text-sm font-bold text-indigo-950">미커버 구성 선행기술 검색</p>
           <p className="mt-0.5 text-xs text-indigo-700">
-            정량평가에서 대응이 부족한 구성만 추출해 공개 문헌을 웹에서 검색합니다.
+            내부 분석 데이터에서 대응이 부족한 구성만 추출해 공개 문헌을 웹에서 검색합니다.
           </p>
         </div>
         <button

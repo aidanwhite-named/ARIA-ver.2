@@ -140,6 +140,9 @@ class ElementMatch(BaseModel):
     evidence: List[EvidenceSpan] = Field(default_factory=list)
     directness: str = "absent"
     missing_limitations: List[str] = Field(default_factory=list)
+    motivation_quote: str = ""
+    combination_risk: str = "uncertain"
+    combination_risk_reason: str = ""
 
 
 class ManualClaimRequest(BaseModel):
@@ -197,12 +200,19 @@ class ModelListResponse(BaseModel):
         "gpt-5.4-mini",
     ]
     gemini: List[str] = [
-        "gemini-3.5-flash",
-        "gemini-3.1-flash-lite",
-        "gemini-3.1-pro-preview",
+        "Gemini 3.5 Flash (Medium)",
+        "Gemini 3.5 Flash (High)",
+        "Gemini 3.5 Flash (Low)",
+        "Gemini 3.1 Pro (Low)",
+        "Gemini 3.1 Pro (High)",
     ]
     agy: List[str] = [
-        "gemini-3.5-flash",
-        "gemini-3.1-flash-lite",
-        "gemini-3.1-pro-preview",
+        "Gemini 3.5 Flash (Medium)",
+        "Gemini 3.5 Flash (High)",
+        "Gemini 3.5 Flash (Low)",
+        "Gemini 3.1 Pro (Low)",
+        "Gemini 3.1 Pro (High)",
+        "Claude Sonnet 4.6 (Thinking)",
+        "Claude Opus 4.6 (Thinking)",
+        "GPT-OSS 120B (Medium)",
     ]

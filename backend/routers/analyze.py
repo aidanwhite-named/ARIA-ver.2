@@ -65,6 +65,7 @@ from backend.services.report_generator import (
     enforce_phase1_judgment_headers,
     enhance_claim_parsing_with_llm,
     enhance_purpose_effects_with_llm,
+    find_unselected_reference_mentions,
     generate_category_same_report,
     generate_dependent_report,
     generate_dependent_reports_batch,
@@ -75,7 +76,6 @@ from backend.services.report_generator import (
     polish_phase1_summary_text,
     sanitize_report_status_icons,
 )
-from backend.services.quantitative_assessment import format_assessment_markdown
 from backend.services.prior_art_search import run_adaptive_prior_art_search
 
 router = APIRouter()
@@ -87,9 +87,7 @@ for _dir in (UPLOADS_DIR, REPORTS_DIR, CASES_DIR, DOC_CACHE_DIR):
 
 _LEGACY_FINAL_BOUNDARY_RE = re.compile(r"(?im)^\s*#\s*\[Phase\s*2\]")
 _REJECTION_BASIS_HEADER_RE = re.compile(
-    r"^\s*\[(?:인용발명\s*\d+\s*단독\(신규성\)|"
-    r"인용발명\s*\d+\s*\+\s*주지관용\(진보성\)|"
-    r"인용발명\s*\d+\s*과\s*인용발명\s*\d+\s*의\s*결합(?:\s*및\s*주지관용)?\(진보성\))\]"
+    r"^\s*\[[^\]\r\n]*(?:신규성|진보성)[^\]\r\n]*\]"
 )
 _BATCH_SPLIT_RE = re.compile(r"(?m)^\s*(?:#{1,6}\s*)?===\s*청구항\s*(\d+)\s*===\s*$")
 
@@ -164,6 +162,35 @@ def _phase1_only_report(body: str) -> str:
     return body[:idx].rstrip()
 
 
+def _matches_directly_cover_single_reference(matches, reference_idx: int) -> bool:
+    return bool(matches) and all(
+        match.cited_invention_index == reference_idx
+        and match.judgment in {"동일", "실질적 동일"}
+        and match.directness in {"", "direct"}
+        and not match.missing_limitations
+        and bool(match.quote)
+        for match in matches
+    )
+
+
+def _is_novelty_basis(chain_info, matches, total: list[int]) -> bool:
+    """Require the parent claim and the dependent limitation to share one novelty reference."""
+    if not total or len(total) != 1:
+        return False
+    info = chain_info or {}
+    family_selection = info.get("family_selection") or {}
+    analysis_track = info.get("analysis_track") or family_selection.get("analysis_track")
+    is_dependent = info.get("parent") is not None
+    if is_dependent:
+        return (
+            analysis_track == "novelty_single_reference"
+            and _matches_directly_cover_single_reference(matches, total[0])
+        )
+    if analysis_track == "novelty_single_reference":
+        return True
+    return _matches_directly_cover_single_reference(matches, total[0])
+
+
 def _rejection_basis_header(chain_info, matches) -> str:
     mapping = (chain_info or {}).get("doc_name_mapping", {})
     total = list((chain_info or {}).get("total") or [])
@@ -175,10 +202,7 @@ def _rejection_basis_header(chain_info, matches) -> str:
     inv1_name = mapping.get(str(inv1_idx), f"인용발명 {inv1_idx + 1}")
     inv2_name = mapping.get(str(inv2_idx), f"인용발명 {inv2_idx + 1}") if inv2_idx is not None else ""
     inv3_name = mapping.get(str(inv3_idx), f"인용발명 {inv3_idx + 1}") if inv3_idx is not None else ""
-    is_novelty = bool(matches) and len(total) == 1 and all(
-        match.cited_invention_index == inv1_idx and match.judgment == "동일"
-        for match in matches
-    )
+    is_novelty = _is_novelty_basis(chain_info, matches, total)
     return format_rejection_basis_header(
         inv1_name,
         inv2_name,
@@ -205,11 +229,6 @@ def _prepend_rejection_basis_header(report_md: str, chain_info, matches) -> str:
         return f"{lines[0].strip()}\n\n[구성대비]\n\n{chr(10).join(lines[1:]).strip()}"
     header = _rejection_basis_header(chain_info, matches)
     body = f"{header}\n\n[구성대비]\n\n{report_md}" if report_md else f"{header}\n\n[구성대비]"
-    assessment = format_assessment_markdown(
-        (chain_info or {}).get("quantitative_assessment")
-    )
-    if assessment and "[정량평가 - 분석 보조지표]" not in body:
-        body = f"{body}\n\n{assessment}"
     return body
 
 
@@ -352,10 +371,62 @@ def _update_dependent_batch_status(
     return payload
 
 
-def _invalidate_claim_derived_artifacts(job_id: str, claim_number: int) -> None:
-    """Remove derived data that can no longer match a changed claim."""
+def _claim_analysis_signature(claim_data: Optional[dict]) -> tuple:
+    """Return the claim fields that can change citation selection or inheritance."""
+    if not isinstance(claim_data, dict):
+        return ()
+    elements = []
+    for element in claim_data.get("elements") or []:
+        if not isinstance(element, dict):
+            continue
+        elements.append((
+            str(element.get("label") or ""),
+            " ".join(str(element.get("text") or "").split()),
+            str(element.get("importance") or "3"),
+            bool(element.get("is_sub")),
+            str(element.get("parent_label") or ""),
+        ))
+    return (
+        int(claim_data.get("claim_number") or 0),
+        str(claim_data.get("claim_type") or "independent"),
+        claim_data.get("parent_claim"),
+        " ".join(str(claim_data.get("text") or "").split()),
+        " ".join(str(claim_data.get("preamble") or "").split()),
+        " ".join(str(claim_data.get("closing") or "").split()),
+        tuple(elements),
+    )
+
+
+def _invalidate_claim_derived_artifacts(
+    job_id: str,
+    claim_number: int,
+    *,
+    is_new_claim: bool = False,
+    claim_type: str = "independent",
+) -> None:
+    """Invalidate only the changed claim family state that is no longer valid.
+
+    Adding a new dependent claim must not erase an already issued independent-claim
+    report, its context, citation chain, or document numbering. Existing descendants
+    are invalidated when their ancestor text changes, while unrelated claim families
+    remain intact.
+    """
     job_dir = _job_dir(job_id)
     claim_key = str(claim_number)
+    claims_data = _load_json(job_dir / "claims.json", [])
+    affected_claim_numbers = {claim_number}
+    changed = True
+    while changed:
+        changed = False
+        for item in claims_data:
+            try:
+                number = int(item.get("claim_number"))
+                parent = int(item.get("parent_claim")) if item.get("parent_claim") is not None else None
+            except (TypeError, ValueError):
+                continue
+            if parent in affected_claim_numbers and number not in affected_claim_numbers:
+                affected_claim_numbers.add(number)
+                changed = True
 
     # A comparison file contains results for several claims. Preserve the other
     # claims and remove only the entry whose source text/elements changed.
@@ -366,34 +437,75 @@ def _invalidate_claim_derived_artifacts(job_id: str, claim_number: int) -> None:
         cache.pop(claim_key, None)
         _write_json(path, cache)
 
-    # Citation chains, category aliases and report context are job-level derived
-    # state and may depend on parent/child relationships or document numbering.
-    derived_paths = [
-        job_dir / "citation_chain.json",
-        job_dir / "same_pairs.json",
-        job_dir / "context.json",
-    ]
-    for path in derived_paths:
-        try:
-            path.unlink(missing_ok=True)
-        except OSError as exc:
-            logger.warning("Could not remove stale derived file %s: %s", path, exc)
+    # Category aliases are recomputed, but citation-chain numbering and unrelated
+    # report context are stable case state and must survive a newly added claim.
+    try:
+        (job_dir / "same_pairs.json").unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("Could not remove stale category alias file: %s", exc)
 
-    # A changed parent claim can affect every dependent report in the same job,
-    # so report files are invalidated job-wide while valid comparison entries for
-    # unchanged claims remain reusable.
-    report_paths = list(REPORTS_DIR.glob(f"report_{job_id}_claim*.*"))
-    report_paths.extend(REPORTS_DIR.glob(f"report_{job_id}_all.*"))
+    context_path = job_dir / "context.json"
+    context = _load_json(context_path, [])
+    if isinstance(context, list):
+        filtered_context = [
+            item for item in context
+            if item.get("claim_number") not in affected_claim_numbers
+        ]
+        if filtered_context != context:
+            _write_json(context_path, filtered_context)
+
+    # Editing an existing independent claim permits that family's references to be
+    # selected again. New claims and dependent-claim edits preserve the root lock.
+    chain_path = job_dir / "citation_chain.json"
+    chain_data = _load_json(chain_path, {})
+    if (
+        not is_new_claim
+        and claim_type == "independent"
+        and isinstance(chain_data, dict)
+        and isinstance(chain_data.get("selection_locks"), dict)
+    ):
+        locks = dict(chain_data.get("selection_locks") or {})
+        if locks.pop(claim_key, None) is not None:
+            chain_data["selection_locks"] = locks
+            _write_json(chain_path, chain_data)
+
+    report_paths = []
+    for affected_number in affected_claim_numbers:
+        report_paths.extend(REPORTS_DIR.glob(f"report_{job_id}_claim{affected_number}.*"))
     case_reports_dir = _case_dir(job_id) / "reports"
     if case_reports_dir.exists():
-        report_paths.extend(case_reports_dir.glob("claim*.*"))
+        for affected_number in affected_claim_numbers:
+            report_paths.extend(case_reports_dir.glob(f"claim{affected_number}.*"))
     for path in report_paths:
         try:
             path.unlink(missing_ok=True)
         except OSError as exc:
             logger.warning("Could not remove stale report %s: %s", path, exc)
 
-    _remove_reference_entries_for_claim(job_id, claim_number)
+    for affected_number in affected_claim_numbers:
+        _remove_reference_entries_for_claim(job_id, affected_number)
+
+
+def _lock_claim_chain(job_id: str, claim_number: int) -> None:
+    """Freeze an issued independent claim's references and document numbering."""
+    chain_path = _job_dir(job_id) / "citation_chain.json"
+    chain_data = _load_json(chain_path, {})
+    if not isinstance(chain_data, dict):
+        return
+    chain = (chain_data.get("chains") or {}).get(str(claim_number)) or {}
+    total = [int(value) for value in chain.get("total", [])]
+    if not total:
+        return
+    locks = dict(chain_data.get("selection_locks") or {})
+    locks[str(claim_number)] = {
+        "total": total,
+        "doc_name_mapping": dict(chain_data.get("doc_name_mapping") or {}),
+        "locked_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "reason": "independent_claim_report_issued",
+    }
+    chain_data["selection_locks"] = locks
+    _write_json(chain_path, chain_data)
+    _save_chain_audit(job_id, chain_data)
 
 
 def _load_claims(job_id: str) -> List[ParsedClaim]:
@@ -500,12 +612,20 @@ def _save_reference_db(
     report_md: str,
 ) -> None:
     used = (chain_info or {}).get("total") or sorted({m.cited_invention_index for m in matches})
-    role_by_idx = {idx: ("primary_reference" if order == 0 else "secondary_reference")
-                   for order, idx in enumerate(used)}
-    is_novelty = bool(matches) and len(used) == 1 and all(
-        match.cited_invention_index == used[0] and match.judgment == "동일"
-        for match in matches
-    )
+    chain_roles = (chain_info or {}).get("reference_roles") or {}
+    persisted_role_names = {
+        "primary": "primary_reference",
+        "substantive_secondary": "secondary_reference",
+        "conventional_support": "conventional_support",
+    }
+    role_by_idx = {
+        idx: persisted_role_names.get(
+            chain_roles.get(str(idx), ""),
+            "primary_reference" if order == 0 else "secondary_reference",
+        )
+        for order, idx in enumerate(used)
+    }
+    is_novelty = _is_novelty_basis(chain_info, matches, list(used))
     entries = []
     for doc_idx in used:
         if doc_idx < 0 or doc_idx >= len(prior_docs):
@@ -761,8 +881,13 @@ async def manual_claim(job_id: str, req: ManualClaimRequest):
     claims.sort(key=lambda c: c.get("claim_number", 0))
     _write_json(job_dir / "claims.json", claims)
     _write_json(_ensure_case_dirs(job_id) / "parsed" / "claims.json", claims)
-    if previous != claim_data:
-        _invalidate_claim_derived_artifacts(job_id, claim.claim_number)
+    if _claim_analysis_signature(previous) != _claim_analysis_signature(claim_data):
+        _invalidate_claim_derived_artifacts(
+            job_id,
+            claim.claim_number,
+            is_new_claim=previous is None,
+            claim_type=claim.claim_type,
+        )
     return claim.model_dump()
 
 
@@ -832,15 +957,28 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
             ):
                 cached_report = sanitize_report_status_icons(_phase1_only_report(cached.read_text(encoding="utf-8")))
                 cached_chain_info = get_claim_chain_info(cached_chain, claim_number)
-                _save_context_entry(job_id, claim_number, claim.text, cached_report)
-                async for event in _yield_timing("cached report return", total_start):
-                    yield event
-                yield _ev("done", {
-                    "report_md": cached_report,
-                    "claim_number": claim_number,
-                    "used_inventions": _used_inventions_for(cached_chain_info, prior_docs),
-                })
-                return
+                cached_scope_violations = find_unselected_reference_mentions(
+                    cached_report, cached_chain_info
+                )
+                if not cached_scope_violations:
+                    _save_context_entry(job_id, claim_number, claim.text, cached_report)
+                    if claim.claim_type == "independent":
+                        _lock_claim_chain(job_id, claim_number)
+                    async for event in _yield_timing("cached report return", total_start):
+                        yield event
+                    yield _ev("done", {
+                        "report_md": cached_report,
+                        "claim_number": claim_number,
+                        "used_inventions": _used_inventions_for(
+                            cached_chain_info, prior_docs, matches=matches
+                        ),
+                    })
+                    return
+                yield _ev(
+                    "log",
+                    "[cache] 최종 인용 체인과 다른 기존 보고서를 무효화하고 재작성합니다: "
+                    + ", ".join(cached_scope_violations),
+                )
 
             yield _ev("start", f"청구항 {claim_number} 보고서 작성을 시작합니다.")
             if cache_reset:
@@ -945,7 +1083,9 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                 if parent_num is not None:
                     prev_context = [c for c in _load_context(job_id) if c.get("claim_number") == parent_num]
 
-            used_inventions = _used_inventions_for(chain_info, prior_docs)
+            used_inventions = _used_inventions_for(
+                chain_info, prior_docs, matches=report_matches
+            )
             yield _ev("generate", "Phase 1 analysis in progress")
             phase1_start = time.perf_counter()
             phase1_chunks: list[str] = []
@@ -985,6 +1125,35 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                 phase1_md = polish_phase1_summary_text(
                     sanitize_report_status_icons(_dedupe_phase1_sections(phase1_body))
                 )
+
+            scope_violations = find_unselected_reference_mentions(phase1_md, chain_info)
+            if scope_violations and claim.claim_type == "independent":
+                yield _ev(
+                    "log",
+                    "[verify] 최종 인용 체인 밖의 문헌이 본문에 포함되어 보고서를 다시 작성합니다: "
+                    + ", ".join(scope_violations),
+                )
+                strict_chain_info = dict(chain_info or {})
+                strict_chain_info["strict_reference_scope_retry"] = True
+                retry_chunks: list[str] = []
+                async for chunk in generate_independent_phase1_streaming(
+                    claim, report_matches, prior_docs, strict_chain_info, settings,
+                    prev_context=prev_context,
+                    secondary_matches=secondary_matches,
+                ):
+                    retry_chunks.append(sanitize_report_status_icons(chunk))
+                phase1_md = polish_phase1_summary_text(
+                    sanitize_report_status_icons(
+                        _dedupe_phase1_sections(_strip_agent_tool_calls("".join(retry_chunks)))
+                    )
+                )
+                phase1_md = enforce_phase1_judgment_headers(phase1_md, report_matches)
+                scope_violations = find_unselected_reference_mentions(phase1_md, chain_info)
+            if scope_violations:
+                raise CompareFailed(
+                    "보고서가 최종 인용 체인에 포함되지 않은 문헌을 사용했습니다: "
+                    + ", ".join(scope_violations)
+                )
             phase1_md = f"### claim {claim_number}\n\n{phase1_md}"
             async for event in _yield_timing("phase1", phase1_start):
                 yield event
@@ -1013,6 +1182,8 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
             _save_report(job_id, claim_number, report_md)
             _save_reference_db(job_id, claim, matches, prior_docs, chain_info, report_md)
             _save_context_entry(job_id, claim_number, claim.text, report_md)
+            if claim.claim_type == "independent":
+                _lock_claim_chain(job_id, claim_number)
             async for event in _yield_timing("finalize", finalize_start):
                 yield event
             async for event in _yield_timing("total", total_start):
@@ -1040,16 +1211,27 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
     return EventSourceResponse(stream(), headers={"Content-Type": "text/event-stream; charset=utf-8"})
 
 
-def _used_inventions_for(chain_info, prior_docs: List[ExtractedDocument]) -> list:
+def _used_inventions_for(
+    chain_info,
+    prior_docs: List[ExtractedDocument],
+    *,
+    matches=None,
+) -> list:
     if chain_info:
         mapping = chain_info.get("doc_name_mapping", {})
-        return [
+        records = [
             {
                 "name": mapping.get(str(idx), f"인용발명 {idx + 1}"),
                 "filename": prior_docs[idx].filename if idx < len(prior_docs) else "",
+                "role": (chain_info.get("reference_roles") or {}).get(str(idx), ""),
             }
             for idx in chain_info.get("total", [])
         ]
+        if records:
+            records[0]["basis_label"] = _rejection_basis_header(
+                chain_info, list(matches or [])
+            ).strip("[]")
+        return records
     return [{"name": "인용발명 1", "filename": prior_docs[0].filename}] if prior_docs else []
 
 
@@ -1065,6 +1247,7 @@ def _assemble_dependent_report(
     split = _find_legacy_final_boundary(body)
     phase1 = body[:split].strip() if split >= 0 else body.strip()
     phase1 = _dedupe_phase1_sections(phase1)
+    phase1 = enforce_phase1_judgment_headers(phase1, list(matches or []))
     return f"### 청구항 {claim.claim_number}\n\n{phase1}"
 
 
@@ -1144,7 +1327,11 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
                 )
             return candidate_docs_by_claim[claim.claim_number]
 
-        async def ensure_comparison_cache(claim: ParsedClaim) -> None:
+        async def ensure_comparison_cache(
+            claim: ParsedClaim,
+            *,
+            force_refresh: bool = False,
+        ) -> None:
             if str(claim.claim_number) in same_pairs:
                 return
             cached_doc_idxs = get_cached_doc_indices(
@@ -1155,9 +1342,9 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
             )
             target_doc_idxs = candidate_docs_for(claim)
             missing_doc_idxs = [i for i in target_doc_idxs if i not in cached_doc_idxs]
-            if req.force:
+            if force_refresh:
                 missing_doc_idxs = target_doc_idxs[:]
-            if not missing_doc_idxs and not req.force:
+            if not missing_doc_idxs and not force_refresh:
                 return
             if compare_mode in {"mixed", "hybrid"} and len(target_doc_idxs) > 1:
                 selected_docs = [prior_docs[i] for i in target_doc_idxs]
@@ -1178,6 +1365,43 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
                 claim.elements, prior_docs, settings,
                 job_dir=str(job_dir), claim_number=claim.claim_number,
             )
+
+        ancestor_numbers: set[int] = set()
+        for claim in targets:
+            ancestor_numbers.update(_parent_chain_nums(claim, claims_by_num))
+        ancestor_claims = [
+            claims_by_num[number]
+            for number in sorted(ancestor_numbers)
+            if number in claims_by_num
+        ]
+        uncached_ancestors = []
+        for claim in ancestor_claims:
+            if str(claim.claim_number) in same_pairs:
+                continue
+            target_doc_idxs = candidate_docs_for(claim)
+            cached_doc_idxs = get_cached_doc_indices(
+                str(job_dir),
+                claim.claim_number,
+                len(prior_docs),
+                comparison_mode=compare_mode,
+            )
+            if target_doc_idxs and not all(i in cached_doc_idxs for i in target_doc_idxs):
+                uncached_ancestors.append(claim)
+
+        if uncached_ancestors:
+            _update_dependent_batch_status(
+                job_id,
+                state="running",
+                claim_numbers=claim_numbers,
+                stage="restoring_parent_comparison_cache",
+                message=(
+                    "부모항 인용 체인을 복구하기 위해 "
+                    f"상위 청구항 {len(uncached_ancestors)}개의 비교 캐시를 생성하고 있습니다."
+                ),
+                started_at=started_at,
+            )
+            for ancestor in uncached_ancestors:
+                await ensure_comparison_cache(ancestor, force_refresh=False)
 
         uncached_targets = []
         for claim in targets:
@@ -1215,7 +1439,7 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
 
             async def run_limited(claim: ParsedClaim) -> None:
                 async with semaphore:
-                    await ensure_comparison_cache(claim)
+                    await ensure_comparison_cache(claim, force_refresh=req.force)
 
             await asyncio.gather(*(run_limited(claim) for claim in uncached_targets))
         else:
@@ -1228,7 +1452,15 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
                 started_at=started_at,
             )
 
+        recomputed_ancestor_numbers = {
+            claim.claim_number for claim in uncached_ancestors
+        }
         recomputed_claim_numbers = {claim.claim_number for claim in uncached_targets}
+        for claim in targets:
+            if recomputed_ancestor_numbers.intersection(
+                _parent_chain_nums(claim, claims_by_num)
+            ):
+                recomputed_claim_numbers.add(claim.claim_number)
 
         _update_dependent_batch_status(
             job_id,
@@ -1262,10 +1494,19 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
                     (_ensure_case_dirs(job_id) / "reports" / f"claim{cn}.md").unlink(missing_ok=True)
                 else:
                     cached_chain_info = get_claim_chain_info(chain_data, cn)
+                    cached_matches, _ = get_matches_from_cache(
+                        claim,
+                        prior_docs,
+                        str(job_dir),
+                        allowed_docs=(cached_chain_info or {}).get("total"),
+                        comparison_mode=compare_mode,
+                    )
                     _save_context_entry(job_id, claim.claim_number, claim.text, cached_report)
                     results[str(cn)] = {
                         "report_md": cached_report,
-                        "used_inventions": _used_inventions_for(cached_chain_info, prior_docs),
+                        "used_inventions": _used_inventions_for(
+                            cached_chain_info, prior_docs, matches=cached_matches
+                        ),
                     }
                     continue
             matches, _ = get_matches_from_cache(
@@ -1401,7 +1642,9 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
                 results[str(claim.claim_number)] = {
                     "report_md": report_md,
                     "related_inventions_md": related_inventions_md,
-                    "used_inventions": _used_inventions_for(chain_info, prior_docs),
+                    "used_inventions": _used_inventions_for(
+                        chain_info, prior_docs, matches=matches
+                    ),
                 }
                 _update_dependent_batch_status(
                     job_id,
@@ -1697,10 +1940,39 @@ async def get_context(job_id: str):
 
 @router.delete("/context/{job_id}")
 async def clear_context(job_id: str):
-    path = _job_dir(job_id) / "context.json"
-    if path.exists():
-        path.unlink()
-    return {"ok": True}
+    job_dir = _job_dir(job_id)
+    case_dir = _case_dir(job_id)
+
+    # 사용자가 명시적으로 컨텍스트를 비우면 보고서 연속성과 함께 확정된
+    # 인용 체인·문헌 번호 잠금도 초기화한다. 구성대비 캐시는 유지하여 다음
+    # 실행에서 같은 원문 근거를 재사용하되, 주·보조문헌과 번호는 새로 선정한다.
+    for path in (
+        job_dir / "context.json",
+        job_dir / "citation_chain.json",
+        job_dir / "same_pairs.json",
+        case_dir / "parsed" / "citation_chain.json",
+    ):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("Could not clear derived context file %s: %s", path, exc)
+
+    report_paths = list(REPORTS_DIR.glob(f"report_{job_id}_claim*.*"))
+    report_paths.extend(REPORTS_DIR.glob(f"report_{job_id}_all.*"))
+    case_reports_dir = case_dir / "reports"
+    if case_reports_dir.exists():
+        report_paths.extend(case_reports_dir.glob("claim*.*"))
+        report_paths.extend(case_reports_dir.glob("all.*"))
+    for path in report_paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("Could not clear stale report %s: %s", path, exc)
+
+    for claim in _load_claims(job_id):
+        _remove_reference_entries_for_claim(job_id, claim.claim_number)
+
+    return {"ok": True, "citation_numbering_reset": True}
 
 
 @router.delete("/job/{job_id}")
@@ -1808,8 +2080,11 @@ async def enhance_claim(job_id: str, claim_number: int):
     updated = [enhanced_data if c.get("claim_number") == claim_number else c for c in claims]
     _write_json(job_dir / "claims.json", updated)
     _write_json(_ensure_case_dirs(job_id) / "parsed" / "claims.json", updated)
-    if enhanced_data != claim_data:
-        _invalidate_claim_derived_artifacts(job_id, claim_number)
+    if _claim_analysis_signature(enhanced_data) != _claim_analysis_signature(claim_data):
+        _invalidate_claim_derived_artifacts(
+            job_id,
+            claim_number,
+            is_new_claim=False,
+            claim_type=enhanced.claim_type,
+        )
     return enhanced_data
-
-

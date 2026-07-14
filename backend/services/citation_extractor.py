@@ -42,7 +42,7 @@ _ENGINE_BUDGETS = {
 _DEFAULT_BUDGET = (45_000, 60_000, 55_000, 5_000)
 _CHUNK_SIZE = 1_200
 _CACHE_META_KEY = "_meta"
-_CACHE_SCHEMA_VERSION = 9
+_CACHE_SCHEMA_VERSION = 15
 _MIXED_TOTAL_BUDGET = 80_000
 _MIXED_MIN_DOC_BUDGET = 8_000
 _DEFAULT_DEPENDENT_CANDIDATE_DOC_LIMIT = 3
@@ -71,6 +71,25 @@ _SELECTION_STRUCTURE_KEYWORDS = [
     "category", "type", "mode", "condition", "criterion", "determine", "select", "switch", "branch",
     "alternative", "multiple",
 ]
+
+# 한국어 청구항과 영문 인용발명을 혼합 비교할 때, 한국어 토큰만으로 문헌을
+# 압축하면 직접 대응하는 영문 실시예가 입력에서 통째로 빠질 수 있다. 자주 쓰이는
+# 기능 축을 영문 검색어로 확장하되, 최종 대응 판단은 LLM이 원문 전체 문맥에서 한다.
+_KO_EN_CLAIM_KEYWORD_GROUPS = (
+    (("텍스트", "문자", "자막", "발화"),
+     ("text", "subtitle", "caption", "transcript", "utterance", "sentence")),
+    (("메타데이터", "메타 데이터"), ("metadata", "meta-data")),
+    (("분할", "분리", "구획"), ("divid", "split", "segment", "boundary")),
+    (("세그먼트",), ("segment", "block", "topic", "short")),
+    (("연속", "인접", "이어"),
+     ("adjacent", "continu", "consecutive", "temporal", "align", "similarity")),
+    (("씬", "장면"), ("scene", "shot")),
+    (("그룹", "병합", "묶"), ("group", "cluster", "merge", "align")),
+    (("맥락", "문맥", "의미"), ("context", "semantic", "topic")),
+    (("영상", "비디오", "미디어"), ("video", "media")),
+    (("시청", "재생", "탐색"), ("view", "watch", "playback", "presentation", "navigation")),
+    (("서비스", "제공", "검색"), ("service", "provide", "present", "search")),
+)
 
 
 def _budgets(engine: str) -> tuple[int, int, int, int]:
@@ -122,7 +141,10 @@ _NON_DISCLOSURE_RE = re.compile(
     re.IGNORECASE,
 )
 _TERMINOLOGY_ONLY_RE = re.compile(
-    r"(?:용어|표현|명칭).{0,20}차이(?:만|\s*뿐|\s*불과)",
+    r"(?:용어|표현|명칭).{0,20}(?:"
+    r"차이(?:만|\s*뿐|\s*불과)|"
+    r"차이\s*외(?:에|에는)?\s*(?:실질적으로\s*)?(?:동일|같)"
+    r")",
     re.IGNORECASE,
 )
 
@@ -174,6 +196,33 @@ def _cap_judgment_for_coverage(
         return "일부 유사"
 
     return judgment
+
+
+def _judgment_adjustment_reason(
+    llm_judgment: str,
+    final_judgment: str,
+    directness: str,
+    missing_limitations: list[str],
+    reason: str,
+) -> str:
+    """Return an auditable reason when local policy changes the LLM judgment."""
+    if llm_judgment == final_judgment:
+        return ""
+    normalized_directness = (directness or "").strip().lower()
+    if normalized_directness == "absent":
+        return "directness_absent"
+    if normalized_directness == "inferred" and llm_judgment in _HIGH_JUDGMENTS:
+        return "directness_inferred"
+    missing_text = " ".join(missing_limitations or [])
+    if (
+        len(missing_limitations or []) >= 2
+        or _COMPOSITE_MISSING_RE.search(missing_text)
+        or _COMPOSITE_MISSING_RE.search(reason or "")
+    ):
+        return "multiple_or_composite_missing_limitations"
+    if missing_limitations or _NON_DISCLOSURE_RE.search(reason or ""):
+        return "missing_or_undisclosed_limitation"
+    return "coverage_policy_cap"
 
 
 def _shorten_quote(quote: str) -> str:
@@ -428,6 +477,7 @@ def _build_hybrid_docs_block(
 
 def _claim_keywords(elements: List[ClaimElement]) -> List[str]:
     text = " ".join(e.text for e in elements)
+    lowered_claim = text.lower()
     tokens = re.findall(r"[A-Za-z0-9가-힣]{2,}", text.lower())
     stopwords = {
         "하는", "하고", "하며", "포함", "포함하는", "구비", "구비하는", "상기",
@@ -451,6 +501,15 @@ def _claim_keywords(elements: List[ClaimElement]) -> List[str]:
             continue
         seen.add(token)
         keywords.append(token)
+
+    for triggers, expansions in _KO_EN_CLAIM_KEYWORD_GROUPS:
+        if not any(trigger in lowered_claim for trigger in triggers):
+            continue
+        for token in expansions:
+            if token in seen:
+                continue
+            seen.add(token)
+            keywords.append(token)
 
     for token in tokens:
         if token in stopwords or token in seen:
@@ -830,10 +889,20 @@ async def analyze_claim_elements_hybrid(
                 "label": label,
                 "found": bool(item.get("found", False)),
                 "judgment": item.get("judgment", "대응 없음"),
+                "llm_judgment": item.get("llm_judgment", item.get("judgment", "대응 없음")),
+                "judgment_adjusted": bool(item.get("judgment_adjusted", False)),
+                "judgment_adjustment_reason": item.get("judgment_adjustment_reason", ""),
                 "quote": item.get("quote", ""),
+                "quote_translation": item.get("quote_translation", ""),
                 "chunk_id": item.get("chunk_id", ""),
                 "판단_이유": item.get("판단_이유", item.get("similarity_reason", "")),
+                "purpose_effect_similarity": item.get("purpose_effect_similarity", ""),
+                "directness": item.get("directness", "direct" if item.get("quote") else "absent"),
+                "missing_limitations": item.get("missing_limitations", []),
                 "evidence": item.get("evidence", []),
+                "motivation_quote": item.get("motivation_quote", ""),
+                "combination_risk": item.get("combination_risk", "uncertain"),
+                "combination_risk_reason": item.get("combination_risk_reason", ""),
             })
 
     if job_dir is not None and claim_number is not None:
@@ -1004,6 +1073,9 @@ def _select_best_matches(
                 evidence=_evidence_spans(best_match.get("evidence", [])),
                 directness=best_match.get("directness", "direct" if best_match.get("quote") else "absent"),
                 missing_limitations=best_match.get("missing_limitations", []),
+                motivation_quote=_shorten_quote(best_match.get("motivation_quote", "")),
+                combination_risk=best_match.get("combination_risk", "uncertain"),
+                combination_risk_reason=best_match.get("combination_risk_reason", ""),
             ))
         else:
             matches.append(ElementMatch(
@@ -1215,13 +1287,14 @@ def _parse_json_array(
                 invalid_reasons.append(f"{label}의 doc_index가 범위를 벗어남: {doc_idx}")
                 continue
 
-        judgment = str(item.get("judgment", "대응 없음")).strip()
-        judgment = judgment_aliases.get(judgment, judgment)
-        if judgment not in _JUDGMENT_RANK:
-            invalid_reasons.append(f"{label}의 허용되지 않은 judgment: {judgment!r}")
+        llm_judgment = str(item.get("judgment", "대응 없음")).strip()
+        llm_judgment = judgment_aliases.get(llm_judgment, llm_judgment)
+        if llm_judgment not in _JUDGMENT_RANK:
+            invalid_reasons.append(f"{label}의 허용되지 않은 judgment: {llm_judgment!r}")
             continue
 
         quote = _shorten_quote(str(item.get("quote", "") or ""))
+        quote_translation = _shorten_quote(str(item.get("quote_translation", "") or ""))
         evidence = _normalize_evidence(item.get("evidence", []), quote, item.get("chunk_id", ""))
         directness = str(item.get("directness", "") or "").strip().lower()
         if directness not in {"direct", "inferred", "absent"}:
@@ -1236,6 +1309,16 @@ def _parse_json_array(
         else:
             missing_limitations = []
         reason = str(item.get("판단_이유", item.get("similarity_reason", "")) or "")
+        purpose_effect_similarity = re.sub(
+            r"\s+",
+            " ",
+            str(item.get("purpose_effect_similarity", "") or "").strip(),
+        )[:240]
+        motivation_quote = _shorten_quote(str(item.get("motivation_quote", "") or ""))
+        combination_risk = str(item.get("combination_risk", "uncertain") or "uncertain").strip().lower()
+        if combination_risk not in {"none_explicit", "uncertain", "contrary_teaching", "principle_change"}:
+            combination_risk = "uncertain"
+        combination_risk_reason = str(item.get("combination_risk_reason", "") or "").strip()
         terminology_only = bool(re.search(
             r"(?:용어|표현|명칭).{0,20}차이(?:만|에\s*불과)",
             reason,
@@ -1246,6 +1329,13 @@ def _parse_json_array(
         ))
         # 객관적 차이, 추론 의존, 핵심 하위 제한 누락이 있으면 과도한 판정을 상한 처리한다.
         judgment = _cap_judgment_for_coverage(
+            llm_judgment,
+            directness,
+            missing_limitations,
+            reason,
+        )
+        judgment_adjustment_reason = _judgment_adjustment_reason(
+            llm_judgment,
             judgment,
             directness,
             missing_limitations,
@@ -1270,12 +1360,20 @@ def _parse_json_array(
             "label": label,
             "found": found,
             "quote": quote,
+            "quote_translation": quote_translation if quote else "",
             "chunk_id": str(item.get("chunk_id", "") or ""),
             "judgment": judgment,
+            "llm_judgment": llm_judgment,
+            "judgment_adjusted": judgment != llm_judgment,
+            "judgment_adjustment_reason": judgment_adjustment_reason,
             "판단_이유": reason,
+            "purpose_effect_similarity": purpose_effect_similarity,
             "evidence": evidence if found else [],
             "directness": directness,
             "missing_limitations": missing_limitations,
+            "motivation_quote": motivation_quote,
+            "combination_risk": combination_risk,
+            "combination_risk_reason": combination_risk_reason,
         })
         if doc_idx is not None:
             normalized_item["doc_index"] = doc_idx

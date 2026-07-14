@@ -31,7 +31,12 @@ logger = logging.getLogger(__name__)
 MAX_INDEPENDENT_REFS = 2   # 독립항에 사용할 최대 인용발명 수
 MAX_INDEPENDENT_REFS_WITH_CONVENTIONAL_SUPPORT = 3
 MAX_DEPTH_INCREMENT = 1    # 종속항 1단계당 추가 허용 인용발명 수
-CITATION_CHAIN_POLICY_VERSION = 13
+CITATION_CHAIN_POLICY_VERSION = 18
+
+# 패밀리별 주인용발명 선정에서 종속항 커버리지는 독립항 적합도를 뒤집는
+# 주점수가 아니라, 독립항 점수가 근접한 후보들 사이의 타이브레이커로만 쓴다.
+PRIMARY_NEAR_TIE_MARGIN = 5.0
+DEPENDENT_REUSE_TIEBREAK_MAX = 2.0
 
 # 판정 점수표 (높을수록 유사)
 _JUDGMENT_SCORE = {
@@ -61,13 +66,15 @@ _SECONDARY_SUPPORT_THRESHOLD = 0
 # Dependent claims are often narrower implementation choices. If a newly added
 # document expressly teaches the main implementation axis but leaves a limitation
 # different, keep it in the chain as partial support so the report can explain
-# both the usable teaching and the remaining difference.
-_DEPENDENT_PARTIAL_SUPPORT_THRESHOLD = 0  # "차이" with an actual quote
+# both the usable teaching and the remaining difference. A mere `차이` quote is
+# audit evidence only and must not become an actual dependent-claim reference.
+_DEPENDENT_PARTIAL_SUPPORT_THRESHOLD = 2  # "일부 유사" 이상
 # 주인용발명 단독 가중 유사도가 이 이상이면 소프트 공백이 있어도 결합 불필요 (단독 충분)
 SINGLE_SUFFICIENT_SIMILARITY = 91.0
 
-# 판정 라벨 → 유사도 퍼센트 (system_compare.txt 의 판정 밴드 대표값과 동일 기준)
-# 신뢰도 계산용 — 대비 LLM이 이미 내린 판정을 재사용하므로 추가 LLM 호출 없음.
+# 판정 라벨 → 내부 결손 민감도 앵커. 보고서에 표시되는 95~100 등의 법적·표현상
+# 유사도 퍼센트가 아니며, 평균점수가 필수구성 결손을 덮지 않도록 보수적으로 벌린다.
+# 신뢰도·문헌 선정 감사용으로만 사용하고 보고서에는 출력하지 않는다.
 _LABEL_PERCENT = {
     "동일": 95,
     "실질적 동일": 80,
@@ -93,7 +100,7 @@ _JUDGMENT_SIMILARITY = {
 # 신뢰도 경고 기준 (경고 부착용 — 보고서 결론을 차단하지 않음)
 PRIMARY_SIMILARITY_FLOOR = 40   # 주인용발명 단독 유사도 하한
 CONFIDENT_SIMILARITY_FLOOR = 80  # 결합 후 유사도 확신 기준
-UNCOVERED_PERCENT_THRESHOLD = 35  # 이 미만이면 해당 구성요소 '미커버'로 간주
+UNCOVERED_PERCENT_THRESHOLD = 35  # 이 값 이하이면 해당 구성요소 '미커버'로 간주
 
 # 주/보조 인용발명 선정 점수:
 # - 주인용발명은 심사관식 "가장 가까운 출발점"이 되도록 전체 골격 커버리지를 우선한다.
@@ -156,6 +163,11 @@ _COMBINATION_RATIONALES = {
         "label": "주지관용 구성 문헌 보강형",
         "description": "핵심 기술사상은 앞선 인용발명으로 판단하고, 별도 문헌은 CPU·바퀴·일반 제어부와 같은 통상적 구성의 명시 근거로만 사용하는 유형",
         "writing_guidance": "주지관용 구성의 통상적 기능과 단순 결합 가능성을 설명하되, 이 문헌을 핵심 차이점이나 새로운 상호작용의 보완 근거로 확대하지 않는다.",
+    },
+    "common_general_knowledge": {
+        "label": "인용발명 + 주지관용 검토형",
+        "description": "주 인용발명과의 차이 중 단순·통상적 구성만 주지관용 여부를 검토하고, 다른 인용발명은 결합 근거로 사용하지 않는 유형",
+        "writing_guidance": "주 인용발명의 직접 개시와 차이점을 먼저 확정하고, 표시된 구성에 한해서만 주지관용의 근거와 단순 채용 가능성을 검토한다. 다른 인용발명을 보완 근거로 기재하지 않는다.",
     },
     "single_reference": {
         "label": "단일 문헌 충분",
@@ -281,6 +293,40 @@ def _similarity_for_judgment(judgment: str) -> float:
     return _LABEL_PERCENT.get(judgment, 0) / 100.0
 
 
+def _atomic_limitation_coverage(item: Optional[Dict]) -> Optional[float]:
+    """하위 제한 evidence/missing 목록이 있을 때 원자적 커버 비율을 반환한다.
+
+    기존 캐시는 하위 제한 목록이 없으므로 None을 반환하여 과거 판정 강도를 그대로
+    유지한다. 새 캐시에서는 같은 `일부 차이` 안에서도 실제로 확인된 하위 제한 수와
+    누락된 하위 제한 수가 문헌 선정 점수에 반영된다.
+    """
+    if not item:
+        return None
+    evidence = item.get("evidence") or []
+    missing = item.get("missing_limitations") or []
+    covered_count = len([value for value in evidence if isinstance(value, dict) and value.get("quote")])
+    missing_count = len([value for value in missing if str(value).strip()])
+    denominator = covered_count + missing_count
+    if denominator == 0:
+        return None
+    return covered_count / denominator
+
+
+def _item_similarity(item: Optional[Dict]) -> float:
+    """판정 라벨과 원자적 하위 제한 커버리지를 함께 반영한 내부 강도값."""
+    if not item:
+        return 0.0
+    base = _similarity_for_judgment(item.get("judgment", "대응 없음"))
+    atomic = _atomic_limitation_coverage(item)
+    if atomic is None:
+        return base
+    # 라벨 판정을 대체하지 않고, 동일 라벨 후보 사이에서 하위 제한 누락이 많은
+    # 문헌을 보수적으로 낮추는 범위에서만 조정한다.
+    directness = str(item.get("directness") or "").strip().lower()
+    directness_factor = 1.0 if directness in {"", "direct"} else 0.9 if directness == "inferred" else 0.8
+    return base * (0.70 + 0.30 * atomic) * directness_factor
+
+
 def _weighted_average(rows: list[Dict], value_key: str = "similarity") -> float:
     numerator = 0.0
     denominator = 0.0
@@ -319,7 +365,8 @@ def _comparison_rows(cache: Optional[Dict], claims: List[ParsedClaim]) -> list[D
                 "item": item,
                 "judgment": judgment,
                 "rank": _JUDGMENT_SCORE.get(judgment, 0),
-                "similarity": _similarity_for_judgment(judgment),
+                "similarity": _item_similarity(item),
+                "atomic_coverage": _atomic_limitation_coverage(item),
                 "has_quote": bool(item.get("quote")),
             })
     return rows
@@ -632,6 +679,10 @@ def _apply_conventional_support_policy(
         chain = chains.get(claim_key)
         if not chain or not chain.get("total"):
             continue
+        if chain.get("selection_locked"):
+            # 이미 발행된 독립항 보고서의 1·2·예외적 3문헌 구성은 종속항 추가나
+            # 후속 정책 재계산으로 변경하지 않는다.
+            continue
 
         elements_by_label = {
             normalize_label(element.label): element
@@ -665,8 +716,8 @@ def _apply_conventional_support_policy(
         original_secondary = chain["total"][1] if len(chain["total"]) > 1 else None
 
         # When every primary gap is conventional, use a second document only
-        # if it gives strong, explicit evidence. Otherwise keep Template A and
-        # identify the limitations as common-general-knowledge review targets.
+        # if it gives strong, explicit evidence. Otherwise use the dedicated
+        # primary-reference + common-general-knowledge combination template.
         if not nonconventional_labels:
             support_idx, support_labels = _best_conventional_support_doc(
                 caches,
@@ -699,6 +750,14 @@ def _apply_conventional_support_policy(
                     }
                     for label in sorted(unsupported)
                 ]
+            rationale_type = (
+                "conventional_support" if support_idx is not None
+                else "common_general_knowledge"
+            )
+            chain["combination_rationale"] = _combination_rationale_for(
+                None, candidate_types=[rationale_type]
+            )
+            chain["combination_rationale_type"] = rationale_type
             continue
 
         selected = [primary_idx]
@@ -756,6 +815,14 @@ def _apply_conventional_support_policy(
                     {"label": label, "text": elements_by_label[label].text, "basis": conventional[label]}
                     for label in sorted(unsupported)
                 ]
+            rationale_type = (
+                "conventional_support" if chain.get("conventional_support")
+                else "common_general_knowledge"
+            )
+            chain["combination_rationale"] = _combination_rationale_for(
+                None, candidate_types=[rationale_type]
+            )
+            chain["combination_rationale_type"] = rationale_type
             continue
 
         chain["total"] = selected[:MAX_INDEPENDENT_REFS]
@@ -836,12 +903,10 @@ def _score_secondary_candidate_base(
 
         item = _cache_item(cache, claim_key, label)
         judgment = item.get("judgment", "대응 없음") if item else "대응 없음"
-        sim = _similarity_for_judgment(judgment)
+        sim = _item_similarity(item)
         rank = _JUDGMENT_SCORE.get(judgment, 0)
         primary_item = _cache_item(primary_cache, claim_key, label)
-        primary_sim = _similarity_for_judgment(
-            primary_item.get("judgment", "대응 없음")
-        ) if primary_item else 0.0
+        primary_sim = _item_similarity(primary_item)
         gain = max(0.0, sim - primary_sim)
         weighted_gain += base_weight * gain
         weighted_residual += base_weight * sim
@@ -980,6 +1045,8 @@ def _score_secondary_candidate(
     denominator = 0.0
     filled_target_count = 0
     filled_target_weight = 0.0
+    motivation_weight = 0.0
+    explicit_risk_labels: List[str] = []
     filled_cluster_weights: Dict[str, float] = {}
     target_clusters = _target_cluster_map(claims, targets)
 
@@ -997,6 +1064,11 @@ def _score_secondary_candidate(
 
         filled_target_count += 1
         filled_target_weight += base_weight
+        if item and item.get("motivation_quote"):
+            motivation_weight += base_weight
+        risk = str((item or {}).get("combination_risk") or "").strip().lower()
+        if risk in {"contrary_teaching", "principle_change", "incompatible"}:
+            explicit_risk_labels.append(f"{claim_key}:{label}:{risk}")
         cluster = target_clusters.get((claim_key, label), "generic")
         filled_cluster_weights[cluster] = filled_cluster_weights.get(cluster, 0.0) + base_weight
 
@@ -1008,12 +1080,27 @@ def _score_secondary_candidate(
     if len(targets) >= 3 and filled_target_count <= 1 and base_score > 0:
         single_feature_dominance_penalty = min(12.0, 8.0 + 0.06 * base_score)
 
-    adjusted_score = base_score + (8.0 * breadth) + (7.0 * cluster_consistency) - single_feature_dominance_penalty
+    motivation_evidence = motivation_weight / denominator if denominator else 0.0
+    explicit_risk_penalty = 40.0 if explicit_risk_labels else 0.0
+    adjusted_score = (
+        base_score
+        + (8.0 * breadth)
+        + (7.0 * cluster_consistency)
+        + (3.0 * motivation_evidence)
+        - single_feature_dominance_penalty
+        - explicit_risk_penalty
+    )
     enriched_detail = dict(detail)
     enriched_detail["sub_score"] = round(adjusted_score / 100.0, 4)
     enriched_detail["residual_breadth"] = round(breadth, 4)
     enriched_detail["cluster_consistency"] = round(cluster_consistency, 4)
     enriched_detail["single_feature_dominance_penalty"] = round(single_feature_dominance_penalty / 100.0, 4)
+    enriched_detail["motivation_evidence"] = round(motivation_evidence, 4)
+    enriched_detail["explicit_combination_risks"] = explicit_risk_labels
+    if explicit_risk_labels:
+        enriched_detail.setdefault("warnings", []).append(
+            "보조문헌에 반대 교시 또는 기본 작동원리 변경 위험이 명시되어 문헌쌍 채택에서 제외해야 합니다."
+        )
     return round(adjusted_score, 2), enriched_detail
 
 
@@ -1042,18 +1129,23 @@ def _combination_rationale_for(
     return data
 
 
-def _element_percents(cache: Optional[Dict], claim: ParsedClaim) -> Dict[str, int]:
-    """캐시 판정을 구성요소 라벨 → 유사도 퍼센트로 변환한다 (라벨 정규화 매칭)."""
+def _element_percents(cache: Optional[Dict], claim: ParsedClaim) -> Dict[str, float]:
+    """캐시 판정을 구성요소 라벨 → 결손 보정 유사도로 변환한다.
+
+    판정 라벨만 사용하면 `일부 유사`가 누락 제한과 직접성에 관계없이 경계값
+    35로 고정되어 완전 커버로 오인될 수 있다. 하위 제한 evidence/missing 및
+    directness를 반영하는 _item_similarity를 사용해 그 모순을 방지한다.
+    """
     if not cache:
         return {}
     items = cache.get(str(claim.claim_number), [])
     if not isinstance(items, list):
         return {}
-    out: Dict[str, int] = {}
+    out: Dict[str, float] = {}
     for item in items:
         if isinstance(item, dict):
             label = normalize_label(item.get("label"))
-            out[label] = _LABEL_PERCENT.get(item.get("judgment", "대응 없음"), 0)
+            out[label] = _item_similarity(item) * 100.0
     return out
 
 
@@ -1084,7 +1176,7 @@ def _claim_similarity(
         p_num += imp * p
         c_num += imp * c
         den += imp * 100
-        if c < UNCOVERED_PERCENT_THRESHOLD:
+        if c <= UNCOVERED_PERCENT_THRESHOLD:
             uncovered.append(e.label)
 
     if den == 0:
@@ -1135,6 +1227,340 @@ def _is_full_coverage(
     return True
 
 
+_NOVELTY_DIRECT_JUDGMENTS = {"동일", "실질적 동일"}
+
+
+def _single_document_disclosure(
+    cache: Optional[Dict],
+    claim: ParsedClaim,
+) -> Dict:
+    """단일 문헌이 청구항의 모든 필수 구성을 직접 개시하는지 심사한다.
+
+    평균 유사도나 다른 문헌의 보완 가능성은 사용하지 않는다. 각 구성요소마다
+    직접 근거, 동일·실질적 동일 판정, 누락 제한 부재가 모두 확인되어야 한다.
+    이 게이트를 통과한 문헌만 신규성 판단용 단일 문헌 후보가 된다.
+    """
+    claim_key = str(claim.claim_number)
+    items = (cache or {}).get(claim_key, [])
+    by_label = _items_by_label(items if isinstance(items, list) else [])
+    rows: List[Dict] = []
+
+    for element in claim.elements:
+        label = normalize_label(element.label)
+        item = by_label.get(label) or {}
+        judgment = item.get("judgment", "대응 없음")
+        directness = str(item.get("directness") or "").strip().lower()
+        missing = [str(value).strip() for value in (item.get("missing_limitations") or []) if str(value).strip()]
+        has_direct_quote = bool(item.get("quote"))
+        directly_disclosed = bool(
+            has_direct_quote
+            and judgment in _NOVELTY_DIRECT_JUDGMENTS
+            and directness in {"", "direct"}
+            and not missing
+        )
+        rows.append({
+            "label": element.label,
+            "judgment": judgment,
+            "directness": directness or "direct",
+            "has_quote": has_direct_quote,
+            "missing_limitations": missing,
+            "directly_disclosed": directly_disclosed,
+        })
+
+    missing_labels = [row["label"] for row in rows if not row["directly_disclosed"]]
+    return {
+        "is_complete": bool(rows) and not missing_labels,
+        "directly_disclosed_labels": [row["label"] for row in rows if row["directly_disclosed"]],
+        "missing_or_indirect_labels": missing_labels,
+        "elements": rows,
+        "rule": "단일 문헌의 직접·명백한 완전 개시만 신규성 후보로 인정",
+    }
+
+
+def _novelty_screen(
+    claim: ParsedClaim,
+    caches: Dict[int, Optional[Dict]],
+    num_docs: int,
+) -> Dict:
+    """모든 문헌을 서로 결합하지 않고 독립적으로 신규성 심사한다."""
+    candidates: List[int] = []
+    assessments: Dict[str, Dict] = {}
+    scores: Dict[int, float] = {}
+    for doc_idx in range(num_docs):
+        assessment = _single_document_disclosure(caches.get(doc_idx), claim)
+        assessments[str(doc_idx)] = assessment
+        score, _count, _detail = _score_prior_cache(caches.get(doc_idx), [claim])
+        scores[doc_idx] = score
+        if assessment["is_complete"]:
+            candidates.append(doc_idx)
+
+    selected = max(candidates, key=lambda idx: (scores.get(idx, 0.0), -idx)) if candidates else None
+    return {
+        "selected_document": selected,
+        "complete_documents": candidates,
+        "document_assessments": assessments,
+        "result": "single_document_complete" if selected is not None else "no_single_document_complete",
+    }
+
+
+# ---------------------------------------------------------------------------
+# 청구항 패밀리 및 문헌쌍 평가
+# ---------------------------------------------------------------------------
+
+def _claim_family_groups(claims: List[ParsedClaim]) -> tuple[Dict[int, List[ParsedClaim]], List[ParsedClaim]]:
+    """독립항을 루트로 하는 청구항 패밀리와 부모가 없는 종속항을 분리한다."""
+    by_number = {claim.claim_number: claim for claim in claims}
+    families: Dict[int, List[ParsedClaim]] = {
+        claim.claim_number: [claim]
+        for claim in claims
+        if claim.claim_type == "independent"
+    }
+    orphans: List[ParsedClaim] = []
+
+    for claim in claims:
+        if claim.claim_type == "independent":
+            continue
+        seen: set[int] = set()
+        current = claim
+        root_number: Optional[int] = None
+        while current.parent_claim and current.parent_claim not in seen:
+            seen.add(current.parent_claim)
+            parent = by_number.get(current.parent_claim)
+            if parent is None:
+                break
+            if parent.claim_type == "independent":
+                root_number = parent.claim_number
+                break
+            current = parent
+        if root_number is None:
+            orphans.append(claim)
+        else:
+            families.setdefault(root_number, []).append(claim)
+
+    for family_claims in families.values():
+        family_claims.sort(key=lambda item: (0 if item.claim_type == "independent" else 1, item.claim_number))
+    return families, orphans
+
+
+def _dependent_reuse_score(cache: Optional[Dict], dependent_claims: List[ParsedClaim]) -> float:
+    """여러 종속항의 고유 추가 한정을 직접 뒷받침하는 정도를 0~1로 산정한다."""
+    if not cache or not dependent_claims:
+        return 0.0
+    numerator = 0.0
+    denominator = 0.0
+    for depth_order, claim in enumerate(sorted(dependent_claims, key=lambda item: item.claim_number)):
+        claim_key = str(claim.claim_number)
+        by_label = _items_by_label(cache.get(claim_key, []) if isinstance(cache.get(claim_key, []), list) else [])
+        # 직접 종속항을 조금 더 중시하되 깊은 종속항도 배제하지 않는다.
+        depth_factor = max(0.65, 1.0 - 0.05 * depth_order)
+        for element in claim.elements:
+            weight = float(_importance_value(element.importance)) * depth_factor
+            denominator += weight
+            item = by_label.get(normalize_label(element.label), {})
+            if not item.get("quote") or str(item.get("directness") or "direct").lower() == "absent":
+                continue
+            numerator += weight * _item_similarity(item)
+    return numerator / denominator if denominator else 0.0
+
+
+def _explicit_combination_risks(
+    cache: Optional[Dict],
+    targets: set,
+) -> List[str]:
+    """비교 캐시에 명시적으로 저장된 반대 교시만 문헌쌍 위험으로 사용한다."""
+    risks: List[str] = []
+    if not cache:
+        return risks
+    for claim_key, label in targets:
+        item = _cache_item(cache, claim_key, label) or {}
+        risk = str(item.get("combination_risk") or "").strip().lower()
+        if risk in {"contrary_teaching", "incompatible", "principle_change"}:
+            risks.append(f"{claim_key}:{label}:{risk}")
+    return risks
+
+
+def _select_family_reference_pair(
+    family_claims: List[ParsedClaim],
+    caches: Dict[int, Optional[Dict]],
+    num_docs: int,
+) -> Dict:
+    """독립항 골격을 우선하면서 근접 주문헌 후보의 최적 문헌쌍을 선택한다."""
+    root = next((claim for claim in family_claims if claim.claim_type == "independent"), None)
+    if root is None:
+        return {}
+    dependent_claims = [claim for claim in family_claims if claim.claim_type == "dependent"]
+    root_key = str(root.claim_number)
+    root_keys = {root_key}
+    weights = _element_weight_map([root])
+
+    primary_scores: Dict[int, float] = {}
+    primary_details: Dict[int, Dict] = {}
+    reuse_scores: Dict[int, float] = {}
+    for doc_idx in range(num_docs):
+        score, _count, detail = _score_prior_cache(caches.get(doc_idx), [root])
+        primary_scores[doc_idx] = score
+        primary_details[doc_idx] = detail
+        reuse_scores[doc_idx] = _dependent_reuse_score(caches.get(doc_idx), dependent_claims)
+
+    # 1단계는 점수 경쟁이 아니라 단일 문헌 완전개시 심사다. 이 단계에서
+    # 통과 문헌이 있으면 다른 문헌을 붙이지 않고 신규성용 단일 체인으로 확정한다.
+    novelty_screen = _novelty_screen(root, caches, num_docs)
+    novelty_idx = novelty_screen.get("selected_document")
+    if novelty_idx is not None:
+        return {
+            "root_claim": root.claim_number,
+            "claim_numbers": [claim.claim_number for claim in family_claims],
+            "primary_idx": novelty_idx,
+            "secondary_idx": None,
+            "secondary_reason": None,
+            "secondary_detail": {},
+            "combination_validity": {
+                "coverage_complete": True,
+                "critical_uncovered_labels": [],
+                "remaining_uncovered_labels": [],
+                "motivation_and_compatibility_status": "not_applicable_single_document",
+                "rule": "단일 문헌이 모든 필수 구성을 직접 개시하므로 문헌 결합을 수행하지 않음",
+            },
+            "novelty_screen": novelty_screen,
+            "analysis_track": "novelty_single_reference",
+            "primary_scores": {str(key): value for key, value in primary_scores.items()},
+            "primary_score_details": {str(key): value for key, value in primary_details.items()},
+            "dependent_reuse_scores": {str(key): round(value, 4) for key, value in reuse_scores.items()},
+            "near_primary_candidates": [novelty_idx],
+            "pair_candidates": [],
+            "selection_method": "single_document_novelty_gate_v1",
+        }
+
+    best_primary_score = max(primary_scores.values(), default=0.0)
+    near_primary_pool = [
+        doc_idx for doc_idx, score in primary_scores.items()
+        if score >= best_primary_score - PRIMARY_NEAR_TIE_MARGIN
+    ] or ([0] if num_docs else [])
+
+    pair_candidates: List[Dict] = []
+    for primary_idx in near_primary_pool:
+        primary_cache = caches.get(primary_idx)
+        hard_gaps = _compute_primary_gaps(primary_cache, root_keys)
+        soft_gaps = _compute_soft_gaps(primary_cache, root_keys)
+        targets = hard_gaps | soft_gaps
+        best_secondary: Optional[int] = None
+        best_secondary_score = 0.0
+        best_secondary_detail: Dict = {}
+        rejected_pair_risks: Dict[str, List[str]] = {}
+
+        for secondary_idx in range(num_docs):
+            if secondary_idx == primary_idx:
+                continue
+            sub_score, sub_detail = _score_secondary_candidate(
+                caches.get(secondary_idx),
+                primary_cache,
+                [root],
+                hard_gaps,
+                soft_gaps,
+                weights,
+            )
+            reason = sub_detail.get("secondary_reason")
+            risks = _explicit_combination_risks(caches.get(secondary_idx), targets)
+            if risks:
+                rejected_pair_risks[str(secondary_idx)] = risks
+                continue
+            if sub_score <= 0 or reason not in {"hard", "soft", "support"}:
+                continue
+            reuse_tiebreak = min(
+                DEPENDENT_REUSE_TIEBREAK_MAX,
+                reuse_scores.get(secondary_idx, 0.0) * DEPENDENT_REUSE_TIEBREAK_MAX,
+            )
+            adjusted_sub_score = sub_score + reuse_tiebreak
+            if adjusted_sub_score > best_secondary_score:
+                best_secondary = secondary_idx
+                best_secondary_score = adjusted_sub_score
+                best_secondary_detail = dict(sub_detail)
+                best_secondary_detail["raw_sub_score"] = sub_score
+                best_secondary_detail["dependent_reuse_tiebreak"] = round(reuse_tiebreak, 2)
+
+        secondary_cache = caches.get(best_secondary) if best_secondary is not None else None
+        similarity = _claim_similarity(primary_cache, secondary_cache, root)
+        uncovered = set(similarity.get("uncovered_labels") or [])
+        importance_by_label = {
+            normalize_label(element.label): _importance_value(element.importance)
+            for element in root.elements
+        }
+        critical_uncovered = {
+            label for label in uncovered
+            if importance_by_label.get(normalize_label(label), 3) >= _CORE_IMPORTANCE_THRESHOLD
+        }
+        primary_reuse_tiebreak = min(
+            DEPENDENT_REUSE_TIEBREAK_MAX,
+            reuse_scores.get(primary_idx, 0.0) * DEPENDENT_REUSE_TIEBREAK_MAX,
+        )
+        pair_rank = (
+            -len(critical_uncovered),
+            -len(uncovered),
+            float(similarity.get("combined_similarity", 0.0)),
+            primary_scores.get(primary_idx, 0.0) + primary_reuse_tiebreak,
+            best_secondary_score,
+            -primary_idx,
+        )
+        secondary_reason = best_secondary_detail.get("secondary_reason") if best_secondary is not None else None
+        combination_validity = {
+            "coverage_complete": not uncovered,
+            "critical_uncovered_labels": sorted(critical_uncovered),
+            "remaining_uncovered_labels": sorted(uncovered),
+            "explicit_contrary_teaching": bool(rejected_pair_risks),
+            "rejected_pair_risks": rejected_pair_risks,
+            "motivation_and_compatibility_status": (
+                "report_substantive_review_required"
+                if best_secondary is not None
+                else "explicit_risk_blocks_available_pair"
+                if rejected_pair_risks
+                else "not_applicable"
+            ),
+            "rule": "구성 보완과 결합 동기·기술적 양립성은 별도 판단",
+        }
+        pair_candidates.append({
+            "primary_idx": primary_idx,
+            "secondary_idx": best_secondary,
+            "primary_score": primary_scores.get(primary_idx, 0.0),
+            "primary_reuse_score": round(reuse_scores.get(primary_idx, 0.0), 4),
+            "primary_reuse_tiebreak": round(primary_reuse_tiebreak, 2),
+            "secondary_score": round(best_secondary_score, 2),
+            "secondary_detail": best_secondary_detail,
+            "secondary_reason": secondary_reason,
+            "hard_gaps": sorted([f"{claim_key}:{label}" for claim_key, label in hard_gaps]),
+            "soft_gaps": sorted([f"{claim_key}:{label}" for claim_key, label in soft_gaps]),
+            "similarity": similarity,
+            "combination_validity": combination_validity,
+            "rank": pair_rank,
+        })
+
+    selected = max(pair_candidates, key=lambda item: item["rank"]) if pair_candidates else {}
+    for item in pair_candidates:
+        item.pop("rank", None)
+    if selected:
+        selected = next(
+            item for item in pair_candidates
+            if item["primary_idx"] == selected["primary_idx"]
+            and item["secondary_idx"] == selected["secondary_idx"]
+        )
+    return {
+        "root_claim": root.claim_number,
+        "claim_numbers": [claim.claim_number for claim in family_claims],
+        "primary_idx": selected.get("primary_idx", 0),
+        "secondary_idx": selected.get("secondary_idx"),
+        "secondary_reason": selected.get("secondary_reason"),
+        "secondary_detail": selected.get("secondary_detail", {}),
+        "combination_validity": selected.get("combination_validity", {}),
+        "primary_scores": {str(key): value for key, value in primary_scores.items()},
+        "primary_score_details": {str(key): value for key, value in primary_details.items()},
+        "dependent_reuse_scores": {str(key): round(value, 4) for key, value in reuse_scores.items()},
+        "near_primary_candidates": near_primary_pool,
+        "pair_candidates": pair_candidates,
+        "novelty_screen": novelty_screen,
+        "analysis_track": "inventive_step_combination",
+        "selection_method": "novelty_gate_then_gap_pair_v1",
+    }
+
+
 # ---------------------------------------------------------------------------
 # 메인: 비교 캐시 기반 체인 빌드 (v3 — 보완성 기반 secondary 선정)
 # ---------------------------------------------------------------------------
@@ -1157,6 +1583,23 @@ def build_citation_chain_from_comparisons(
        - 공백을 전혀 못 채우면 Template A (단독 인용) 사용
     3. 종속항: 부모 청구항의 인용발명을 상속 + 추가 공백 채우는 다음 인용발명 추가
     """
+    previous_chain: Dict = {}
+    previous_chain_path = Path(job_dir) / "citation_chain.json"
+    if previous_chain_path.exists():
+        try:
+            loaded_previous = json.loads(previous_chain_path.read_text(encoding="utf-8"))
+            if isinstance(loaded_previous, dict):
+                previous_chain = loaded_previous
+        except (OSError, json.JSONDecodeError):
+            logger.warning("기존 citation_chain.json을 읽지 못해 잠금 없이 재계산합니다.")
+    # 정책 버전이 달라지면 과거 점수·예외 규칙으로 잠긴 문헌 체인을 승계하지 않는다.
+    # 같은 정책 버전에서 이미 발행된 보고서만 번호와 체인을 안정적으로 유지한다.
+    selection_locks = (
+        dict(previous_chain.get("selection_locks") or {})
+        if previous_chain.get("policy_version") == CITATION_CHAIN_POLICY_VERSION
+        else {}
+    )
+
     num_docs = len(prior_docs)
     if num_docs == 0:
         return {}
@@ -1383,18 +1826,148 @@ def build_citation_chain_from_comparisons(
             f"결합 {conf['combined_similarity']}%, 미커버 {conf['uncovered_labels'] or '없음'}"
         )
 
-    # ── 5단계: 청구항별 체인 구성 ───────────────────────────────────────────
+    # ── 5단계: 독립항 패밀리별 주문헌·보조문헌 쌍 및 청구항 체인 구성 ─────
+    # 여러 독립항을 하나의 전역 주문헌으로 강제하지 않는다. 각 독립항을 루트로
+    # 독립적인 문헌쌍을 선정하고, 그 종속항만 해당 체인을 상속한다.
+    family_groups, orphan_dependents = _claim_family_groups(claims)
+    family_selections: Dict[str, Dict] = {}
     chains: Dict[str, Dict] = {}
-    _build_chains_recursive(
-        claims=claims,
-        primary_inv_idx=primary_inv_idx,
-        secondary_inv_idx=secondary_inv_idx,
-        inv_scores=inv_scores,
-        num_docs=num_docs,
-        chains=chains,
-        single_sufficient_claims=single_sufficient_claims,
-        caches=caches,
-    )
+    family_single_sufficient: set[str] = set()
+
+    for root_number, family_claims in sorted(family_groups.items()):
+        selection = _select_family_reference_pair(family_claims, caches, num_docs)
+        if not selection:
+            continue
+        lock_data = selection_locks.get(str(root_number))
+        locked_total_raw = lock_data.get("total", []) if isinstance(lock_data, dict) else lock_data or []
+        locked_total = []
+        for value in locked_total_raw:
+            try:
+                doc_idx = int(value)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= doc_idx < num_docs and doc_idx not in locked_total:
+                locked_total.append(doc_idx)
+        selection_locked = bool(locked_total)
+        if selection_locked:
+            proposed = {
+                "primary_idx": selection.get("primary_idx"),
+                "secondary_idx": selection.get("secondary_idx"),
+                "selection_method": selection.get("selection_method"),
+            }
+            family_primary = locked_total[0]
+            family_secondary = locked_total[1] if len(locked_total) > 1 else None
+            root_claim = next(claim for claim in family_claims if claim.claim_number == root_number)
+            locked_supporting = [caches.get(doc_idx) for doc_idx in locked_total[1:]]
+            locked_similarity = _claim_similarity(
+                caches.get(family_primary),
+                locked_supporting[0] if locked_supporting else None,
+                root_claim,
+                additional_caches=locked_supporting[1:],
+            )
+            selection.update({
+                "primary_idx": family_primary,
+                "secondary_idx": family_secondary,
+                "selection_locked": True,
+                "lock_reason": (
+                    lock_data.get("reason", "independent_claim_report_issued")
+                    if isinstance(lock_data, dict) else "independent_claim_report_issued"
+                ),
+                "proposed_recalculation": proposed,
+                "combination_validity": {
+                    "coverage_complete": not locked_similarity.get("uncovered_labels"),
+                    "critical_uncovered_labels": [],
+                    "remaining_uncovered_labels": locked_similarity.get("uncovered_labels", []),
+                    "motivation_and_compatibility_status": "locked_report_chain",
+                    "rule": "확정된 독립항 문헌 체인과 번호를 종속항에서 변경하지 않음",
+                },
+            })
+            previous_root_chain = dict((previous_chain.get("chains") or {}).get(str(root_number)) or {})
+            previous_root_chain.update({
+                "total": locked_total,
+                "inherited": [],
+                "added": locked_total,
+                "parent": None,
+                "family_root": root_number,
+                "family_primary_idx": family_primary,
+                "family_secondary_idx": family_secondary,
+                "selection_locked": True,
+                "lock_reason": selection.get("lock_reason"),
+                "combination_validity": selection.get("combination_validity", {}),
+            })
+            if not previous_root_chain.get("reference_roles"):
+                previous_root_chain["reference_roles"] = {
+                    str(doc_idx): "primary" if position == 0 else "substantive_secondary"
+                    for position, doc_idx in enumerate(locked_total)
+                }
+            chains[str(root_number)] = previous_root_chain
+        family_selections[str(root_number)] = selection
+        family_primary = int(selection.get("primary_idx", primary_inv_idx))
+        family_secondary = selection.get("secondary_idx")
+        root_claim = next(claim for claim in family_claims if claim.claim_number == root_number)
+        primary_only = _claim_similarity(caches.get(family_primary), None, root_claim)
+        selected_pair = next(
+            (
+                candidate for candidate in selection.get("pair_candidates", [])
+                if candidate.get("primary_idx") == family_primary
+                and candidate.get("secondary_idx") == family_secondary
+            ),
+            {},
+        )
+        if (
+            family_secondary is not None
+            and selection.get("secondary_reason") in {"soft", "support"}
+            and not selected_pair.get("hard_gaps")
+            and primary_only.get("primary_similarity", 0) >= SINGLE_SUFFICIENT_SIMILARITY
+        ):
+            family_single_sufficient.add(str(root_number))
+
+        _build_chains_recursive(
+            claims=family_claims,
+            primary_inv_idx=family_primary,
+            secondary_inv_idx=family_secondary,
+            inv_scores=inv_scores,
+            num_docs=num_docs,
+            chains=chains,
+            single_sufficient_claims=family_single_sufficient,
+            caches=caches,
+        )
+        root_chain = chains.get(str(root_number), {})
+        root_chain["family_root"] = root_number
+        root_chain["family_primary_idx"] = family_primary
+        root_chain["family_secondary_idx"] = family_secondary
+        root_chain["combination_validity"] = selection.get("combination_validity", {})
+        root_chain["analysis_track"] = selection.get("analysis_track", "inventive_step_combination")
+        root_chain["selection_method"] = selection.get("selection_method", "novelty_gate_then_gap_pair_v1")
+        root_chain["novelty_screen"] = selection.get("novelty_screen", {})
+        secondary_detail = selection.get("secondary_detail", {})
+        if selection_locked and root_chain.get("combination_rationale"):
+            family_rationale = root_chain["combination_rationale"]
+        elif family_secondary is None and selection.get("combination_validity", {}).get("remaining_uncovered_labels"):
+            family_rationale = _combination_rationale_for("insufficient", score_detail=secondary_detail)
+        else:
+            family_rationale = _combination_rationale_for(
+                selection.get("secondary_reason"),
+                candidate_types=secondary_detail.get("candidate_rationale_types"),
+                warnings=secondary_detail.get("warnings"),
+                score_detail=secondary_detail,
+            )
+        root_chain["combination_rationale"] = family_rationale
+        root_chain["combination_rationale_type"] = family_rationale["type"]
+
+    # 부모항이 없는 종속항은 기존의 보수적 fallback을 사용한다. 이미 생성된 패밀리
+    # 루트/자식은 건너뛰므로 정상 패밀리의 문헌쌍에는 영향을 주지 않는다.
+    if orphan_dependents or not family_groups:
+        _build_chains_recursive(
+            claims=claims,
+            primary_inv_idx=primary_inv_idx,
+            secondary_inv_idx=secondary_inv_idx,
+            inv_scores=inv_scores,
+            num_docs=num_docs,
+            chains=chains,
+            single_sufficient_claims=single_sufficient_claims,
+            caches=caches,
+        )
 
     conventional_doc_order = _apply_conventional_support_policy(
         chains,
@@ -1425,15 +1998,17 @@ def build_citation_chain_from_comparisons(
     # adopted by dependent claims follow the inherited independent references
     # in claim order, so a chain such as claim 1 -> claim 2 -> claim 3 is shown
     # naturally as references 1,2 -> 1,2,3 -> 1,2,3,4.
-    ordered = [primary_inv_idx]
+    ordered: List[int] = []
     ordered_claims = sorted(
         claims,
         key=lambda item: (0 if item.claim_type == "independent" else 1, item.claim_number),
     )
     for claim in ordered_claims:
-        for doc_idx in (chains.get(str(claim.claim_number), {}).get("total") or [])[1:]:
+        for doc_idx in (chains.get(str(claim.claim_number), {}).get("total") or []):
             if doc_idx not in ordered:
                 ordered.append(doc_idx)
+    if not ordered and num_docs:
+        ordered.append(primary_inv_idx)
     for doc_idx in conventional_doc_order:
         if doc_idx not in ordered:
             ordered.append(doc_idx)
@@ -1443,10 +2018,40 @@ def build_citation_chain_from_comparisons(
         reverse=True,
     )
     ordered += remaining
-    doc_name_mapping = {
-        str(doc_idx): f"인용발명 {rank + 1}"
-        for rank, doc_idx in enumerate(ordered)
-    }
+    locked_mapping = dict(previous_chain.get("doc_name_mapping") or {}) if selection_locks else {}
+    if selection_locks and not locked_mapping:
+        for lock_value in selection_locks.values():
+            if isinstance(lock_value, dict) and lock_value.get("doc_name_mapping"):
+                locked_mapping = dict(lock_value["doc_name_mapping"])
+                break
+    doc_name_mapping: Dict[str, str] = {}
+    used_numbers: set[int] = set()
+    for raw_idx, name in locked_mapping.items():
+        try:
+            doc_idx = int(raw_idx)
+        except (TypeError, ValueError):
+            continue
+        match = re.fullmatch(r"인용발명\s+(\d+)", str(name).strip())
+        if not (0 <= doc_idx < num_docs) or not match:
+            continue
+        number = int(match.group(1))
+        if number in used_numbers:
+            continue
+        doc_name_mapping[str(doc_idx)] = f"인용발명 {number}"
+        used_numbers.add(number)
+    next_number = max(used_numbers, default=0) + 1
+    for doc_idx in ordered:
+        if str(doc_idx) in doc_name_mapping:
+            continue
+        while next_number in used_numbers:
+            next_number += 1
+        doc_name_mapping[str(doc_idx)] = f"인용발명 {next_number}"
+        used_numbers.add(next_number)
+        next_number += 1
+    ordered = sorted(
+        range(num_docs),
+        key=lambda doc_idx: int(doc_name_mapping[str(doc_idx)].split()[-1]),
+    )
 
     # Confidence must follow the final per-claim chain, including an exceptional
     # third conventional-support reference or a removed weak secondary.
@@ -1461,11 +2066,25 @@ def build_citation_chain_from_comparisons(
             additional_caches=supporting[1:],
         )
 
+    # 기존 API의 전역 필드는 첫 번째 독립항 패밀리를 대표값으로 유지하되, 실제
+    # 보고서와 감사 데이터는 아래 `families` 및 청구항별 chain 값을 사용한다.
+    first_family_key = sorted(family_selections, key=lambda value: int(value))[0] if family_selections else None
+    representative_family = family_selections.get(first_family_key, {}) if first_family_key else {}
+    if representative_family:
+        primary_inv_idx = int(representative_family.get("primary_idx", primary_inv_idx))
+        secondary_inv_idx = representative_family.get("secondary_idx")
+        secondary_reason = representative_family.get("secondary_reason")
     selected_secondary_detail = (
-        secondary_candidate_details.get(secondary_inv_idx, {})
+        representative_family.get("secondary_detail", {})
+        if representative_family
+        else secondary_candidate_details.get(secondary_inv_idx, {})
         if secondary_inv_idx is not None else {}
     )
-    if secondary_inv_idx is None and (primary_gaps or soft_gaps):
+    representative_remaining = (
+        representative_family.get("combination_validity", {}).get("remaining_uncovered_labels", [])
+        if representative_family else []
+    )
+    if secondary_inv_idx is None and (representative_remaining or primary_gaps or soft_gaps):
         combination_rationale = _combination_rationale_for(
             "insufficient",
             score_detail=selected_secondary_detail,
@@ -1489,12 +2108,30 @@ def build_citation_chain_from_comparisons(
             reverse=True,
         )[:3]
     ]
+    representative_pair = next(
+        (
+            candidate for candidate in representative_family.get("pair_candidates", [])
+            if candidate.get("primary_idx") == primary_inv_idx
+            and candidate.get("secondary_idx") == secondary_inv_idx
+        ),
+        {},
+    )
+    if representative_pair:
+        gap_count = len(representative_pair.get("hard_gaps", []))
+        soft_gap_count = len(representative_pair.get("soft_gaps", []))
 
     result = {
         "policy_version": CITATION_CHAIN_POLICY_VERSION,
         "primary_inv_idx": primary_inv_idx,
         "primary_inv_name": doc_name_mapping[str(primary_inv_idx)],
-        "scoring_method": "generic_evidence_weighted_coverage_v1",
+        "scoring_method": "single_document_novelty_gate_then_difference_combination_v1",
+        "score_semantics": {
+            "report_similarity_bands_are_separate": True,
+            "internal_label_anchors": _LABEL_PERCENT,
+            "internal_ordinal_ranks": _JUDGMENT_SCORE,
+            "atomic_limitation_adjustment": True,
+            "average_score_never_overrides_missing_limitation": True,
+        },
         "inv_scores": {str(k): v for k, v in inv_scores.items()},
         "inv_match_counts": {str(k): v for k, v in inv_match_counts.items()},
         "primary_score_details": {str(k): v for k, v in primary_score_details.items()},
@@ -1502,18 +2139,51 @@ def build_citation_chain_from_comparisons(
         "secondary_candidate_scores": {str(k): v for k, v in secondary_candidate_scores.items()},
         "secondary_candidate_details": {str(k): v for k, v in secondary_candidate_details.items()},
         "secondary_candidates": secondary_candidates,
+        "families": family_selections,
+        "claim_family_policy": {
+            "single_document_novelty_first": True,
+            "novelty_requires_direct_complete_disclosure": True,
+            "no_cross_document_mosaic_for_novelty": True,
+            "separate_primary_secondary_per_independent_claim": True,
+            "primary_near_tie_margin": PRIMARY_NEAR_TIE_MARGIN,
+            "dependent_reuse_tiebreak_max": DEPENDENT_REUSE_TIEBREAK_MAX,
+            "dependent_reuse_is_tiebreak_only": True,
+            "ordered_pair_evaluation": True,
+        },
+        "analysis_tracks": {
+            family_key: selection.get("analysis_track", "inventive_step_combination")
+            for family_key, selection in family_selections.items()
+        },
+        "novelty_screens": {
+            family_key: selection.get("novelty_screen", {})
+            for family_key, selection in family_selections.items()
+        },
         "gap_evidence_matrix": _build_gap_evidence_matrix(
             caches, claims, primary_inv_idx, num_docs
         ),
+        "family_gap_evidence_matrices": {
+            family_key: _build_gap_evidence_matrix(
+                caches,
+                family_groups.get(int(family_key), []),
+                int(selection.get("primary_idx", primary_inv_idx)),
+                num_docs,
+            )
+            for family_key, selection in family_selections.items()
+        },
         "doc_name_mapping": doc_name_mapping,
+        "selection_locks": selection_locks,
         "primary_gaps_count": gap_count,
         "soft_gaps_count": soft_gap_count,
         "secondary_reason": secondary_reason,
         "combination_rationale": combination_rationale,
         "combination_rationale_type": combination_rationale["type"],
-        "single_sufficient_claims": sorted(single_sufficient_claims),
-        "secondary_comp_score": complementarity_scores.get(secondary_inv_idx, 0)
-                                 if secondary_inv_idx is not None else 0,
+        "single_sufficient_claims": sorted(set(single_sufficient_claims) | set(family_single_sufficient)),
+        "secondary_comp_score": (
+            selected_secondary_detail.get("raw_sub_score", selected_secondary_detail.get("sub_score", 0))
+            if representative_family
+            else complementarity_scores.get(secondary_inv_idx, 0)
+            if secondary_inv_idx is not None else 0
+        ),
         "conventional_support_policy": {
             "normal_max_references": MAX_INDEPENDENT_REFS,
             "exceptional_max_references": MAX_INDEPENDENT_REFS_WITH_CONVENTIONAL_SUPPORT,
@@ -1660,6 +2330,10 @@ def _build_chains_recursive(
                 "inherited": inherited,
                 "added": added,
                 "parent": parent_num,
+                "family_root": (
+                    chains.get(parent_key, {}).get("family_root", parent_num)
+                    if parent_key else None
+                ),
                 "parent_available": parent_available,
                 "coverage_complete": not uncovered_labels,
                 "uncovered_labels": sorted(uncovered_labels),
@@ -1702,6 +2376,22 @@ def _dependent_added_inv(
     def _items(doc_idx: int) -> list:
         items = (caches.get(doc_idx) or {}).get(claim_key, [])
         return items if isinstance(items, list) else []
+
+    def _cross_claim_reuse_count(doc_idx: int) -> int:
+        """동점 후보 중 다른 종속항에도 직접 재사용 가능한 문헌을 우선한다."""
+        cache = caches.get(doc_idx) or {}
+        count = 0
+        for other_key, values in cache.items():
+            if str(other_key).startswith("_") or str(other_key) == claim_key or not isinstance(values, list):
+                continue
+            if any(
+                item.get("quote")
+                and _JUDGMENT_SCORE.get(item.get("judgment", "대응 없음"), 0) >= _SECONDARY_FILL_THRESHOLD
+                for item in values
+                if isinstance(item, dict)
+            ):
+                count += 1
+        return count
 
     inherited_best: Dict[str, int] = {}
     all_labels: set = set(expected_labels or set())
@@ -1782,6 +2472,7 @@ def _dependent_added_inv(
             "full_cover": full_cover,
             "strongly_covered_labels": sorted(strongly_covered),
             "improved_with_quote_labels": sorted(improved),
+            "cross_claim_reuse_count": _cross_claim_reuse_count(doc_idx),
             "labels": label_details,
         }
         trace["candidate_scores"].append(candidate)
@@ -1796,8 +2487,8 @@ def _dependent_added_inv(
         # 보존하고, 나머지 공백은 coverage_complete/uncovered_labels에 남긴다.
         pool = candidates
     elif len(targets) == 1:
-        # 판정이 `차이`라 점수 증가분은 없어도 단일 추가 한정의 직접 발췌는
-        # 보고서에서 검토할 가치가 있으므로 마지막 부분 근거로 보존한다.
+        # 단순히 관련 발췌가 존재한다는 이유만으로 `차이` 문헌을 실제 결합 체인에
+        # 승격하지 않는다. 최소한 일부 유사 판정이 있는 문헌만 부분 근거로 보존한다.
         target_label = next(iter(targets))
         pool = []
         for doc_idx in range(num_docs):
@@ -1812,6 +2503,8 @@ def _dependent_added_inv(
             )
             if item and item.get("quote"):
                 rank = _JUDGMENT_SCORE.get(item.get("judgment", "대응 없음"), 0)
+                if rank < _DEPENDENT_PARTIAL_SUPPORT_THRESHOLD:
+                    continue
                 pool.append({
                     "doc_idx": doc_idx,
                     "score": float(rank),
@@ -1821,7 +2514,14 @@ def _dependent_added_inv(
         pool = []
     if not pool:
         return [], trace
-    selected = max(pool, key=lambda candidate: (candidate["score"], -candidate["doc_idx"]))
+    selected = max(
+        pool,
+        key=lambda candidate: (
+            candidate["score"],
+            candidate.get("cross_claim_reuse_count", 0),
+            -candidate["doc_idx"],
+        ),
+    )
     trace["selected_document"] = selected["doc_idx"]
     trace["selection_basis"] = (
         "single_document_full_gap_filler"
@@ -1882,7 +2582,16 @@ def get_claim_chain_info(chain_data: Dict, claim_number: int) -> Optional[Dict]:
     chain_with_mapping["quantitative_assessment"] = (
         chain_data.get("quantitative_assessment", {}).get(str(claim_number))
     )
-    if len(chain_with_mapping.get("total", [])) > 1:
+    if (
+        len(chain_with_mapping.get("total", [])) == 1
+        and chain_with_mapping.get("common_general_knowledge")
+    ):
+        rationale = _combination_rationale_for(
+            None, candidate_types=["common_general_knowledge"]
+        )
+        chain_with_mapping["combination_rationale"] = rationale
+        chain_with_mapping["combination_rationale_type"] = "common_general_knowledge"
+    elif len(chain_with_mapping.get("total", [])) > 1:
         conventional_support = chain_with_mapping.get("conventional_support") or {}
         if conventional_support.get("position") == 2:
             rationale = dict(_COMBINATION_RATIONALES["conventional_support"])
@@ -1896,8 +2605,18 @@ def get_claim_chain_info(chain_data: Dict, claim_number: int) -> Optional[Dict]:
             chain_with_mapping["combination_rationale"] = rationale
             chain_with_mapping["combination_rationale_type"] = "conventional_support"
         else:
-            chain_with_mapping["combination_rationale"] = chain_data.get("combination_rationale")
-            chain_with_mapping["combination_rationale_type"] = chain_data.get("combination_rationale_type")
+            chain_with_mapping["combination_rationale"] = (
+                chain.get("combination_rationale") or chain_data.get("combination_rationale")
+            )
+            chain_with_mapping["combination_rationale_type"] = (
+                chain.get("combination_rationale_type") or chain_data.get("combination_rationale_type")
+            )
+    elif chain.get("combination_rationale"):
+        chain_with_mapping["combination_rationale"] = chain.get("combination_rationale")
+        chain_with_mapping["combination_rationale_type"] = chain.get("combination_rationale_type")
+    family_root = chain.get("family_root")
+    if family_root is not None:
+        chain_with_mapping["family_selection"] = chain_data.get("families", {}).get(str(family_root), {})
     return chain_with_mapping
 
 

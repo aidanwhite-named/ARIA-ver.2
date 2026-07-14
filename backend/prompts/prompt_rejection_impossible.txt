@@ -6,6 +6,7 @@ ${claim_text}
 [구성요소 분해]
 ${elements_text}
 
+${reference_scope_block}
 [확인된 구성요소 대비 데이터]
 ${comp_text}
 

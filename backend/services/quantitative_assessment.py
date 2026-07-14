@@ -179,39 +179,5 @@ def assess_claims(claims, document_caches: List[Optional[Dict]], chains: Optiona
 
 
 def format_assessment_markdown(assessment: Optional[Dict]) -> str:
-    """보고서에 삽입할 중립적 요약을 만든다."""
-    if not assessment:
-        return ""
-    metrics = assessment.get("metrics") or {}
-    uncovered = assessment.get("uncovered_labels") or []
-    critical = assessment.get("critical_uncovered_labels") or []
-    lines = [
-        "[정량평가 - 분석 보조지표]",
-        "",
-        f"- 주 문헌 커버리지: {metrics.get('primary_coverage', 0):.1f}",
-        f"- 결합 커버리지: {metrics.get('combined_coverage', 0):.1f}",
-        f"- 근거 조정 강도: {metrics.get('evidence_strength', 0):.1f}",
-        f"- 평가 신뢰도: {metrics.get('assessment_reliability', 0):.1f}",
-        f"- 보조 문헌 의존도: {metrics.get('complement_dependency', 0):.1f}",
-        f"- 미커버 구성: {', '.join(map(str, uncovered)) if uncovered else '없음'}",
-        f"- 고중요도 미커버 구성: {', '.join(map(str, critical)) if critical else '없음'}",
-        "- 주의: 위 수치는 구조화된 구성대비와 출처 존재 여부를 집계한 분석 보조지표이며, "
-        "선행기술 적격일·결합 동기·통상의 지식·법적 결론을 포함하지 않습니다.",
-    ]
-    dependency = assessment.get("dependency") or {}
-    if dependency:
-        lines.extend([
-            "",
-            "[종속항 추가한정 평가]",
-            "",
-            f"- 부모 청구항: 제{dependency.get('parent_claim')}항",
-            f"- 상속 문헌 인덱스: {dependency.get('inherited_documents') or '없음'}",
-            f"- 추가 문헌 인덱스: {dependency.get('added_documents') or '없음'}",
-            f"- 상속 문헌 커버리지: {dependency.get('inherited_coverage', 0):.1f}",
-            f"- 추가 문헌 적용 후 커버리지: {dependency.get('coverage_after_added_documents', 0):.1f}",
-            f"- 추가 문헌에 의한 증가분: {dependency.get('coverage_gain', 0):.1f}",
-            f"- 판단 근거: {dependency.get('basis_summary', '')}",
-            f"- 문헌 선정 기준: {dependency.get('selection_basis') or '추가 문헌 없음'}",
-            "- 평가 범위: 부모항 전체를 재평가하지 않고 해당 종속항에 새로 부가된 한정을 평가합니다.",
-        ])
-    return "\n".join(lines)
+    """정량평가 데이터는 내부 검색/감사용으로만 유지하고 보고서에는 출력하지 않는다."""
+    return ""

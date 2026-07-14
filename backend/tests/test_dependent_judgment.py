@@ -59,3 +59,19 @@ def test_inherited_coverage_does_not_add_redundant_document():
     )
     assert added == []
     assert trace["selection_basis"] == "covered_by_inherited"
+
+
+def test_difference_quote_is_not_promoted_to_dependent_reference():
+    caches = {
+        0: {"2": [_item("A", "대응 없음")]},
+        1: {"2": [_item("A", "차이", "only related background")]},
+    }
+
+    added, trace = _dependent_added_inv(
+        "2", [0], caches, 2,
+        expected_labels={"A"},
+        expected_importance_by_label={"A": 5},
+    )
+
+    assert added == []
+    assert trace["selection_basis"] == "no_candidate"

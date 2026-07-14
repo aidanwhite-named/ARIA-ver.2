@@ -5,6 +5,7 @@ import rehypeRaw from 'rehype-raw'
 import { addManualClaim, streamPrepare, streamReport, reportBatchDependent, getDependentBatchStatus, uploadFiles, getContextInfo, clearContext, checkJobStatus, detectCategory, deleteJob, deleteAllJobs, cancelGeneration, getMissingPriorArt } from './api/client'
 import ClaimAnalysisWindow from './components/ClaimAnalysisWindow'
 import MissingPriorArtSearch from './components/MissingPriorArtSearch'
+import { splitMissingPriorArtMarkdown } from './utils/missingPriorArt'
 
 import FilePanel from './components/FilePanel'
 import ProgressPanel from './components/ProgressPanel'
@@ -309,8 +310,8 @@ function ReportParagraph({ children }) {
   if (/^\[(인용발명\s*\d+\s*단독\(신규성\)|인용발명\s*\d+\s*\+\s*주지관용\(진보성\)|인용발명\s*\d+\s*과\s*인용발명\s*\d+\s*의\s*결합(?:\s*및\s*주지관용)?\(진보성\))\]$/.test(trimmed)) {
     return <p className="mt-2 mb-5 text-xl font-bold tracking-tight text-slate-950">{children}</p>
   }
-  if (/^\[(구성대비|종합분석요약|구성요소|종합 판단|유사점|차이점|결론|정량평가 - 분석 보조지표|종속항 추가한정 평가)\]$/.test(trimmed)) {
-    const isMajor = /^\[(구성대비|종합분석요약|종합 판단|정량평가 - 분석 보조지표|종속항 추가한정 평가)\]$/.test(trimmed)
+  if (/^\[(구성대비|종합분석요약|구성요소|종합 판단|유사점|차이점|결론)\]$/.test(trimmed)) {
+    const isMajor = /^\[(구성대비|종합분석요약|종합 판단)\]$/.test(trimmed)
     const isDiff = trimmed === '[차이점]'
     const isSimilar = trimmed === '[유사점]'
     const isConclusion = trimmed === '[결론]'
@@ -482,12 +483,16 @@ function preprocessReport(md) {
     const claimRe = String.raw`<div class="phase1-field phase1-field-claim"><div class="phase1-field-label">청구항 구성<\/div>(?:<div class="phase1-field-body">([\s\S]*?)<\/div>)?<\/div>`
     return text.replace(
       new RegExp(`^${judgmentRe}\\s*\\n+${claimRe}`, 'gm'),
-      (_, judgment, claimBody = '') => (
-        `<div class="phase1-judgment-card">` +
-        `<div class="phase1-judgment-line">${escapeHtml(judgment)}</div>` +
-        (claimBody ? `<div class="phase1-judgment-claim">${claimBody}</div>` : '') +
-        `</div>`
-      )
+      (_, judgment, claimBody = '') => {
+        const pct = (judgment.match(/(\d+%)\s*$/) || [])[1] || ''
+        const presentation = similarityPresentation(pct)
+        return (
+          `<div class="phase1-judgment-card ${presentation.row}">` +
+          `<div class="phase1-judgment-line">${escapeHtml(judgment)}${pct ? ` <span aria-hidden="true">${presentation.symbol}</span>` : ''}</div>` +
+          (claimBody ? `<div class="phase1-judgment-claim">${claimBody}</div>` : '') +
+          `</div>`
+        )
+      }
     )
   }
 
@@ -710,18 +715,9 @@ function removeRejectionBasisHeader(md) {
   ).replace(/^\s*\n/, '')
 }
 
-function extractQuantitativeAssessment(md) {
-  const source = String(md || '')
-  const match = source.match(/^\s*\[정량평가\s*-\s*분석 보조지표\]\s*$/m)
-  if (!match) return ''
-  const start = match.index + match[0].length
-  const next = source.slice(start).search(/^\s*\[[^\]]+\]\s*$/m)
-  return source.slice(start, next >= 0 ? start + next : source.length).trim()
-}
-
 function removeQuantitativeAssessment(md) {
   return String(md || '').replace(
-    /^\s*\[정량평가\s*-\s*분석 보조지표\]\s*$[\s\S]*?(?=^\s*\[[^\]]+\]\s*$|\s*$)/m,
+    /^\s*\[정량평가\s*-\s*분석 보조지표\]\s*$[\s\S]*?(?=^\s*\[(?!종속항 추가한정 평가\])[^\]]+\]\s*$|(?![\s\S]))/m,
     ''
   ).replace(/^\s*\n/, '')
 }
@@ -954,7 +950,19 @@ function HistoryPanel({ history, onSelect, onDelete, onClearLocal, onClearAll, o
   )
 }
 
+const missingPriorArtMarkdownComponents = {
+  a: ({ node: _node, className = '', ...props }) => (
+    <a
+      {...props}
+      target="_blank"
+      rel="noreferrer"
+      className={`break-all text-indigo-700 underline decoration-indigo-300 underline-offset-2 hover:text-indigo-900 ${className}`}
+    />
+  ),
+}
+
 function MissingPriorArtResultPage({ result, onBack }) {
+  const content = splitMissingPriorArtMarkdown(result.result_md || '')
   return (
     <div className="mx-auto max-w-5xl px-6 py-5">
       <div className="mb-5 flex items-center gap-3 border-b border-slate-200 pb-4">
@@ -982,9 +990,141 @@ function MissingPriorArtResultPage({ result, onBack }) {
           <span className="rounded-full bg-amber-100 px-2 py-0.5 font-medium text-amber-700">후보 부족으로 자동 확장</span>
         )}
       </div>
-      <div className="prose prose-sm max-w-none rounded-xl border border-slate-200 bg-white p-5 text-slate-700">
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{result.result_md || ''}</ReactMarkdown>
-      </div>
+      {content.candidates.length > 0 ? (
+        <div className="space-y-5">
+          {content.prefix && (
+            <div className="prose prose-sm max-w-none rounded-xl border border-slate-200 bg-white p-5 text-slate-700">
+              <ReactMarkdown remarkPlugins={[remarkGfm]} components={missingPriorArtMarkdownComponents}>
+                {content.prefix}
+              </ReactMarkdown>
+            </div>
+          )}
+          <section>
+            <h3 className="mb-3 text-base font-bold text-slate-900">후보 문헌</h3>
+            <div className="space-y-4">
+              {content.candidates.map((candidate, index) => (
+                <article
+                  key={`${candidate.title}-${index}`}
+                  className="rounded-xl border border-indigo-100 bg-white p-5 shadow-sm"
+                >
+                  <div className="mb-3 flex flex-wrap items-start justify-between gap-2 border-b border-slate-100 pb-3">
+                    <h4 className="text-sm font-bold leading-6 text-slate-900">{candidate.title}</h4>
+                    {candidate.category && (
+                      <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-[11px] font-semibold text-indigo-700">
+                        {candidate.category}
+                      </span>
+                    )}
+                  </div>
+                  <div className="prose prose-sm max-w-none text-slate-700 prose-li:my-1.5">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={missingPriorArtMarkdownComponents}>
+                      {candidate.body}
+                    </ReactMarkdown>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+          {content.suffix && (
+            <div className="prose prose-sm max-w-none rounded-xl border border-slate-200 bg-white p-5 text-slate-700">
+              <ReactMarkdown remarkPlugins={[remarkGfm]} components={missingPriorArtMarkdownComponents}>
+                {content.suffix}
+              </ReactMarkdown>
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="prose prose-sm max-w-none rounded-xl border border-slate-200 bg-white p-5 text-slate-700">
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={missingPriorArtMarkdownComponents}>
+            {content.prefix}
+          </ReactMarkdown>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function parseRelatedASections(markdown) {
+  const lines = sanitizeReportText(markdown).split(/\r?\n/)
+  const sections = []
+  let current = null
+  let currentCard = null
+
+  const startSection = (title = '') => {
+    current = { title, intro: [], cards: [] }
+    sections.push(current)
+    currentCard = null
+  }
+
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed === '---') continue
+    if (/^##\s*관련도\s*A\s*인용발명\s*$/.test(trimmed)) continue
+
+    const claimMatch = trimmed.match(/^###\s+청구항\s+(.+)$/)
+    if (claimMatch) {
+      startSection(`청구항 ${claimMatch[1]}`)
+      continue
+    }
+
+    const inventionMatch = trimmed.match(/^\*\*(.+?)\*\*\s*(?:\((.*?)\))?\s*$/)
+    if (inventionMatch) {
+      if (!current) startSection()
+      currentCard = {
+        name: inventionMatch[1].trim(),
+        filename: (inventionMatch[2] || '').trim(),
+        body: [],
+      }
+      current.cards.push(currentCard)
+      continue
+    }
+
+    if (!current) startSection()
+    if (currentCard) currentCard.body.push(line)
+    else current.intro.push(line)
+  }
+
+  return sections.filter(section => section.title || section.intro.some(Boolean) || section.cards.length > 0)
+}
+
+function RelatedAReport({ markdown }) {
+  const sections = parseRelatedASections(markdown)
+  return (
+    <div className="related-a-report space-y-7">
+      {sections.map((section, sectionIndex) => (
+        <section key={`${section.title}-${sectionIndex}`} className="space-y-4">
+          {section.title && (
+            <h2 className="mb-0 flex items-center gap-2 border-b border-slate-200 pb-3 text-lg font-bold text-slate-900">
+              <span className="h-5 w-1 rounded-full bg-blue-500" />
+              {section.title}
+            </h2>
+          )}
+          {section.intro.some(Boolean) && (
+            <div className="prose prose-sm max-w-none rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-slate-600">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{section.intro.join('\n')}</ReactMarkdown>
+            </div>
+          )}
+          {section.cards.length > 0 && (
+            <div className="grid gap-4 grid-cols-1">
+              {section.cards.map((card, cardIndex) => (
+                <article
+                  key={`${card.name}-${cardIndex}`}
+                  className="rounded-xl border border-blue-100 bg-white p-5 shadow-sm ring-1 ring-slate-100"
+                >
+                  <header className="mb-4 border-b border-slate-100 pb-3">
+                    <h3 className="text-base font-bold leading-6 text-slate-900">{card.name}</h3>
+                    {card.filename && (
+                      <p className="mt-1 break-all text-xs font-medium text-slate-500">{card.filename}</p>
+                    )}
+                  </header>
+                  <div className="prose prose-sm max-w-none text-slate-700 prose-li:my-1.5">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{card.body.join('\n').trim()}</ReactMarkdown>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+      ))}
     </div>
   )
 }
@@ -1012,8 +1152,9 @@ export default function App() {
   const [missingPriorArt, setMissingPriorArt] = useState(null)
   const [showMissingPriorArt, setShowMissingPriorArt] = useState(false)
   const rejectionBasisHeader = extractRejectionBasisHeader(report)
+  const citationBasisLabel = usedInventions[0]?.basis_label
+    || rejectionBasisHeader.replace(/^\[|\]$/g, '')
   const reportWithoutRejectionBasisHeader = removeRejectionBasisHeader(report)
-  const quantitativeAssessment = extractQuantitativeAssessment(reportWithoutRejectionBasisHeader)
   const reportForDisplay = removeQuantitativeAssessment(reportWithoutRejectionBasisHeader)
 
   // 히스토리
@@ -1671,12 +1812,12 @@ export default function App() {
                   {!isRelatedATabActive && usedInventions.length > 0 && (
                     <section className="mb-4 flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
                       <p className="text-sm font-bold tracking-tight text-slate-900 shrink-0">인용발명</p>
-                      {rejectionBasisHeader && (
-                        <p className="basis-full order-first mb-1 text-base font-extrabold tracking-tight text-slate-950">
-                          {rejectionBasisHeader}
-                        </p>
-                      )}
                       <div className="flex min-w-0 flex-1 flex-wrap gap-1.5">
+                        {citationBasisLabel && (
+                          <span className="inline-flex items-center rounded-md border border-blue-200 bg-blue-50 px-2 py-1 text-xs font-extrabold text-blue-900">
+                            {citationBasisLabel}
+                          </span>
+                        )}
                         {usedInventions.map((inv, i) => (
                           <span
                             key={i}
@@ -1687,14 +1828,6 @@ export default function App() {
                             <span className="min-w-0 truncate font-medium text-slate-600">{inv.filename}</span>
                           </span>
                         ))}
-                      </div>
-                    </section>
-                  )}
-                  {!isRelatedATabActive && quantitativeAssessment && (
-                    <section className="mb-4 rounded-lg border border-violet-200 bg-violet-50/60 px-4 py-3">
-                      <p className="mb-2 text-sm font-bold tracking-tight text-violet-900">정량평가</p>
-                      <div className="prose prose-sm max-w-none text-violet-950">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{quantitativeAssessment}</ReactMarkdown>
                       </div>
                     </section>
                   )}
@@ -1710,15 +1843,19 @@ export default function App() {
                       onResult={handleMissingPriorArtResult}
                     />
                   )}
-                  <div className="report-content phase1-report-content prose max-w-none">
-                    <ReactMarkdown
-                      remarkPlugins={[remarkGfm]}
-                      rehypePlugins={[rehypeRaw]}
-                      components={{ p: ReportParagraph, h3: Phase1H3, li: Phase1ListItem }}
-                    >
-                      {preprocessPhase1Report(reportForDisplay)}
-                    </ReactMarkdown>
-                  </div>
+                  {isRelatedATabActive ? (
+                    <RelatedAReport markdown={reportForDisplay} />
+                  ) : (
+                    <div className="report-content phase1-report-content prose max-w-none">
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        rehypePlugins={[rehypeRaw]}
+                        components={{ p: ReportParagraph, h3: Phase1H3, li: Phase1ListItem }}
+                      >
+                        {preprocessPhase1Report(reportForDisplay)}
+                      </ReactMarkdown>
+                    </div>
+                  )}
                 </>
               ) : (
                 <div className="h-full flex items-center justify-center text-gray-400 text-sm">

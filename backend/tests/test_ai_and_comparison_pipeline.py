@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from backend.models.schemas import (
+    BatchDependentRequest,
     ClaimElement,
     ElementMatch,
     ExtractedDocument,
@@ -77,6 +78,55 @@ class RejectionBasisHeaderTests(unittest.TestCase):
             is_novelty=True,
         )
         self.assertEqual(header, "[인용발명 1 단독(신규성)]")
+
+    def test_third_substantive_reference_is_named_instead_of_called_common_knowledge(self):
+        header = format_rejection_basis_header(
+            "인용발명 1",
+            "인용발명 2",
+            "인용발명 3",
+            is_combo=True,
+            chain_info={},
+        )
+
+        self.assertEqual(
+            header,
+            "[인용발명 1, 인용발명 2 및 인용발명 3의 결합(진보성)]",
+        )
+
+    def test_explicit_conventional_third_reference_keeps_common_knowledge_header(self):
+        header = format_rejection_basis_header(
+            "인용발명 1",
+            "인용발명 2",
+            "인용발명 3",
+            is_combo=True,
+            chain_info={"conventional_support": {"position": 2}},
+        )
+
+        self.assertEqual(
+            header,
+            "[인용발명 1과 인용발명 2의 결합 및 주지관용(진보성)]",
+        )
+
+    def test_dependent_additional_match_cannot_create_novelty_when_parent_is_combination(self):
+        matches = [
+            ElementMatch(
+                label="A",
+                cited_invention_index=1,
+                judgment="동일",
+                directness="direct",
+                quote="actor identities",
+            )
+        ]
+        chain_info = {
+            "total": [1],
+            "parent": 1,
+            "family_selection": {"analysis_track": "inventive_step_combination"},
+            "doc_name_mapping": {"1": "인용발명 1"},
+        }
+
+        header = analyze_router._rejection_basis_header(chain_info, matches)
+
+        self.assertEqual(header, "[인용발명 1 단독(진보성 검토)]")
 
 
 def _varint(value: int) -> bytes:
@@ -492,7 +542,7 @@ class ComparisonParsingTests(unittest.TestCase):
 
 
 class ManualClaimRegistrationTests(unittest.TestCase):
-    def test_changed_claim_invalidates_its_comparisons_and_job_reports(self):
+    def test_changed_dependent_claim_preserves_parent_report_context_and_chain(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             uploads = root / "uploads"
@@ -548,9 +598,10 @@ class ManualClaimRegistrationTests(unittest.TestCase):
             self.assertIn("1", cache)
             self.assertNotIn("2", cache)
             self.assertEqual(result["parent_claim"], 1)
-            self.assertFalse((job_dir / "citation_chain.json").exists())
-            self.assertFalse((job_dir / "context.json").exists())
-            self.assertFalse(list(reports.glob(f"report_{job_id}_claim*.*")))
+            self.assertTrue((job_dir / "citation_chain.json").exists())
+            self.assertTrue((job_dir / "context.json").exists())
+            self.assertTrue((reports / f"report_{job_id}_claim1.md").exists())
+            self.assertFalse((reports / f"report_{job_id}_claim2.md").exists())
             self.assertFalse((case_reports / "claim2.md").exists())
 
     def test_enhanced_claim_invalidates_comparison_and_report_state(self):
@@ -601,10 +652,64 @@ class ManualClaimRegistrationTests(unittest.TestCase):
                 (cases / job_id / "parsed" / "claims.json").read_text(encoding="utf-8")
             )
             self.assertNotIn("1", cache)
-            self.assertFalse((job_dir / "citation_chain.json").exists())
+            self.assertTrue((job_dir / "citation_chain.json").exists())
             self.assertFalse((reports / f"report_{job_id}_claim1.md").exists())
             self.assertEqual(result["elements"][0]["text"], "new feature")
             self.assertEqual(case_claims[0]["elements"][0]["text"], "new feature")
+
+    def test_clear_context_resets_citation_numbering_but_keeps_comparison_cache(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            uploads = root / "uploads"
+            reports = root / "reports"
+            cases = root / "cases"
+            job_id = "JOB-CLEAR"
+            job_dir = uploads / job_id
+            case_dir = cases / job_id
+            case_reports = case_dir / "reports"
+            parsed_dir = case_dir / "parsed"
+            job_dir.mkdir(parents=True)
+            reports.mkdir(parents=True)
+            case_reports.mkdir(parents=True)
+            parsed_dir.mkdir(parents=True)
+
+            claim = ParsedClaim(
+                claim_number=1,
+                claim_type="independent",
+                text="독립항",
+                elements=[ClaimElement(label="A", text="구성")],
+            )
+            (job_dir / "claims.json").write_text(
+                json.dumps([claim.model_dump()], ensure_ascii=False), encoding="utf-8"
+            )
+            (job_dir / "context.json").write_text("[]", encoding="utf-8")
+            (job_dir / "citation_chain.json").write_text(
+                json.dumps({"selection_locks": {"1": {"total": [0, 1]}}}),
+                encoding="utf-8",
+            )
+            (job_dir / "same_pairs.json").write_text("{}", encoding="utf-8")
+            comparison = job_dir / "comparisons_0.json"
+            comparison.write_text(json.dumps({"1": [{"label": "A"}]}), encoding="utf-8")
+            (parsed_dir / "citation_chain.json").write_text("{}", encoding="utf-8")
+            (reports / f"report_{job_id}_claim1.md").write_text("old", encoding="utf-8")
+            (case_reports / "claim1.md").write_text("old", encoding="utf-8")
+
+            with (
+                patch.object(analyze_router, "UPLOADS_DIR", uploads),
+                patch.object(analyze_router, "REPORTS_DIR", reports),
+                patch.object(analyze_router, "CASES_DIR", cases),
+                patch.object(analyze_router, "save_reference_entries_sqlite"),
+            ):
+                result = __import__("asyncio").run(analyze_router.clear_context(job_id))
+
+            self.assertTrue(result["citation_numbering_reset"])
+            self.assertTrue(comparison.exists())
+            self.assertFalse((job_dir / "context.json").exists())
+            self.assertFalse((job_dir / "citation_chain.json").exists())
+            self.assertFalse((job_dir / "same_pairs.json").exists())
+            self.assertFalse((parsed_dir / "citation_chain.json").exists())
+            self.assertFalse((reports / f"report_{job_id}_claim1.md").exists())
+            self.assertFalse((case_reports / "claim1.md").exists())
 
 
 class IntegratedComparisonTests(unittest.IsolatedAsyncioTestCase):
@@ -624,6 +729,8 @@ class IntegratedComparisonTests(unittest.IsolatedAsyncioTestCase):
                     "chunk_id": "[T1]",
                     "judgment": "실질적 동일",
                     "판단_이유": "첫 번째 문헌의 센서가 대응한다.",
+                    "directness": "direct",
+                    "missing_limitations": [],
                 },
                 {
                     "label": "A",
@@ -667,6 +774,10 @@ class IntegratedComparisonTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(cache["_meta"]["comparison_mode"], "hybrid")
                 self.assertIn("1", cache)
+                self.assertEqual(cache["1"][0]["llm_judgment"], cache["1"][0]["judgment"])
+                self.assertFalse(cache["1"][0]["judgment_adjusted"])
+                self.assertEqual(cache["1"][0]["directness"], "direct")
+                self.assertEqual(cache["1"][0]["missing_limitations"], [])
 
     async def test_invalid_hybrid_schema_falls_back_to_per_document(self):
         elements = [ClaimElement(label="A", text="sensor")]
@@ -756,6 +867,42 @@ class IntegratedComparisonTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(len(block), 90_000)
         self.assertLess(len(block), sum(len(doc.raw_text) for doc in docs))
 
+    async def test_mixed_mode_keeps_late_english_evidence_for_korean_claim(self):
+        elements = [ClaimElement(
+            label="B",
+            text=(
+                "텍스트 데이터를 분할하여 획득된 복수의 텍스트 세그먼트들을 "
+                "세그먼트들 간의 연속성에 기반한 씬 데이터로 그룹핑"
+            ),
+        )]
+        filler = {
+            f"[{idx:04d}]": ("generic apparatus description " * 40)
+            for idx in range(1, 81)
+        }
+        filler["[0060]"] = (
+            "dividing subtitles into topics, dividing video data into shots at scene boundaries, "
+            "and aligning the shorts with the video shots to create content segments"
+        )
+        filler["[0075]"] = (
+            "dividing utterances into sentences, computing semantic similarity between adjacent "
+            "sentences, and merging the adjacent sentences into a block"
+        )
+        docs = [ExtractedDocument(filename="english-prior.pdf", paragraphs=filler)] + [
+            ExtractedDocument(
+                filename=f"other-{idx}.pdf",
+                raw_text=(chr(65 + idx) * 30_000),
+            )
+            for idx in range(1, 5)
+        ]
+        settings = Settings(engine="agy", comparison_mode="mixed")
+
+        block = _build_hybrid_docs_block(docs, elements, settings=settings)
+        first_doc = block.split("\n\n---\n\n", 1)[0]
+
+        self.assertIn("[0060]", first_doc)
+        self.assertIn("[0075]", first_doc)
+        self.assertIn("semantic similarity between adjacent sentences", first_doc)
+
 
 class BatchStatusHeartbeatTests(unittest.IsolatedAsyncioTestCase):
     async def test_heartbeat_timeout_does_not_cancel_work(self):
@@ -777,6 +924,125 @@ class BatchStatusHeartbeatTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, "done")
         self.assertGreaterEqual(update_status.call_count, 1)
+
+
+class DependentParentCacheRestorationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_dependent_batch_restores_missing_parent_comparisons_before_chain_build(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            uploads = root / "uploads"
+            reports = root / "reports"
+            cases = root / "cases"
+            job_id = "JOB-PARENT-RESTORE"
+            job_dir = uploads / job_id
+            job_dir.mkdir(parents=True)
+            reports.mkdir(parents=True)
+
+            parent = ParsedClaim(
+                claim_number=1,
+                text="독립항",
+                elements=[ClaimElement(label="A", text="부모 구성", importance="5")],
+            )
+            child = ParsedClaim(
+                claim_number=2,
+                claim_type="dependent",
+                parent_claim=1,
+                text="제1항에 있어서 추가 구성",
+                elements=[ClaimElement(label="B", text="추가 구성", importance="5")],
+            )
+            docs = [
+                ExtractedDocument(filename="primary.pdf"),
+                ExtractedDocument(filename="other.pdf"),
+            ]
+            (job_dir / "claims.json").write_text(
+                json.dumps([parent.model_dump(), child.model_dump()], ensure_ascii=False),
+                encoding="utf-8",
+            )
+            (job_dir / "prior_docs.json").write_text(
+                json.dumps([doc.model_dump() for doc in docs], ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            def item(label: str, judgment: str, quote: str = "") -> dict:
+                return {
+                    "label": label,
+                    "found": bool(quote),
+                    "judgment": judgment,
+                    "quote": quote,
+                    "chunk_id": "[0001]" if quote else "",
+                    "directness": "direct" if quote else "absent",
+                    "missing_limitations": [],
+                    "evidence": [],
+                }
+
+            for doc_idx in range(2):
+                child_item = (
+                    item("B", "동일", "child feature")
+                    if doc_idx == 0 else item("B", "대응 없음")
+                )
+                (job_dir / f"comparisons_{doc_idx}.json").write_text(
+                    json.dumps({
+                        "_meta": {"schema_version": 15, "comparison_mode": "per_doc"},
+                        "2": [child_item],
+                    }, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+
+            restored_claim_numbers = []
+
+            async def restore_parent(
+                elements, prior_docs, doc_indices, settings, *, job_dir, claim_number
+            ):
+                restored_claim_numbers.append(claim_number)
+                for doc_idx in doc_indices:
+                    path = Path(job_dir) / f"comparisons_{doc_idx}.json"
+                    cache = json.loads(path.read_text(encoding="utf-8"))
+                    cache[str(claim_number)] = [
+                        item("A", "동일", "parent feature")
+                        if doc_idx == 0 else item("A", "대응 없음")
+                    ]
+                    path.write_text(
+                        json.dumps(cache, ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+
+            batch_report = (
+                "===청구항 2===\n"
+                "### [추가 구성]\n"
+                "동일 97%\n\n"
+                "- 판단 이유: 추가 구성이 직접 대응됩니다."
+            )
+            request = BatchDependentRequest(claim_numbers=[2])
+
+            with (
+                patch.object(analyze_router, "UPLOADS_DIR", uploads),
+                patch.object(analyze_router, "REPORTS_DIR", reports),
+                patch.object(analyze_router, "CASES_DIR", cases),
+                patch.object(
+                    analyze_router,
+                    "_load_settings_with_dir",
+                    return_value=Settings(comparison_mode="per_doc"),
+                ),
+                patch.object(
+                    analyze_router,
+                    "analyze_claim_elements_for_docs",
+                    new=AsyncMock(side_effect=restore_parent),
+                ),
+                patch.object(
+                    analyze_router,
+                    "generate_dependent_reports_batch",
+                    new=AsyncMock(return_value=batch_report),
+                ),
+                patch.object(analyze_router, "_save_reference_db"),
+                patch.object(analyze_router, "_build_related_inventions_tab", return_value=""),
+            ):
+                result = await analyze_router.report_batch_dependent(job_id, request)
+
+            self.assertEqual(restored_claim_numbers, [1])
+            self.assertIn("1", json.loads(
+                (job_dir / "comparisons_0.json").read_text(encoding="utf-8")
+            ))
+            self.assertIn("2", result["reports"])
 
 
 class DependentReportValidationTests(unittest.TestCase):
@@ -804,6 +1070,39 @@ class DependentReportValidationTests(unittest.TestCase):
         report = "### 청구항 3\n\n### [추가 구성]\n실질적동일 85%\n\n판단 이유: 대응 근거가 확인됩니다."
 
         self.assertTrue(analyze_router._has_substantive_dependent_report(report, 3))
+
+    def test_unlabeled_dependent_judgment_is_forced_to_structured_comparison(self):
+        claim = ParsedClaim(
+            claim_number=2,
+            claim_type="dependent",
+            parent_claim=1,
+            text="제1항에 있어서 추가 구성",
+        )
+        raw = (
+            "### [추가 구성]\n"
+            "일부유사 82%\n\n"
+            "- 판단 이유: 관련 문맥만 확인됩니다."
+        )
+        matches = [
+            ElementMatch(
+                label="A",
+                cited_invention_index=0,
+                judgment="차이",
+                directness="absent",
+                quote="related context",
+            )
+        ]
+
+        report = analyze_router._assemble_dependent_report(
+            raw,
+            claim,
+            {},
+            Settings(),
+            matches=matches,
+        )
+
+        self.assertIn("대응안됨 70%", report)
+        self.assertNotIn("일부유사 82%", report)
 
 
 class DependentReportGenerationTests(unittest.IsolatedAsyncioTestCase):
@@ -1031,7 +1330,8 @@ class ConventionalSupportPolicyTests(unittest.TestCase):
         self.assertIn("인용발명 1에서 확인되지 않는 하위 제한", prompt)
         self.assertIn("보강 후 실질적인 차이가 남는 경우", prompt)
         self.assertIn("외국어 문헌의 괄호 안 따옴표 원문은 반드시 해당 외국어 원문 그대로", prompt)
-        self.assertIn("인용발명 2의 직접 대응 여부와 보완 범위는 종합 분석 요약의 차이점에서만 작성합니다.", prompt)
+        self.assertIn("같은 구성요소의 `보완 검토`에 인용발명 2의 직접 발췌", prompt)
+        self.assertIn("결합 동기·기술적 양립성의 최종 판단은 종합 분석 요약", prompt)
 
     def test_phase1_summary_polish_removes_repeated_fallback_phrasing(self):
         raw = (
@@ -1276,9 +1576,11 @@ class RejectedInventionsSectionTests(unittest.TestCase):
                     "label": "A",
                     "found": True,
                     "quote": "sensor arranged on a vehicle body",
+                    "quote_translation": "차량 본체에 센서가 배치됩니다.",
                     "chunk_id": "[0001]",
                     "judgment": "동일",
                     "similarity_reason": "차량 본체에 센서를 배치하는 구성은 청구항과 동일합니다.",
+                    "purpose_effect_similarity": "차량 상태를 감지하여 제어 정확도를 높이려는 목적이 유사합니다.",
                 },
                 {
                     "label": "B",
@@ -1308,9 +1610,11 @@ class RejectedInventionsSectionTests(unittest.TestCase):
 
         self.assertIn("## 관련도 A 인용발명", result)
         self.assertIn("인용발명 2", result)
-        self.assertIn("(A) 차량 본체에 센서를 배치하는 구성은 청구항과 동일합니다. (sensor arranged on a vehicle body [0001])", result)
-        self.assertIn("(B) 제어 신호를 생성하는 점은 유사하지만 세부 제어 방식은 다릅니다. (controller transmits a control signal [0002])", result)
-        self.assertIn("차이점: (C) 구성은 이 인용발명에서 직접 확인되지 않아 최종 채택에서 제외되었습니다.", result)
+        self.assertIn("- 목적·효과 관련 유사점: 차량 상태를 감지하여 제어 정확도를 높이려는 목적이 유사합니다.", result)
+        self.assertIn("- 가장 가까운 대응 내용: 차량 본체에 센서를 배치하는 구성은 청구항과 동일합니다. (차량 본체에 센서가 배치됩니다. [0001])", result)
+        self.assertIn("- 독립항과의 차이점: 독립항은 display 및 control unit 부분에서 이 인용발명과 차이가 있습니다.", result)
+        self.assertNotIn("(A)", result)
+        self.assertNotIn("(B)", result)
 
     def test_rejected_inventions_section_groups_remaining_docs_under_single_a_heading(self):
         claim = ParsedClaim(
@@ -1373,6 +1677,50 @@ class RejectedInventionsSectionTests(unittest.TestCase):
         self.assertIn("**인용발명 3** (tertiary.pdf)", result)
         self.assertEqual(result.count("**인용발명 "), 2)
 
+    def test_rejected_inventions_section_orders_blocks_by_display_invention_number(self):
+        claim = ParsedClaim(
+            claim_number=1,
+            claim_type="independent",
+            text="청구항 1. 장치.",
+            elements=[
+                ClaimElement(label="A", text="sensor module", importance="5"),
+            ],
+        )
+        docs = [
+            ExtractedDocument(filename="display-four.pdf"),
+            ExtractedDocument(filename="primary.pdf"),
+            ExtractedDocument(filename="display-three.pdf"),
+        ]
+        chain_info = {
+            "total": [1],
+            "doc_name_mapping": {"0": "인용발명 4", "1": "인용발명 1", "2": "인용발명 3"},
+        }
+        cache = {
+            "1": [
+                {
+                    "label": "A",
+                    "found": True,
+                    "quote": "sensor arrangement",
+                    "chunk_id": "[0001]",
+                    "judgment": "일부 유사",
+                    "similarity_reason": "센서 배치 구성이 일부 유사합니다.",
+                }
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            (Path(temp_dir) / "comparisons_0.json").write_text(
+                json.dumps(cache, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            (Path(temp_dir) / "comparisons_2.json").write_text(
+                json.dumps(cache, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            result = build_rejected_inventions_section(claim, docs, chain_info, temp_dir)
+
+        self.assertLess(result.index("**인용발명 3**"), result.index("**인용발명 4**"))
+
     def test_rejected_inventions_section_groups_multiple_missing_labels_into_one_difference_line(self):
         claim = ParsedClaim(
             claim_number=1,
@@ -1428,7 +1776,9 @@ class RejectedInventionsSectionTests(unittest.TestCase):
             )
             result = build_rejected_inventions_section(claim, docs, chain_info, temp_dir)
 
-        self.assertIn("차이점: (B), (C) 구성은 이 인용발명에서 직접 확인되지 않아 최종 채택에서 제외되었습니다.", result)
+        self.assertIn("- 독립항과의 차이점: 독립항은 controller 및 display 부분에서 이 인용발명과 차이가 있습니다.", result)
+        self.assertNotIn("(B)", result)
+        self.assertNotIn("(C)", result)
 
     def test_rejected_inventions_section_keeps_similar_items_when_later_labels_are_missing(self):
         claim = ParsedClaim(
@@ -1494,9 +1844,10 @@ class RejectedInventionsSectionTests(unittest.TestCase):
             )
             result = build_rejected_inventions_section(claim, docs, chain_info, temp_dir)
 
-        self.assertIn("(A) 센서 모듈은 청구항 구성과 실질적으로 대응됩니다. (sensor arrangement [0001])", result)
-        self.assertIn("(B) 제어부가 신호를 송신하는 점은 일부 유사합니다. (controller sends a signal [0002])", result)
-        self.assertIn("차이점: (C), (D) 구성은 이 인용발명에서 직접 확인되지 않아 최종 채택에서 제외되었습니다.", result)
+        self.assertIn("- 가장 가까운 대응 내용: 센서 모듈은 청구항 구성과 실질적으로 대응됩니다. (sensor arrangement [0001])", result)
+        self.assertIn("- 독립항과의 차이점: 독립항은 mode selector 및 display 부분에서 이 인용발명과 차이가 있습니다.", result)
+        self.assertNotIn("(A)", result)
+        self.assertNotIn("(B)", result)
         self.assertNotIn("청구항과 직접 대응되는 구성은 확인되지 않았습니다.", result)
 
     def test_rejected_inventions_section_uses_legacy_reason_and_evidence_for_similar_items(self):
@@ -1577,10 +1928,10 @@ class RejectedInventionsSectionTests(unittest.TestCase):
             )
             result = build_rejected_inventions_section(claim, docs, chain_info, temp_dir)
 
-        self.assertIn("(A) 센서 모듈은 청구항 구성과 실질적으로 대응됩니다. (sensor arrangement [0001])", result)
-        self.assertIn("(B) 제어부가 신호를 송신하는 점은 일부 유사합니다. (controller sends a signal [0002])", result)
-        self.assertIn("(Z) 단말 모듈이 통신 신호를 처리하는 점은 일부 유사합니다. (terminal module processes a communication signal [0026])", result)
-        self.assertIn("차이점: (C) 구성은 이 인용발명에서 직접 확인되지 않아 최종 채택에서 제외되었습니다.", result)
+        self.assertIn("- 가장 가까운 대응 내용: 센서 모듈은 청구항 구성과 실질적으로 대응됩니다. (sensor arrangement [0001])", result)
+        self.assertIn("- 독립항과의 차이점: 독립항은 display 및 controller 부분에서 이 인용발명과 차이가 있습니다.", result)
+        self.assertNotIn("(A)", result)
+        self.assertNotIn("(Z)", result)
 
     def test_rejected_inventions_section_uses_difference_reason_and_quote_when_present(self):
         claim = ParsedClaim(
@@ -1628,12 +1979,11 @@ class RejectedInventionsSectionTests(unittest.TestCase):
             )
             result = build_rejected_inventions_section(claim, docs, chain_info, temp_dir)
 
-        self.assertIn(
-            "차이점: (B) 제어 신호 전달은 보이나 청구항의 제어부 판단 로직은 직접 개시되어 있지 않습니다. (controller only forwards a preset signal [0007])",
-            result,
-        )
+        self.assertIn("- 가장 가까운 대응 내용: 센서 배치 구성이 청구항과 동일합니다. (sensor arrangement [0001])", result)
+        self.assertIn("- 독립항과의 차이점: 독립항은 controller 부분에서 이 인용발명과 차이가 있습니다.", result)
+        self.assertNotIn("(B)", result)
 
-    def test_rejected_inventions_section_prefixes_dependent_claim_summary(self):
+    def test_rejected_inventions_section_is_not_rendered_for_dependent_claim(self):
         claim = ParsedClaim(
             claim_number=3,
             claim_type="dependent",
@@ -1675,11 +2025,7 @@ class RejectedInventionsSectionTests(unittest.TestCase):
             )
             result = build_rejected_inventions_section(claim, docs, chain_info, temp_dir)
 
-        self.assertIn(
-            "청구항의 특정 요청 패킷은, 상기 인밴드 모드를 표시하는 제1값, 상기 아웃밴드 모드를 표시하는 제2값 및 상기 혼용 모드를 표시하는 제3값 중 어느 하나의 값을 포함하는 구성은",
-            result,
-        )
-        self.assertIn("차이점: (A)", result)
+        self.assertEqual(result, "")
 
 
 class DependentCitationChainPolicyTests(unittest.TestCase):
@@ -1913,7 +2259,7 @@ class DependentCitationChainPolicyTests(unittest.TestCase):
         self.assertFalse(chain["coverage_complete"])
         self.assertEqual(chain["uncovered_labels"], ["D"])
 
-    def test_dependent_claim_keeps_quoted_difference_as_partial_added_reference(self):
+    def test_dependent_claim_does_not_promote_quoted_difference_to_added_reference(self):
         claims = [
             ParsedClaim(
                 claim_number=1,
@@ -1957,10 +2303,11 @@ class DependentCitationChainPolicyTests(unittest.TestCase):
         independent_total = result["chains"]["1"]["total"]
 
         self.assertEqual(chain["inherited"], independent_total)
-        self.assertEqual(chain["added"], [2])
-        self.assertEqual(chain["total"], independent_total + [2])
+        self.assertEqual(chain["added"], [])
+        self.assertEqual(chain["total"], independent_total)
         self.assertFalse(chain["coverage_complete"])
         self.assertEqual(chain["uncovered_labels"], ["A"])
+        self.assertEqual(chain["decision_trace"]["selection_basis"], "no_candidate")
 
 
 class ConsistencyRegressionTests(unittest.TestCase):
@@ -2050,6 +2397,245 @@ class ConsistencyRegressionTests(unittest.TestCase):
 
             self.assertEqual(paragraph_doc_ids, [("D1",)])
             self.assertEqual(chunk_doc_ids, [("D1",)])
+
+
+class ClaimFamilyReferenceSelectionTests(unittest.TestCase):
+    @staticmethod
+    def _item(label: str, judgment: str, quote: str = "") -> dict:
+        return {
+            "label": label,
+            "found": bool(quote),
+            "quote": quote,
+            "chunk_id": "[0001]" if quote else "",
+            "judgment": judgment,
+            "directness": "direct" if quote else "absent",
+            "missing_limitations": [],
+            "evidence": (
+                [{"limitation": label, "quote": quote, "chunk_id": "[0001]"}]
+                if quote else []
+            ),
+        }
+
+    def _build(self, claims, caches):
+        docs = [ExtractedDocument(filename=f"doc-{idx}.pdf") for idx in range(len(caches))]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for idx, cache in enumerate(caches):
+                (Path(temp_dir) / f"comparisons_{idx}.json").write_text(
+                    json.dumps(cache, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+            return build_citation_chain_from_comparisons(temp_dir, claims, docs)
+
+    def test_independent_claim_families_select_separate_primary_references(self):
+        claims = [
+            ParsedClaim(
+                claim_number=1,
+                claim_type="independent",
+                text="광학 장치",
+                elements=[ClaimElement(label="A", text="광학 센서", importance="5")],
+            ),
+            ParsedClaim(
+                claim_number=10,
+                claim_type="independent",
+                text="통신 방법",
+                elements=[ClaimElement(label="A", text="통신 패킷 처리", importance="5")],
+            ),
+        ]
+        caches = [
+            {
+                "1": [self._item("A", "동일", "optical sensor")],
+                "10": [self._item("A", "대응 없음")],
+            },
+            {
+                "1": [self._item("A", "대응 없음")],
+                "10": [self._item("A", "동일", "packet processing")],
+            },
+        ]
+
+        result = self._build(claims, caches)
+
+        self.assertEqual(result["chains"]["1"]["total"], [0])
+        self.assertEqual(result["chains"]["10"]["total"], [1])
+        self.assertEqual(result["families"]["1"]["primary_idx"], 0)
+        self.assertEqual(result["families"]["10"]["primary_idx"], 1)
+
+    def test_single_document_novelty_gate_precedes_dependent_reuse_tie_break(self):
+        claims = [
+            ParsedClaim(
+                claim_number=1,
+                claim_type="independent",
+                text="센서 장치",
+                elements=[ClaimElement(label="A", text="센서", importance="5")],
+            ),
+            ParsedClaim(
+                claim_number=2,
+                claim_type="dependent",
+                parent_claim=1,
+                text="제1항에 있어서 보정 회로",
+                elements=[ClaimElement(label="B", text="보정 회로", importance="5")],
+            ),
+        ]
+        caches = [
+            {
+                "1": [self._item("A", "동일", "sensor")],
+                "2": [self._item("B", "대응 없음")],
+            },
+            {
+                "1": [self._item("A", "동일", "sensor")],
+                "2": [self._item("B", "동일", "calibration circuit")],
+            },
+        ]
+
+        result = self._build(claims, caches)
+
+        self.assertEqual(result["families"]["1"]["primary_idx"], 0)
+        self.assertEqual(result["families"]["1"]["analysis_track"], "novelty_single_reference")
+        self.assertEqual(result["chains"]["1"]["total"], [0])
+        self.assertEqual(result["chains"]["2"]["total"], [0, 1])
+        self.assertEqual(result["chains"]["2"]["added"], [1])
+
+    def test_ordered_pair_selection_prefers_the_primary_with_a_complete_complement(self):
+        claim = ParsedClaim(
+            claim_number=1,
+            claim_type="independent",
+            text="복합 장치",
+            elements=[
+                ClaimElement(label=label, text=f"구성 {label}", importance="5")
+                for label in ("A", "B", "C", "D")
+            ],
+        )
+        risky_d = self._item("D", "동일", "D")
+        risky_d["combination_risk"] = "contrary_teaching"
+        risky_d["combination_risk_reason"] = "주문헌 방식에는 적용하지 않도록 명시함"
+        caches = [
+            {"1": [
+                self._item("A", "동일", "A"),
+                self._item("B", "동일", "B"),
+                self._item("C", "동일", "C"),
+                self._item("D", "대응 없음"),
+            ]},
+            {"1": [
+                self._item("A", "동일", "A"),
+                self._item("B", "동일", "B"),
+                self._item("C", "대응 없음"),
+                risky_d,
+            ]},
+            {"1": [
+                self._item("A", "대응 없음"),
+                self._item("B", "대응 없음"),
+                self._item("C", "동일", "C complement"),
+                self._item("D", "대응 없음"),
+            ]},
+        ]
+
+        result = self._build([claim], caches)
+
+        self.assertEqual(result["families"]["1"]["primary_idx"], 1)
+        self.assertEqual(result["families"]["1"]["secondary_idx"], 0)
+        self.assertEqual(result["chains"]["1"]["total"], [1, 0])
+        self.assertTrue(result["families"]["1"]["combination_validity"]["coverage_complete"])
+
+    def test_atomic_missing_limitations_reduce_same_label_internal_strength(self):
+        claim = ParsedClaim(
+            claim_number=1,
+            claim_type="independent",
+            text="복합 처리 장치",
+            elements=[ClaimElement(label="A", text="입력과 출력을 결합 처리", importance="5")],
+        )
+        complete = {
+            "1": [{
+                **self._item("A", "일부 차이", "input and output processing"),
+                "evidence": [
+                    {"limitation": "입력", "quote": "input processing", "chunk_id": "[0001]"},
+                    {"limitation": "출력", "quote": "output processing", "chunk_id": "[0002]"},
+                ],
+            }]
+        }
+        incomplete = {
+            "1": [{
+                **self._item("A", "일부 차이", "input processing"),
+                "evidence": [
+                    {"limitation": "입력", "quote": "input processing", "chunk_id": "[0001]"},
+                ],
+                "missing_limitations": ["출력 결합"],
+            }]
+        }
+
+        complete_score, _count, _detail = _score_prior_cache(complete, [claim])
+        incomplete_score, _count, _detail = _score_prior_cache(incomplete, [claim])
+
+        self.assertGreater(complete_score, incomplete_score)
+
+    def test_old_policy_lock_is_recomputed_by_novelty_first_policy(self):
+        claims = [
+            ParsedClaim(
+                claim_number=1,
+                claim_type="independent",
+                text="독립 장치",
+                elements=[ClaimElement(label="A", text="핵심 구성", importance="5")],
+            ),
+            ParsedClaim(
+                claim_number=2,
+                claim_type="dependent",
+                parent_claim=1,
+                text="제1항에 있어서 추가 구성",
+                elements=[ClaimElement(label="B", text="추가 구성", importance="5")],
+            ),
+        ]
+        caches = [
+            {
+                "1": [self._item("A", "일부 유사", "legacy primary")],
+                "2": [self._item("B", "대응 없음")],
+            },
+            {
+                "1": [self._item("A", "일부 유사", "legacy secondary")],
+                "2": [self._item("B", "대응 없음")],
+            },
+            {
+                "1": [self._item("A", "동일", "newly preferred primary")],
+                "2": [self._item("B", "동일", "new child feature")],
+            },
+        ]
+        docs = [ExtractedDocument(filename=f"doc-{idx}.pdf") for idx in range(3)]
+        previous_chain = {
+            "policy_version": CITATION_CHAIN_POLICY_VERSION - 1,
+            "doc_name_mapping": {"0": "인용발명 1", "1": "인용발명 2", "2": "인용발명 3"},
+            "selection_locks": {
+                "1": {
+                    "total": [0, 1],
+                    "doc_name_mapping": {"0": "인용발명 1", "1": "인용발명 2", "2": "인용발명 3"},
+                    "reason": "independent_claim_report_issued",
+                }
+            },
+            "chains": {
+                "1": {
+                    "total": [0, 1],
+                    "inherited": [],
+                    "added": [0, 1],
+                    "parent": None,
+                    "reference_roles": {"0": "primary", "1": "substantive_secondary"},
+                }
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for idx, cache in enumerate(caches):
+                (Path(temp_dir) / f"comparisons_{idx}.json").write_text(
+                    json.dumps(cache, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+            (Path(temp_dir) / "citation_chain.json").write_text(
+                json.dumps(previous_chain, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            result = build_citation_chain_from_comparisons(temp_dir, claims, docs)
+
+        self.assertEqual(result["chains"]["1"]["total"], [2])
+        self.assertFalse(result["chains"]["1"].get("selection_locked", False))
+        self.assertEqual(result["chains"]["2"]["inherited"], [2])
+        self.assertEqual(result["chains"]["2"]["total"], [2])
+        self.assertEqual(result["doc_name_mapping"]["2"], "인용발명 1")
+        self.assertEqual(result["families"]["1"]["analysis_track"], "novelty_single_reference")
 
 
 if __name__ == "__main__":

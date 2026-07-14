@@ -46,11 +46,21 @@ def _normalize_report_markdown(md: str) -> str:
     """Normalize report field labels that the LLM sometimes styles inconsistently."""
     if not md:
         return md
-    return re.sub(
-        r"(?m)^-\s*(?:\*\*)?\s*인용발명\s*(?:\*\*)?\s*대응\s*원문\s*(?:\*\*)?\s*:",
+    normalized = re.sub(
+        r"(?m)^-\s*(?:\*\*)?\s*인용발명\s*(?:\*\*)?\s*대응\s*원문\s*(?:\*\*)?\s*:[ \t]*(?:\*\*)?",
         "- **인용발명 대응 원문:**",
         md,
     )
+    quote_block_pattern = re.compile(
+        r"(?ms)(^- \*\*인용발명 대응 원문:\*\*\s*\n)(.*?)(?=\n- (?:개시 상태|청구항 구성|청구항 추가 구성|인용발명 대응 부분 요약|판단 이유|판단 근거|보완 검토)\s*:|\n#{1,6}\s|\Z)"
+    )
+
+    def clean_quote_block(match: re.Match) -> str:
+        body = re.sub(r"(?:라고|고)?\s*기재되어 있습니다\.", ".", match.group(2))
+        body = re.sub(r"\.{2,}", ".", body)
+        return match.group(1) + body
+
+    return quote_block_pattern.sub(clean_quote_block, normalized)
 
 def _extract_first_json_object(text: str) -> Optional[Dict]:
     """Return the first complete JSON object without greedy brace matching."""
@@ -83,9 +93,10 @@ DEFAULT_PHASE1_FORMAT = """\
 
 - **인용발명 대응 원문:**
   [한국어 원문인 경우] 원문 그대로 적고 단락/본문 위치를 병기
+  발췌문 뒤에 `~고 기재되어 있습니다` 같은 보고형 문구를 덧붙이지 않음
   [외국어 원문인 경우(일본어·중국어·영어 등)] 반드시 아래 2줄 구조 사용:
     한국어 직역 또는 준직역 문장
-    (단락 [XXXX] 또는 본문 N 페이지, "quote에 있는 원문 언어 그대로의 발췌")
+    (단락 [실제번호] 또는 본문 실제 페이지, "원문 발췌") — 안내용 표기를 그대로 출력하지 않음
   [외국어 원문 추가 규칙] 괄호 안 따옴표의 원문 발췌는 중국어 문헌이면 중국어, 일본어 문헌이면 일본어, 영어 문헌이면 영어 그대로 적고 다른 언어로 바꾸지 않음
   [대응 없음인 경우] (인용발명 1에서 해당 구성 확인 불가)
 
@@ -101,9 +112,10 @@ DEFAULT_PHASE1_FORMAT = """\
 - 유사점 요약: (1~2문장으로만 작성한다. 1문장째에는 핵심 일치 구성이 어디까지 확인되는지를 적고, 필요하면 2문장째에 그 의미를 정리한다)
 
 - 차이점: (차이점이 없으면 `없음`으로 적고, 차이점이 있으면 각 항목을 줄바꿈으로 구분하되 `[차이점 1]` 같은 소제목은 쓰지 않는다. 각 항목은 차이가 나는 청구항 제한 문언으로 시작하되 반드시 `구성 (알파벳)에 대해` 또는 `[청구항 제한]인 구성 (알파벳)에 대해`처럼 어느 구성요소의 차이인지 알파벳을 자연스럽게 포함한다. 각 항목을 적을 때는 아래의 **작성 서식 규칙**을 철저히 준수한다.
+  차이점에는 기술적 차이와 문헌 근거만 작성한다. 정량 점수, 커버리지, 평가 신뢰도, 문헌 의존도, 구성 채택 여부 또는 거절 근거 구성 가능성 같은 평가·판정 내용은 작성하지 않는다.
   [작성 서식 규칙]
   ① 구성대비가 되는 내용(동일 기조 내용)은 하나의 자연스러운 한 문장의 흐름으로 완성한다. 인용발명 1에서 확인되지 않는 하위 제한이 무엇인지 매끄럽게 연결하여 "구성요소 (알파벳)과 관련하여, 인용발명 1에서는 ~한 하위 제한이 확인되지 않아 ~한 기술적 차이가 존재합니다." 형태로 쓴다.
-  ② 대비되지 않는 부분, 남는 차이가 통상적 치환·확장으로 극복 가능한지 여부, 추가 근거 필요성 등은 반드시 **줄바꿈(개행)**을 한 뒤, 새로운 줄에서 **`다만,`, `그러나,`, `하지만,` 등 역접의 접속사**로 시작하는 문장으로 작성한다.
+  ② 대비되지 않는 부분, 남는 차이가 통상적 치환·확장으로 극복 가능한지 여부, 추가 근거 필요성 등은 논리 관계에 맞는 접속사를 사용하여 자연스럽게 연결한다. 반대·한계에는 `다만,`, `그러나,`, `하지만,`, 보충에는 `또한,`, `더욱이,`, `아울러,`, 결과에는 `따라서,`, `이에 따라,` 등을 사용하며, 접속사가 필요하지 않으면 생략한다. 문장을 분리하는 경우에는 줄바꿈한다.
   ③ 외국어 문헌의 괄호 안 따옴표 원문은 반드시 해당 외국어 원문 그대로 쓰고, 영어로 바꾸지 않는다.)"""
 
 # Template B(복수 인용발명) Phase 1 전용 형식
@@ -115,15 +127,18 @@ DEFAULT_PHASE1_FORMAT_COMBO = """\
 - 청구항 구성:
 
 - **인용발명 대응 원문:**
+  복수 문헌의 발췌를 함께 적는 경우 문헌별로 분리하고 `인용발명 N:` 꼬리표만 붙인다. 발췌문 뒤에 `~고 기재되어 있습니다` 같은 보고형 문구를 덧붙이지 않는다.
   [한국어 원문인 경우] 원문 그대로 적고 단락/본문 위치를 병기
   [외국어 원문인 경우(일본어·중국어·영어 등)] 반드시 아래 2줄 구조 사용:
     한국어 직역 또는 준직역 문장
-    (단락 [XXXX] 또는 본문 N 페이지, "quote에 있는 원문 언어 그대로의 발췌")
+    (단락 [실제번호] 또는 본문 실제 페이지, "원문 발췌") — 안내용 표기를 그대로 출력하지 않음
   [외국어 원문 추가 규칙] 괄호 안 따옴표의 원문 발췌는 중국어 문헌이면 중국어, 일본어 문헌이면 일본어, 영어 문헌이면 영어 그대로 적고 다른 언어로 바꾸지 않음
 
 - 인용발명 대응 부분 요약:
 
 - 판단 이유: (판정명이나 퍼센트를 반복 설명하지 말고, 청구항 제한과 인용발명 1의 대응 원문이 구조·기능·입력·출력·처리 조건 중 어느 점에서 대응되는지 또는 어느 핵심 제한이 빠져 대응이 불충분한지만 1~2문장으로 작성)
+
+- 보완 검토: (인용발명 1의 판정이 `동일` 또는 `실질적동일`이면 `불필요`라고만 적는다. 인용발명 1에 미개시·약한 하위 제한이 있고 인용발명 2 이상의 직접 발췌가 제공된 경우에만, `보완 문헌 → 보완되는 하위 제한 → 원문 발췌와 위치 → 보완 후 남는 제한` 순서로 간결하게 적는다. 구성 보완 여부와 결합 동기·기술적 양립성 판단을 혼동하지 말고, 결합 가능성의 최종 판단은 `[종합분석요약]`에서 한다. 예외적 제3문헌은 표시된 주지관용 구성의 명시 근거로만 사용한다. 보완 근거가 없으면 `직접 보완 근거 없음`으로 적는다.)
 
 
 [종합분석요약]
@@ -133,9 +148,10 @@ DEFAULT_PHASE1_FORMAT_COMBO = """\
 - 유사점 요약: (1~2문장으로만 작성한다. 1문장째에는 핵심 일치 구성이 어디까지 확인되는지를 적고, 필요하면 2문장째에 그 의미를 정리한다)
 
 - 차이점: (유사도가 `동일` 또는 `실질적동일`인 구성요소는 적지 않고 `없음`으로 처리한다. 실제 차이가 남는 구성요소만 각 항목을 줄바꿈으로 구분하되 `[차이점 1]`, `[차이점 2]` 같은 소제목은 쓰지 않는다. 각 항목을 적을 때는 아래의 **작성 서식 규칙**을 철저히 준수한다.
+  차이점에는 기술적 차이와 문헌 근거만 작성한다. 정량 점수, 커버리지, 평가 신뢰도, 문헌 의존도, 구성 채택 여부 또는 거절 근거 구성 가능성 같은 평가·판정 내용은 작성하지 않는다.
   [작성 서식 규칙]
   ① 구성대비가 되는 내용(동일 기조 내용)은 하나의 자연스러운 한 문장의 흐름으로 완성한다. 인용발명 1에서 확인되지 않는 하위 제한과 인용발명 2의 개시 내용 및 출처(예: 한국어 직역 또는 준직역문 + 괄호 안 원문 및 페이지)를 매끄럽게 연결하여 "구성요소 (알파벳)과 관련하여, 인용발명 1에서는 ~가 확인되지 않으나 인용발명 2에는 ~[직역문](페이지, \"원문\")~는 구성이 기재되어 있으며 이는 ~로 보완되는 범위에 해당합니다/판단됩니다." 형태로 쓴다. (절대로 "~ 확인되지 않습니다. 인용발명 2에서는 다음 구성이 개시되어 있습니다."와 같이 문장을 분리하거나 별도 개시 안내를 나열식으로 쓰지 않는다)
-  ② 보강 후 실질적인 차이가 남는 경우에만 줄바꿈한 뒤 `다만,`, `그러나,`, `하지만,` 등 역접의 접속사로 시작하여 기재한다. 단순한 적용 대상 차이, 데이터 표현 차이 또는 통상적인 입력·출력 연결만으로 유기적 결합이 불충분하다고 판단하지 않는다. 결합 곤란성을 인정하려면 기술적 비호환성, 반대 교시, 작동 원리 변경 또는 예측하기 어려운 효과에 관한 구체적인 근거를 제시한다.
+  ② 보강 후 실질적인 차이가 남는 경우에는 줄바꿈하여 논리 관계에 맞는 접속사로 자연스럽게 이어 쓴다. 반대·한계에는 `다만,`, `그러나,`, `하지만,`, 보충에는 `또한,`, `더욱이,`, `아울러,`, 결과에는 `따라서,`, `이에 따라,` 등을 사용하며, 접속사가 필요하지 않으면 생략한다. 단순한 적용 대상 차이, 데이터 표현 차이 또는 통상적인 입력·출력 연결만으로 유기적 결합이 불충분하다고 판단하지 않는다. 결합 곤란성을 인정하려면 기술적 비호환성, 반대 교시, 작동 원리 변경 또는 예측하기 어려운 효과에 관한 구체적인 근거를 제시한다.
   ③ 외국어 문헌의 괄호 안 따옴표 원문은 반드시 해당 외국어 원문 그대로 쓰고, 영어로 바꾸지 않는다. `차이점 요지:`, `인용발명 2 발췌:`, `대응 이유:`, `번역:`, `발췌:` 같은 꼬리표는 쓰지 않는다. 독립항 결합형에서 `주지관용 구성 입증자료`로 표시된 예외적 제3문헌만 표시된 일반 구성의 입증자료로 제한한다. 종속항에 새로 추가된 인용발명 3 이상에는 이 제한을 적용하지 않는다. SubScore 등 내부 점수는 출력 금지)"""
 
 DEFAULT_PHASE1_FORMAT_DEPENDENT = """\
@@ -147,6 +163,7 @@ DEFAULT_PHASE1_FORMAT_DEPENDENT = """\
 
 - **인용발명 대응 원문:**
   [한국어 원문인 경우] 원문 그대로 적고 단락/본문 위치를 병기.
+  발췌문 뒤에 `~고 기재되어 있습니다` 같은 보고형 문구를 덧붙이지 않음.
   [외국어 원문인 경우(일본어·중국어·영어 등)] 한국어 직역 또는 준직역 문장 다음 줄에 원문 발췌와 단락/본문 위치를 병기.
   [외국어 원문 추가 규칙] 괄호 안 따옴표의 원문 발췌는 중국어 문헌이면 중국어, 일본어 문헌이면 일본어, 영어 문헌이면 영어 그대로 적고 다른 언어로 바꾸지 않음.
 
@@ -162,9 +179,10 @@ DEFAULT_PHASE1_FORMAT_DEPENDENT = """\
 - 유사점 요약:
 
 - 차이점: (임시 라벨이 있더라도 `구성 (A)`처럼 쓰지 말고 `추가 구성` 또는 해당 기술 특징 문구로 작성한다. 일반적인 기술분야 유사성만 쓰지 말고 어떤 하위 제한이 원문으로 확인되지 않는지 특정한다. 각 항목을 적을 때는 아래의 **작성 서식 규칙**을 철저히 준수한다.
+  차이점에는 추가 구성의 기술적 차이와 문헌 근거만 작성한다. 정량 점수, 커버리지, 평가 신뢰도, 문헌 의존도, 추가 구성의 평가·채택 여부 또는 거절 근거 구성 가능성은 작성하지 않는다.
   [작성 서식 규칙]
   ① 구성대비가 되는 내용(동일 기조 내용)은 하나의 자연스러운 한 문장의 흐름으로 완성한다. 인용발명 1에서 확인되지 않는 하위 제한과 인용발명 2의 개시 내용 및 출처(예: 한국어 직역 또는 준직역문 + 괄호 안 원문 및 페이지)를 매끄럽게 연결하여 "추가 구성과 관련하여, 인용발명 1에서는 ~가 확인되지 않으나 인용발명 2에는 ~[직역문](페이지, \"원문\")~는 구성이 기재되어 있으며 이는 ~로 보완되는 범위에 해당합니다/판단됩니다." 형태로 쓴다. (절대로 "~ 확인되지 않습니다. 인용발명 2에서는 다음 구성이 개시되어 있습니다."와 같이 문장을 분리하거나 별도 개시 안내를 나열식으로 쓰지 않는다)
-  ② 보강이 된 이후에도 남는 하위 제한, 유기적 결합 관계의 차이, 추가 근거 필요성 등(대비되지 않는 부분)은 반드시 **줄바꿈(개행)**을 한 뒤, 새로운 줄에서 **`다만,`, `그러나,`, `하지만,` 등 역접의 접속사**로 시작하는 문장으로 작성한다.
+  ② 보강이 된 이후에도 남는 하위 제한, 유기적 결합 관계의 차이, 추가 근거 필요성 등(대비되지 않는 부분)은 논리 관계에 맞는 접속사를 사용하여 자연스럽게 연결한다. 반대·한계에는 `다만,`, `그러나,`, `하지만,`, 보충에는 `또한,`, `더욱이,`, `아울러,`, 결과에는 `따라서,`, `이에 따라,` 등을 사용하며, 접속사가 필요하지 않으면 생략한다. 문장을 분리하는 경우에는 줄바꿈한다.
   ③ 외국어 문헌의 괄호 안 따옴표 원문은 반드시 해당 외국어 원문 그대로 쓰고, 영어로 바꾸지 않는다. `차이점 요지:`, `인용발명 2 발췌:`, `대응 이유:`, `번역:`, `발췌:` 같은 꼬리표는 쓰지 않는다.)"""
 
 _BASE_SYSTEM = """당신은 대한민국 특허청 심사관 수준의 특허 분석 전문가입니다.
@@ -177,11 +195,12 @@ _BASE_SYSTEM = """당신은 대한민국 특허청 심사관 수준의 특허 �
 [문체 기준]
 - 문장은 짧고 단정하게 쓰되, 문헌 근거 없이 단정하지 말 것
 - `~에 대응된다`, `~로 볼 수 있다`, `~가 기재되어 있다`, `~는 확인되지 않는다`, `따라서 ~로 판단된다` 같은 실무형 문장을 우선 사용할 것
-- 같은 취지를 반복하지 말고, 차이점 항목은 인용발명 1과 인용발명 2 이상의 대비 내용(동일 기조 내용)을 한 문장으로 매끄럽게 연결하고, 대비되지 않는 남는 차이와 한계는 반드시 줄바꿈 후 역접의 접속사(다만, 그러나, 하지만 등)로 시작하는 문장으로 작성할 것
+- 단, `인용발명 대응 원문` 칸은 발췌문과 위치만 쓰고 `~고 기재되어 있습니다` 같은 보고형 종결을 붙이지 말 것
+- 같은 취지를 반복하지 말고, 차이점 항목은 인용발명 1과 인용발명 2 이상의 대비 내용(동일 기조 내용)을 한 문장으로 매끄럽게 연결할 것. 후속 문장은 논리 관계에 따라 접속사를 선택하고, 반대·한계에는 `다만`, `그러나`, `하지만`, 보충에는 `또한`, `더욱이`, `아울러`, 결과에는 `따라서`, `이에 따라` 등을 사용하며, 접속사가 필요하지 않으면 생략할 것
 
 [인용 규칙]
-- 한국어 인용: 원문 그대로 기재 후 (단락 [XXXX]) 형식
-- 외국어 인용(일본어·중국어·영어 등 모든 외국어): 한국어 직역 또는 준직역 문장 다음 줄에 (단락 [XXXX] 또는 본문 N 페이지, "quote에 있는 원문 언어 그대로의 발췌") 형식
+- 한국어 인용: 원문 그대로 기재 후 실제 단락번호 형식
+- 외국어 인용(일본어·중국어·영어 등 모든 외국어): 한국어 직역 또는 준직역 문장 다음 줄에 실제 단락번호 또는 본문 페이지와 원문 발췌를 기재합니다. 안내용 표기를 그대로 출력하지 마십시오.
 - 괄호 안 따옴표의 원문 발췌는 중국어 문헌이면 중국어, 일본어 문헌이면 일본어, 영어 문헌이면 영어 그대로 적고 다른 언어로 바꾸지 말 것
 - 번역문은 발췌 부분의 직역 또는 준직역으로 작성하고, 요약·의역·평가를 섞지 말 것
 
@@ -192,17 +211,50 @@ _BASE_SYSTEM = """당신은 대한민국 특허청 심사관 수준의 특허 �
 """
 
 
-def _phase1_format_text(combo: bool = False) -> str:
+def _reference_role_names(chain_info: Optional[Dict]) -> List[str]:
+    """Return canonical display names in primary/support role order."""
+    if not chain_info:
+        return []
+    mapping = chain_info.get("doc_name_mapping") or {}
+    return [
+        mapping.get(str(idx), f"인용발명 {int(idx) + 1}")
+        for idx in (chain_info.get("total") or [])
+    ]
+
+
+def _remap_static_reference_roles(text: str, chain_info: Optional[Dict]) -> str:
+    """Map static role labels (reference 1, 2, ...) to locked display names."""
+    role_names = _reference_role_names(chain_info)
+    if not role_names:
+        return text
+    by_role = {position: name for position, name in enumerate(role_names, start=1)}
+    return re.sub(
+        r"인용발명\s+(\d+)",
+        lambda match: by_role.get(int(match.group(1)), match.group(0)),
+        text,
+    )
+
+
+def _phase1_format_text(
+    combo: bool = False,
+    chain_info: Optional[Dict] = None,
+) -> str:
     """Phase 1 출력 형식 템플릿 반환 (파일 우선, 없으면 기본값)."""
     if combo:
-        return load_prompt("format_phase1_combo.txt", DEFAULT_PHASE1_FORMAT_COMBO)
-    return load_prompt("format_phase1_independent.txt", DEFAULT_PHASE1_FORMAT)
+        text = load_prompt("format_phase1_combo.txt", DEFAULT_PHASE1_FORMAT_COMBO)
+    else:
+        text = load_prompt("format_phase1_independent.txt", DEFAULT_PHASE1_FORMAT)
+    return _remap_static_reference_roles(text, chain_info)
 
 
-def _build_system(settings: Settings, claim_type: str = "independent") -> str:
+def _build_system(
+    settings: Settings,
+    claim_type: str = "independent",
+    chain_info: Optional[Dict] = None,
+) -> str:
     """claim_type: 'independent' | 'combo' | 'dependent'"""
     system = load_prompt("system_report_base.txt", _BASE_SYSTEM)
-    return system
+    return _remap_static_reference_roles(system, chain_info)
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +318,20 @@ def _format_citation_location(match: ElementMatch, prior_docs: List[ExtractedDoc
     if doc and doc.document_type == "non_patent":
         anchor = chunk_id.replace("[P", "").split("-")[0] if "[P" in chunk_id else chunk_id
         return f"(본문 {anchor} 페이지)"
-    return f"(단락 {chunk_id})"
+    return f"(단락 {_paragraph_location(chunk_id, doc)})"
+
+
+def _paragraph_location(chunk_id: str, doc: Optional[ExtractedDocument]) -> str:
+    """Convert an internal chunk ID to the paragraph number shown to users."""
+    if doc:
+        for chunk in (doc.paragraph_chunks or []) + (doc.group_chunks or []):
+            if chunk.chunk_id != chunk_id:
+                continue
+            numbers = chunk.paragraph_range or ([chunk.paragraph_no] if chunk.paragraph_no else [])
+            if numbers:
+                return numbers[0] if len(numbers) == 1 else f"{numbers[0]}~{numbers[-1]}"
+    match = re.search(r"(?:-P-)(\[[^]]+\])", chunk_id)
+    return match.group(1) if match else chunk_id
 
 
 def _format_evidence_lines(match: ElementMatch, prior_docs: List[ExtractedDocument], indent: str = "") -> list[str]:
@@ -286,7 +351,7 @@ def _format_evidence_lines(match: ElementMatch, prior_docs: List[ExtractedDocume
                 anchor = chunk_id.replace("[P", "").split("-")[0] if "[P" in chunk_id else "?"
                 location = f" (본문 {anchor} 페이지)"
             else:
-                location = f" (단락 {chunk_id})"
+                location = f" (단락 {_paragraph_location(chunk_id, doc)})"
         lines.append(f"{indent}- {label}: {quote}{location}")
     return lines if len(lines) > 1 else []
 
@@ -294,22 +359,108 @@ def _format_evidence_lines(match: ElementMatch, prior_docs: List[ExtractedDocume
 def _combination_rationale_prompt_block(chain_info: Optional[Dict]) -> str:
     if not chain_info:
         return ""
+    family_selection = chain_info.get("family_selection") or {}
+    novelty_screen = chain_info.get("novelty_screen") or family_selection.get("novelty_screen") or {}
     rationale = chain_info.get("combination_rationale") or {}
-    if not rationale:
-        return ""
     lines = []
+    mapping = chain_info.get("doc_name_mapping") or {}
+    total = chain_info.get("total") or []
+    primary_idx = total[0] if total else family_selection.get("primary_idx")
+    primary_name = mapping.get(str(primary_idx), f"인용발명 {int(primary_idx) + 1}") if primary_idx is not None else "주 인용발명"
+    analysis_track = chain_info.get("analysis_track") or family_selection.get("analysis_track")
+    if analysis_track == "novelty_single_reference":
+        lines.append(f"판단 순서: {primary_name} 단일 문헌의 직접·완전 개시가 확인되어 신규성 경로를 우선 적용")
+    else:
+        lines.append("판단 순서: 단일 문헌 신규성 심사 후 차이점 기반 진보성 결합 심사")
+        if novelty_screen.get("result") == "no_single_document_complete":
+            lines.append("신규성 선행심사: 어느 한 문헌도 모든 필수 구성을 직접·명백하게 개시하지 않음")
+        assessments = novelty_screen.get("document_assessments") or {}
+        for raw_idx, assessment in assessments.items():
+            try:
+                assessment_idx = int(raw_idx)
+            except (TypeError, ValueError):
+                continue
+            if total and assessment_idx not in total:
+                continue
+            missing = assessment.get("missing_or_indirect_labels") or []
+            if not missing:
+                continue
+            doc_name = mapping.get(str(raw_idx), f"인용발명 {assessment_idx + 1}")
+            lines.append(f"- {doc_name}의 단일문헌 잔여 구성: {', '.join(map(str, missing))}")
+        if primary_idx is not None:
+            lines.append(
+                f"주 인용발명: {primary_name}. 독립항의 핵심 구조·작동관계와 직접 근거의 폭을 우선하여 선정"
+            )
     label = rationale.get("label") or rationale.get("type")
     if label:
         lines.append(f"결합 논리 유형: {label}")
     if rationale.get("description"):
         lines.append(f"판단 취지: {rationale['description']}")
     lines.extend(f"주의: {warning}" for warning in rationale.get("warnings", []))
+    validity = chain_info.get("combination_validity") or {}
+    if validity:
+        remaining = validity.get("remaining_uncovered_labels") or []
+        critical = validity.get("critical_uncovered_labels") or []
+        lines.append(
+            "구성 보완 상태: "
+            + ("모든 구성의 보완 근거가 있음" if validity.get("coverage_complete") else "잔여 미보완 구성 존재")
+        )
+        if remaining:
+            lines.append("잔여 구성: " + ", ".join(map(str, remaining)))
+        if critical:
+            lines.append("핵심 잔여 구성: " + ", ".join(map(str, critical)))
+        lines.append("결합 타당성 상태: 구성 보완과 별도로 본문 발췌에 근거한 실질 검토 필요")
     text = "\n".join(lines)
     return (
-        "[인용발명 결합 논리 유형]\n"
+        "[신규성 선행심사 및 인용발명 선정 근거]\n"
         f"{text}\n"
-        "위 유형을 우선 기준으로 삼되, 실제 발췌 근거와 맞지 않으면 남는 차이점을 명시하십시오.\n\n"
+        "단일 문헌 결과와 복수 문헌 결합 결과를 혼합하지 마십시오. 결합 유형은 작성 출발점일 뿐 "
+        "결합 가능성의 결론이 아닙니다. 실제 발췌에 근거하여 "
+        "공통 문제·개선 필요성, 적용 가능한 입출력과 처리 관계, 기본 작동원리 유지, 반대 교시, "
+        "효과의 예측 가능성을 구분해 검토하고, 근거가 없으면 결합 동기가 확인되지 않는다고 명시하십시오.\n\n"
     )
+
+
+def _reference_scope_prompt_block(chain_info: Optional[Dict]) -> str:
+    """최종 인용 체인에 포함된 문헌만 보고서가 사용하도록 범위를 고정한다."""
+    if not chain_info:
+        return ""
+    mapping = chain_info.get("doc_name_mapping") or {}
+    total = [int(value) for value in (chain_info.get("total") or [])]
+    if not total:
+        return ""
+    allowed = [mapping.get(str(idx), f"인용발명 {idx + 1}") for idx in total]
+    lines = [
+        "[보고서에서 사용 가능한 인용발명 범위]",
+        "허용 문헌: " + ", ".join(allowed),
+        "허용 목록에 없는 인용발명 번호, 문헌명, 발췌 또는 구성대비를 보고서에 쓰지 마십시오.",
+    ]
+    if len(total) == 1:
+        if _has_common_knowledge_basis(chain_info):
+            lines.append(
+                "이 보고서는 허용된 단일 문헌과 주지관용 검토만 사용합니다. "
+                "다른 문헌의 내용을 차이점 또는 보완 검토에 넣지 마십시오."
+            )
+        else:
+            lines.append("이 보고서는 허용된 단일 문헌만 사용합니다.")
+    if chain_info.get("strict_reference_scope_retry"):
+        lines.append("이전 출력에 허용되지 않은 인용발명이 포함되어 재작성 중이므로 위 범위를 절대 위반하지 마십시오.")
+    return "\n".join(lines) + "\n\n"
+
+
+def find_unselected_reference_mentions(text: str, chain_info: Optional[Dict]) -> List[str]:
+    """보고서 본문이 최종 체인 밖의 인용발명 번호를 사용했는지 반환한다."""
+    if not chain_info:
+        return []
+    mapping = chain_info.get("doc_name_mapping") or {}
+    allowed_numbers: set[int] = set()
+    for idx in chain_info.get("total") or []:
+        name = mapping.get(str(idx), f"인용발명 {int(idx) + 1}")
+        match = re.search(r"인용발명\s*(\d+)", str(name))
+        if match:
+            allowed_numbers.add(int(match.group(1)))
+    mentioned = {int(value) for value in re.findall(r"인용발명\s*(\d+)", str(text or ""))}
+    return [f"인용발명 {number}" for number in sorted(mentioned - allowed_numbers)]
 
 
 def _strip_agent_tool_calls(text: str) -> str:
@@ -404,6 +555,34 @@ def enforce_phase1_judgment_headers(
             f"({match.label}) {judgment} {percent}%",
             result,
         )
+        if len(matches) == 1:
+            result = re.sub(
+                r"(?m)^(?!\s*\()\s*"
+                r"(?:동일|실질적\s*동일|실질적동일|일부\s*차이|일부차이|"
+                r"일부\s*유사|일부유사|차이|대응\s*없음|대응안됨)"
+                r"(?:\s+\d{1,3}(?:~\d{1,3})?%)?\s*$",
+                f"{judgment} {percent}%",
+                result,
+                count=1,
+            )
+        if (
+            match.quote
+            and match.judgment in {"동일", "실질적 동일"}
+            and match.directness in {"", "direct"}
+            and not match.missing_limitations
+        ):
+            disclosure_status = "직접 개시"
+        elif match.quote or match.found:
+            disclosure_status = "부분 개시"
+        else:
+            disclosure_status = "미개시"
+        result = re.sub(
+            rf"(?m)^\({label}\)\s+{re.escape(judgment)}\s+{percent}%\s*\n"
+            r"(?:\s*\n)?(?:-\s*개시\s*상태\s*:\s*[^\n]*\n(?:\s*\n)?)?",
+            f"({match.label}) {judgment} {percent}%\n\n- 개시 상태: {disclosure_status}\n\n",
+            result,
+            count=1,
+        )
     return result
 
 
@@ -459,14 +638,25 @@ async def generate_independent_phase1_streaming(
     chain_total = (chain_info or {}).get("total", [])
     all_no_match = all(m.judgment in NO_MATCH_LABELS for m in matches)
     if all_no_match and len(chain_total) <= 1:
-        result = await _generate_rejection_impossible_report(claim, matches, prior_docs, settings)
+        result = await _generate_rejection_impossible_report(
+            claim, matches, prior_docs, settings, chain_info
+        )
         yield result
         return
 
-    all_identical = all(m.judgment == "동일" for m in matches)
-    if all_identical and len(chain_total) <= 1:
+    novelty_track = (chain_info or {}).get("analysis_track") == "novelty_single_reference"
+    all_directly_disclosed = bool(matches) and all(
+        m.judgment in {"동일", "실질적 동일"}
+        and m.directness in {"", "direct"}
+        and not m.missing_limitations
+        and bool(m.quote)
+        for m in matches
+    )
+    if (novelty_track or all_directly_disclosed) and len(chain_total) <= 1:
         primary_idx = (chain_info.get("total") or [0])[0] if chain_info else 0
-        full = await _generate_novelty_rejection_report(claim, matches, prior_docs, settings, primary_idx)
+        full = await _generate_novelty_rejection_report(
+            claim, matches, prior_docs, settings, primary_idx, chain_info
+        )
         idx = full.find("# [Phase 2]")
         yield full[:idx].strip() if idx >= 0 else full
         return
@@ -474,16 +664,19 @@ async def generate_independent_phase1_streaming(
     # 결합(Template B) 여부는 인용 체인이 결정한다(total 길이). 체인이 없을 때만
     # 구성요소 귀속(any idx>0)으로 추정한다. — 주인용발명이 doc 0이 아니어도 정확.
     if chain_info:
-        needs_combination = len(chain_info.get("total", [])) > 1
+        needs_combination = (
+            len(chain_info.get("total", [])) > 1
+            or _has_common_knowledge_basis(chain_info)
+        )
     else:
         needs_combination = any(m.cited_invention_index > 0 for m in matches)
 
     if needs_combination:
-        system = _build_system(settings, "combo")
+        system = _build_system(settings, "combo", chain_info)
         prompt = _make_phase1_b_prompt(claim, matches, prior_docs, chain_info, settings, prev_context,
                                        secondary_matches=secondary_matches)
     else:
-        system = _build_system(settings, "independent")
+        system = _build_system(settings, "independent", chain_info)
         prompt = _make_phase1_a_prompt(claim, matches, prior_docs, chain_info, settings, prev_context)
 
     async for chunk in call_ai_streaming(prompt, system, settings, agent="report"):
@@ -505,6 +698,11 @@ def _make_phase1_prompt(
     primary_idx = total_invs[0]
 
     inv1_name = doc_name_mapping.get(str(primary_idx), "인용발명 1") if doc_name_mapping else "인용발명 1"
+    support_names = [
+        doc_name_mapping.get(str(idx), f"인용발명 {idx + 1}")
+        if doc_name_mapping else f"인용발명 {idx + 1}"
+        for idx in total_invs[1:]
+    ]
     inv1_doc = prior_docs[primary_idx] if primary_idx < len(prior_docs) else (prior_docs[0] if prior_docs else None)
     inv1_filename = inv1_doc.filename if inv1_doc else "인용발명 1"
 
@@ -560,6 +758,13 @@ def _make_phase1_prompt(
                 evidence_lines.append(f"원문 발췌: {match.quote}")
                 evidence_lines.append(f"단락/본문 위치: {_format_citation_location(match, prior_docs)}")
                 evidence_lines.extend(_format_evidence_lines(match, prior_docs))
+                if match.motivation_quote:
+                    evidence_lines.append(f"문제·개선효과 직접 근거: {match.motivation_quote}")
+                if match.combination_risk in {"contrary_teaching", "principle_change"}:
+                    evidence_lines.append(
+                        f"명시적 결합 위험: {match.combination_risk} - "
+                        f"{match.combination_risk_reason or '구체적 근거 확인 필요'}"
+                    )
                 evidence_lines.append("")
             evidence_body = "\n".join(evidence_lines).strip()
             evidence_blocks.append(
@@ -580,16 +785,21 @@ def _make_phase1_prompt(
         secondary_matches=secondary_matches,
         total_invs=total_invs,
     )
-    combination_rationale_block = _combination_rationale_prompt_block(chain_info)
+    combination_rationale_block = (
+        _reference_scope_prompt_block(chain_info)
+        + _combination_rationale_prompt_block(chain_info)
+    )
     conventional_policy_block = _conventional_policy_prompt_block(chain_info)
     context_block = _build_context_block(prev_context)
-    fmt = _phase1_format_text(combo=combo)
-    if combo and len(total_invs) > 2:
-        combo_hint = "구성요소 본문은 인용발명 1 기준으로만 작성합니다. 인용발명 2 이상의 직접 대응 여부와 보완 범위는 종합 분석 요약의 차이점에서만 작성합니다. 다만 독립항 결합형에서 `주지관용 구성 입증자료`로 표시된 예외적 제3문헌만 표시된 일반 구성의 입증자료로 제한합니다."
+    fmt = _phase1_format_text(combo=combo, chain_info=chain_info)
+    if combo and len(support_names) > 1:
+        combo_hint = f"각 구성요소의 판정과 판단 이유는 {inv1_name} 기준으로 작성합니다. {inv1_name}의 미개시·약한 하위 제한은 같은 구성요소의 `보완 검토`에 {', '.join(support_names)}의 직접 발췌, 보완 범위, 잔여 제한을 표시하고, 결합 동기·기술적 양립성의 최종 판단은 종합 분석 요약에서 별도로 작성합니다. 예외적 주지관용 입증 문헌은 표시된 주지관용 구성의 명시 근거로만 제한합니다."
+    elif combo and support_names:
+        combo_hint = f"각 구성요소의 판정과 판단 이유는 {inv1_name} 기준으로 작성합니다. {inv1_name}의 미개시·약한 하위 제한은 같은 구성요소의 `보완 검토`에 {support_names[0]}의 직접 발췌, 보완 범위, 잔여 제한을 표시하고, 결합 동기·기술적 양립성의 최종 판단은 종합 분석 요약에서 별도로 작성합니다."
     elif combo:
-        combo_hint = "구성요소 본문은 인용발명 1 기준으로만 작성합니다. 인용발명 2의 직접 대응 여부와 보완 범위는 종합 분석 요약의 차이점에서만 작성합니다."
+        combo_hint = f"각 구성요소의 판정과 판단 이유는 {inv1_name} 기준으로 작성합니다. 다른 문헌을 추가하지 말고 허용된 주지관용 근거만 별도로 검토하며, 최종 판단은 종합 분석 요약에서 작성합니다."
     else:
-        combo_hint = "각 구성요소는 인용발명 1 기준으로 작성합니다."
+        combo_hint = f"각 구성요소는 {inv1_name} 기준으로 작성합니다."
 
     return render_prompt(
         "prompt_phase1_main.txt",
@@ -597,6 +807,7 @@ def _make_phase1_prompt(
         claim_number=str(claim.claim_number),
         claim_text=claim.text,
         elements_text=elements_text,
+        primary_inv_name=inv1_name,
         inv1_filename=inv1_filename,
         comp_text=comp_text,
         inv2_block=inv2_block,
@@ -624,12 +835,14 @@ def format_rejection_basis_header(
     chain_info: Optional[Dict] = None,
     is_novelty: bool = False,
 ) -> str:
-    has_common_knowledge = _has_common_knowledge_basis(chain_info) or bool(inv3_name)
+    has_common_knowledge = _has_common_knowledge_basis(chain_info)
     primary_name = (inv1_name or "인용발명 1").strip()
     secondary_name = (inv2_name or "").strip()
     if is_combo and inv2_name:
         if has_common_knowledge:
             return f"[{primary_name}과 {secondary_name}의 결합 및 주지관용(진보성)]"
+        if inv3_name:
+            return f"[{primary_name}, {secondary_name} 및 {inv3_name.strip()}의 결합(진보성)]"
         return f"[{primary_name}과 {secondary_name}의 결합(진보성)]"
     if has_common_knowledge:
         return f"[{primary_name} + 주지관용(진보성)]"
@@ -671,20 +884,34 @@ async def _generate_novelty_rejection_report(
     prior_docs: List[ExtractedDocument],
     settings: Settings,
     primary_idx: int = 0,
+    chain_info: Optional[Dict] = None,
 ) -> str:
     inv1_doc = prior_docs[primary_idx] if primary_idx < len(prior_docs) else (prior_docs[0] if prior_docs else None)
+    mapping = (chain_info or {}).get("doc_name_mapping") or {}
+    primary_inv_name = mapping.get(str(primary_idx), f"인용발명 {primary_idx + 1}")
     elements_text = _format_elements(claim)
-    comp_text = _format_component_comparison(matches, prior_docs, primary_idx=primary_idx)
+    comp_text = _format_component_comparison(
+        matches,
+        prior_docs,
+        primary_idx=primary_idx,
+        doc_name_mapping=mapping,
+    )
 
     prompt = render_prompt(
         "prompt_novelty_rejection.txt",
         claim_number=str(claim.claim_number),
         claim_text=claim.text,
         elements_text=elements_text,
+        primary_inv_name=primary_inv_name,
         inv1_filename=inv1_doc.filename if inv1_doc else "인용발명 1",
         comp_text=comp_text,
     )
-    result = await call_ai(prompt, _build_system(settings, "independent"), settings, agent="report")
+    result = await call_ai(
+        prompt,
+        _build_system(settings, "independent", chain_info),
+        settings,
+        agent="report",
+    )
     return _normalize_report_markdown(result)
 
 
@@ -697,12 +924,17 @@ async def _generate_rejection_impossible_report(
     matches: List[ElementMatch],
     prior_docs: List[ExtractedDocument],
     settings: Settings,
+    chain_info: Optional[Dict] = None,
 ) -> str:
     claim_type = "independent" if claim.claim_type == "independent" else "dependent"
     parent_prefix = f"제{claim.parent_claim}항에 있어서 " if claim.parent_claim else ""
+    mapping = (chain_info or {}).get("doc_name_mapping") or {}
     evidence_lines = []
     for match in matches:
-        doc_name = f"인용발명 {match.cited_invention_index + 1}"
+        doc_name = mapping.get(
+            str(match.cited_invention_index),
+            f"인용발명 {match.cited_invention_index + 1}",
+        )
         evidence_lines.append(f"({match.label}) {match.judgment} ({doc_name})")
         if match.quote:
             evidence_lines.append(f"원문 발췌: {match.quote}")
@@ -717,9 +949,15 @@ async def _generate_rejection_impossible_report(
         claim_text=claim.text,
         parent_prefix=parent_prefix,
         elements_text=_format_elements(claim),
+        reference_scope_block=_reference_scope_prompt_block(chain_info),
         comp_text="\n".join(evidence_lines).strip() or "(확인된 대응 근거 없음)",
     )
-    result = await call_ai(prompt, _build_system(settings, claim_type), settings, agent="report")
+    result = await call_ai(
+        prompt,
+        _build_system(settings, claim_type, chain_info),
+        settings,
+        agent="report",
+    )
     return _normalize_report_markdown(result)
 
 
@@ -867,7 +1105,9 @@ async def generate_dependent_report(
     # 부정불가 자동 전환 처리
     all_no_match = all(m.judgment in NO_MATCH_LABELS for m in matches)
     if all_no_match:
-        return await _generate_rejection_impossible_report(claim, matches, prior_docs, settings)
+        return await _generate_rejection_impossible_report(
+            claim, matches, prior_docs, settings, chain_info
+        )
 
     display_chain = _dependent_display_chain_info(
         chain_info,
@@ -921,7 +1161,12 @@ async def generate_dependent_report(
         quotes_text=quotes_text if quotes_text else "(대응 구성 확인 필요 — 인용발명 원문 기반으로 직접 판단)",
         phase1_dep_fmt=phase1_dep_fmt,
     )
-    result = await call_ai(prompt, _build_system(settings, "dependent"), settings, agent="report")
+    result = await call_ai(
+        prompt,
+        _build_system(settings, "dependent", display_chain),
+        settings,
+        agent="report",
+    )
     return _normalize_report_markdown(result)
 
 
@@ -1017,26 +1262,20 @@ def build_rejected_inventions_section(
     chain_info: Optional[Dict],
     job_dir: str,
 ) -> str:
-    """채택되지 않은(탈락) 인용발명의 청구항 대비 결과를 보고서 말미 섹션으로 조립한다.
+    """독립항의 거절근거로 채택되지 않은 인용발명을 관련도 A 섹션으로 조립한다.
 
     chain_info.total(보고서에 실제 사용된 인용발명)에 없는 인용발명을 대상으로,
-    comparisons_{idx}.json 의 독립 판정을 읽어 '대비했으나 채택 안 됨'을 명시한다.
-    per_doc 대비에서 각 인용발명이 독립 판정될 때 의미가 있다(LLM 호출 없음).
+    comparisons_{idx}.json 의 독립 판정을 읽어 문헌별 고정 형식으로 요약한다.
+    구성 라벨은 내부 선택에만 사용하고 출력하지 않는다(LLM 호출 없음).
     """
     from backend.services.citation_extractor import load_comparisons
 
-    if not chain_info or len(prior_docs) <= 1:
+    if claim.claim_type != "independent" or not chain_info or len(prior_docs) <= 1:
         return ""
 
     used = set(chain_info.get("total", []))
     doc_name_mapping = chain_info.get("doc_name_mapping", {})
-    # 자기 청구항 키 우선, 없으면(구버전 작업) 부모 독립항 키 폴백.
     claim_key = str(claim.claim_number)
-    parent_key = (
-        str(claim.parent_claim)
-        if claim.claim_type == "dependent" and claim.parent_claim
-        else None
-    )
 
     label_to_text = {
         str(getattr(elem, "label", "")).strip(): getattr(elem, "text", "").strip()
@@ -1058,140 +1297,162 @@ def build_rejected_inventions_section(
         if inv_name and doc_idx is not None:
             for raw_name in (f"인용발명 {doc_idx}", f"인용발명 {doc_idx + 1}"):
                 reason = reason.replace(raw_name, inv_name)
-        return reason
+        return re.sub(r"\s+", " ", reason)
 
-    def _format_quote(item: Dict) -> str:
-        quote = (item.get("quote") or "").strip()
+    def _excerpt(item: Dict, prefix: str = "") -> str:
+        quote = re.sub(
+            r"\s+",
+            " ",
+            (item.get(f"{prefix}quote") or "").strip(),
+        )
+        translation = re.sub(
+            r"\s+",
+            " ",
+            (item.get(f"{prefix}quote_translation") or "").strip(),
+        )
         chunk_id = (item.get("chunk_id") or "").strip()
+        item_doc_idx = int(item.get("doc_index", item.get("cited_invention_index", 0)) or 0)
+        doc = prior_docs[item_doc_idx] if item_doc_idx < len(prior_docs) else None
+        if translation:
+            location = f"단락 {_paragraph_location(chunk_id, doc)}" if chunk_id else "단락 번호 확인 필요"
+            if quote:
+                return f'{translation} ({location}, "{quote}")'
+            return f"{translation} ({location})"
         if quote and chunk_id:
-            return f"{quote} {chunk_id}"
+            return f"{quote} (단락 {_paragraph_location(chunk_id, doc)})"
         if quote:
             return quote
+        if prefix:
+            return ""
         evidence = item.get("evidence") or []
         if isinstance(evidence, list):
             for ev in evidence:
                 if not isinstance(ev, dict):
                     continue
-                ev_quote = (ev.get("quote") or "").strip()
+                ev_quote = re.sub(
+                    r"\s+",
+                    " ",
+                    (ev.get("quote") or "").strip(),
+                )
+                ev_translation = re.sub(
+                    r"\s+",
+                    " ",
+                    (ev.get("quote_translation") or "").strip(),
+                )
                 ev_chunk_id = (ev.get("chunk_id") or "").strip()
+                ev_doc = prior_docs[item_doc_idx] if item_doc_idx < len(prior_docs) else None
+                if ev_translation:
+                    location = f"단락 {_paragraph_location(ev_chunk_id, ev_doc)}" if ev_chunk_id else "단락 번호 확인 필요"
+                    if ev_quote:
+                        return f'{ev_translation} ({location}, "{ev_quote}")'
+                    return f"{ev_translation} ({location})"
                 if ev_quote and ev_chunk_id:
-                    return f"{ev_quote} {ev_chunk_id}"
+                    return f"{ev_quote} (단락 {_paragraph_location(ev_chunk_id, ev_doc)})"
                 if ev_quote:
                     return ev_quote
-        return "(직접 인용 가능한 대응 원문 없음)"
+        return ""
 
-    def _format_similarity_line(item: Dict, inv_name: str, doc_idx: int) -> str:
-        label = (item.get("label") or "").strip()
-        reason = _item_reason(item, inv_name, doc_idx)
-        judgment = (item.get("judgment") or "대응 없음").strip()
-        claim_text = _summarize_claim_text(label_to_text.get(label, ""))
-        if reason and claim.claim_type == "dependent" and claim_text:
-            body = f"청구항의 {claim_text} 구성은 {reason}" if claim_text else reason
-        elif reason:
-            body = reason
-        elif claim_text:
-            body = f"청구항의 {claim_text} 구성은 이 인용발명에서 {judgment} 수준으로 대응됩니다."
-        else:
-            body = f"이 인용발명에서는 청구항과 {judgment} 수준으로 대응됩니다."
-        quote = _format_quote(item)
-        if quote and quote != "(직접 인용 가능한 대응 원문 없음)":
-            return f"({label}) {body} ({quote})"
-        return f"({label}) {body}"
+    judgment_rank = {
+        "대응 없음": 0,
+        "차이": 1,
+        "일부 유사": 2,
+        "일부 차이": 3,
+        "실질적 동일": 4,
+        "실질적동일": 4,
+        "동일": 5,
+    }
 
-    def _format_difference_line(item: Dict, inv_name: str, doc_idx: int) -> str:
-        label = (item.get("label") or "").strip()
-        reason = _item_reason(item, inv_name, doc_idx)
-        claim_text = _summarize_claim_text(label_to_text.get(label, ""))
-        quote = _format_quote(item)
+    def _rank(item: Dict) -> int:
+        return judgment_rank.get(_normalize_match_judgment(item.get("judgment") or ""), 0)
 
-        if reason and claim.claim_type == "dependent" and claim_text:
-            body = f"청구항의 {claim_text} 구성은 {reason}" if claim_text else reason
-        elif reason:
-            body = reason
-        elif claim_text:
-            body = (
-                f"청구항의 {claim_text} 구성은 이 인용발명에서 직접 확인되지 않아 "
-                "최종 채택에서 제외되었습니다."
+    def _purpose_effect_line(items: List[Dict], inv_name: str, doc_idx: int) -> str:
+        candidates = [
+            item for item in items
+            if (item.get("purpose_effect_similarity") or "").strip()
+        ]
+        if candidates:
+            return re.sub(
+                r"\s+",
+                " ",
+                (max(candidates, key=_rank).get("purpose_effect_similarity") or "").strip(),
             )
-        else:
-            body = "이 구성은 이 인용발명에서 직접 확인되지 않아 최종 채택에서 제외되었습니다."
+        best = max(items, key=_rank, default={})
+        reason = _item_reason(best, inv_name, doc_idx)
+        return reason or "독립항과 기술적 목적 또는 기대 효과가 일부 관련됩니다."
 
-        if quote and quote != "(직접 인용 가능한 대응 원문 없음)":
-            return f"({label}) {body} ({quote})"
-        return f"({label}) {body}"
+    def _closest_line(items: List[Dict], inv_name: str, doc_idx: int) -> str:
+        candidates = [item for item in items if _excerpt(item)]
+        best = max(candidates or items, key=_rank, default={})
+        reason = _item_reason(best, inv_name, doc_idx)
+        excerpt = _excerpt(best)
+        body = reason or "독립항과 가장 가까운 기술적 대응 내용입니다."
+        return f"{body} ({excerpt})" if excerpt else body
+
+    def _difference_line(items: List[Dict]) -> str:
+        different = [
+            item for item in items
+            if _normalize_match_judgment(item.get("judgment") or "") not in {"동일", "실질적 동일"}
+        ]
+        claim_parts = []
+        for item in sorted(different, key=_rank):
+            claim_text = _summarize_claim_text(label_to_text.get((item.get("label") or "").strip(), ""))
+            if claim_text and claim_text not in claim_parts:
+                claim_parts.append(claim_text)
+            if len(claim_parts) == 2:
+                break
+        if claim_parts:
+            return f"독립항은 {' 및 '.join(claim_parts)} 부분에서 이 인용발명과 차이가 있습니다."
+        return "주된 거절근거로 선택되지 않았으며, 독립항과의 명확한 구성 차이는 확인되지 않았습니다."
+
+    def _display_order(doc_idx: int) -> tuple[int, int]:
+        inv_name = doc_name_mapping.get(str(doc_idx), f"인용발명 {doc_idx + 1}")
+        match = re.search(r"인용발명\s*(\d+)", inv_name)
+        if match:
+            return (int(match.group(1)), doc_idx)
+        return (doc_idx + 1, doc_idx)
 
     blocks = []
-    for doc_idx in range(len(prior_docs)):
+    for doc_idx in sorted(range(len(prior_docs)), key=_display_order):
         if doc_idx in used:
             continue
         cache = load_comparisons(job_dir, doc_idx)
-        items = None
-        if cache:
-            items = cache.get(claim_key) or (cache.get(parent_key) if parent_key else None)
+        items = cache.get(claim_key) if cache else None
         comparison_missing = not items
         items = items or []
         inv_name = doc_name_mapping.get(str(doc_idx), f"인용발명 {doc_idx + 1}")
-        similar_items = [it for it in items if _normalize_match_judgment(it.get("judgment") or "") not in NO_MATCH_LABELS]
-        different_items = [it for it in items if _normalize_match_judgment(it.get("judgment") or "") in NO_MATCH_LABELS]
-
+        similar_items = [
+            it for it in items
+            if _normalize_match_judgment(it.get("judgment") or "") not in NO_MATCH_LABELS
+        ]
         block_lines = [
             f"**{inv_name}** ({prior_docs[doc_idx].filename})",
         ]
         if comparison_missing:
-            block_lines.append("- 대응 결과 미저장 — 확인 필요")
+            block_lines.extend([
+                "- 목적·효과 관련 유사점: 대응 결과 미저장 — 확인 필요",
+                "- 가장 가까운 대응 내용: 대응 결과 미저장 — 확인 필요",
+                "- 독립항과의 차이점: 대응 결과 미저장 — 확인 필요",
+            ])
         elif similar_items:
-            for item in similar_items:
-                block_lines.append(f"- {_format_similarity_line(item, inv_name, doc_idx)}")
+            block_lines.extend([
+                f"- 목적·효과 관련 유사점: {_purpose_effect_line(similar_items, inv_name, doc_idx)}",
+                f"- 가장 가까운 대응 내용: {_closest_line(similar_items, inv_name, doc_idx)}",
+                f"- 독립항과의 차이점: {_difference_line(items)}",
+            ])
         else:
-            block_lines.append("- 청구항과 직접 대응되는 구성은 확인되지 않았습니다.")
-
-        if comparison_missing:
-            pass
-        elif different_items:
-            detailed_diff_lines = [
-                _format_difference_line(item, inv_name, doc_idx)
-                for item in different_items
-                if _item_reason(item, inv_name, doc_idx)
-                or (item.get("quote") or "").strip()
-                or (item.get("chunk_id") or "").strip()
-                or (item.get("evidence") or [])
-            ]
-            if detailed_diff_lines:
-                for idx, line in enumerate(detailed_diff_lines):
-                    prefix = "- 차이점: " if idx == 0 else "  "
-                    block_lines.append(f"{prefix}{line}")
-                remaining_labels = [
-                    f"({(item.get('label') or '').strip()})"
-                    for item in different_items
-                    if not (
-                        _item_reason(item, inv_name, doc_idx)
-                        or (item.get("quote") or "").strip()
-                        or (item.get("chunk_id") or "").strip()
-                        or (item.get("evidence") or [])
-                    ) and (item.get("label") or "").strip()
-                ]
-                if remaining_labels:
-                    block_lines.append(
-                        f"  {', '.join(remaining_labels)} 구성은 이 인용발명에서 직접 확인되지 않아 최종 채택에서 제외되었습니다."
-                    )
-            else:
-                labels = ", ".join(f"({(item.get('label') or '').strip()})" for item in different_items if (item.get("label") or "").strip())
-                if labels:
-                    block_lines.append(
-                        f"- 차이점: {labels} 구성은 이 인용발명에서 직접 확인되지 않아 최종 채택에서 제외되었습니다."
-                    )
-                else:
-                    block_lines.append("- 차이점: 직접 확인되지 않는 구성이 있어 최종 채택에서 제외되었습니다.")
-        else:
-            block_lines.append("- 차이점: 일부 유사한 구성이 있으나 주된 거절근거를 완성할 정도로 핵심 차이점이 해소되지는 않았습니다.")
+            block_lines.extend([
+                "- 목적·효과 관련 유사점: 직접 확인되는 유사점이 없습니다.",
+                "- 가장 가까운 대응 내용: 직접 발췌할 수 있는 대응 내용이 없습니다.",
+                f"- 독립항과의 차이점: {_difference_line(items)}",
+            ])
 
         blocks.append("\n".join(block_lines))
 
     if not blocks:
         return ""
     intro = (
-        "아래 인용발명도 청구항 구성요소와 대비하였으나 주된 거절근거로 채택되지는 않았습니다. "
-        "다만 유사한 구성과 발췌, 최종 채택에서 제외된 차이점을 함께 정리합니다."
+        "아래 문헌은 독립항의 신규성 또는 진보성 거절근거로 사용되지 않은 인용발명입니다. "
+        "문헌별로 목적·효과 관련 유사점, 가장 가까운 대응 발췌 및 독립항과의 차이점을 정리합니다."
     )
     return intro + "\n\n## 관련도 A 인용발명\n\n" + "\n\n".join(blocks)
 
