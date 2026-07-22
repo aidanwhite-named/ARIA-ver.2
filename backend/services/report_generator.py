@@ -8,6 +8,26 @@
 - 카테고리 동일 청구항 처리
 """
 from __future__ import annotations
+
+REPORT_JUDGMENT_DISPLAY = {
+    "동일": ("95% 이상: 동일 🔵", 97),
+    "실질적 동일": ("90~94% 실질적 동일(용어 차이만 존재)🟢", 92),
+    "일부 차이": ("85~89%: 기술 사상 동일, 세부 구현 방식의 단순 변경 🟠", 87),
+    "일부 유사": ("80~84%: 핵심 기능 유사하나 목적/효과에 일부 차이🟡", 82),
+    "차이": ("80% 미만: 대응 안됨 ⚪", 70),
+    "대응 없음": ("80% 미만: 대응 안됨 ⚪", 0),
+}
+
+_REPORT_JUDGMENT_PATTERN = (
+    r"(?:동일|실질적\s*동일|실질적동일|일부\s*차이|일부차이|"
+    r"일부\s*유사|일부유사|차이|대응\s*없음|대응안됨|"
+    r"95%\s*이상:\s*동일|90~94%\s*실질적\s*동일|85~89%:\s*기술\s*사상\s*동일|"
+    r"80~84%:\s*핵심\s*기능\s*유사|80%\s*미만:\s*대응\s*안됨)"
+)
+
+_REPORT_PERCENT_SUFFIX_PATTERN = (
+    r"(?:\s*(?:\(\s*)?\d{1,3}(?:\s*[~～-]\s*\d{1,3})?%\s*(?:\))?)?"
+)
 import json
 import logging
 import re
@@ -51,8 +71,15 @@ def _normalize_report_markdown(md: str) -> str:
         "- **인용발명 대응 원문:**",
         md,
     )
+    normalized = re.sub(
+        r"(?m)^[ \t]*(?:-[ \t]*)?(?:\*\*)?[ \t]*"
+        r"(청구항\s*(?:추가\s*)?구성|유사도\s*평가|판단 이유|판단 근거|차이점|보완 검토)"
+        r"[ \t]*(?:\*\*)?[ \t]*:(?:\*\*)?",
+        lambda match: f"- {' '.join(match.group(1).split())}:",
+        normalized,
+    )
     quote_block_pattern = re.compile(
-        r"(?ms)(^- \*\*인용발명 대응 원문:\*\*\s*\n)(.*?)(?=\n- (?:개시 상태|청구항 구성|청구항 추가 구성|인용발명 대응 부분 요약|판단 이유|판단 근거|보완 검토)\s*:|\n#{1,6}\s|\Z)"
+        r"(?ms)(^- \*\*인용발명 대응 원문:\*\*\s*\n)(.*?)(?=\n- (?:개시 상태|청구항 구성|청구항 추가 구성|유사도 평가|판단 이유|판단 근거|차이점|보완 검토)\s*:|\n#{1,6}\s|\Z)"
     )
 
     def clean_quote_block(match: re.Match) -> str:
@@ -87,103 +114,75 @@ def _extract_first_json_object(text: str) -> Optional[Dict]:
 DEFAULT_PHASE1_FORMAT = """\
 ### [구성요소]
 
-(알파벳 기호) (동일 / 실질적동일 / 일부차이 / 일부유사 / 대응안됨 중 택1) + 해당 판정 구간의 구체적 퍼센트
-
-- 청구항 구성:
-
-- **인용발명 대응 원문:**
-  [한국어 원문인 경우] 원문 그대로 적고 단락/본문 위치를 병기
-  발췌문 뒤에 `~고 기재되어 있습니다` 같은 보고형 문구를 덧붙이지 않음
-  [외국어 원문인 경우(일본어·중국어·영어 등)] 반드시 아래 2줄 구조 사용:
-    한국어 직역 또는 준직역 문장
-    (단락 [실제번호] 또는 본문 실제 페이지, "원문 발췌") — 안내용 표기를 그대로 출력하지 않음
-  [외국어 원문 추가 규칙] 괄호 안 따옴표의 원문 발췌는 중국어 문헌이면 중국어, 일본어 문헌이면 일본어, 영어 문헌이면 영어 그대로 적고 다른 언어로 바꾸지 않음
-  [대응 없음인 경우] (인용발명 1에서 해당 구성 확인 불가)
-
-- 인용발명 대응 부분 요약:
-
-- 판단 이유: (판정명이나 퍼센트를 반복 설명하지 말고, 청구항 제한과 인용발명 대응 원문이 구조·기능·입력·출력·처리 조건 중 어느 점에서 대응되는지 또는 어느 핵심 제한이 빠져 대응이 불충분한지만 1~2문장으로 작성)
+- 청구항 구성: (N) 및 청구항 내용을 기재 (예: 청구항 구성 (A) 오디오 신호 소스로부터 소스 오디오 신호를 제공하는 단계)
+- 유사도 평가: (아래 5개 중 해당되는 판정 하나를 정확히 선택하여 그대로 기재)
+- 95% 이상: 동일 🔵
+- 90~94% 실질적 동일(용어 차이만 존재)🟢
+- 85~89%: 기술 사상 동일, 세부 구현 방식의 단순 변경 🟠
+- 80~84%: 핵심 기능 유사하나 목적/효과에 일부 차이🟡
+- 80% 미만: 대응 안됨 ⚪
+- 인용발명 대응 원문:
+- 판단 이유: (대응되는 기술적 근거에 대한 설명. 1~2문장의 명사형/개조식 구조)
+- 차이점: (문헌 간 용어 차이 또는 상세 기능의 부재 사항 명시. 차이가 없으면 `없음`으로 기재)
 
 
 [종합분석요약]
 
 - 결론: (1~2문장으로만 작성한다. 1문장째에는 핵심 일치 구성과 남는 차이를 바탕으로 최종 판단을 적고, 필요하면 2문장째에 추가 근거 필요 여부 또는 거절 근거 구성 가능 여부를 정리한다)
-
-- 유사점 요약: (1~2문장으로만 작성한다. 1문장째에는 핵심 일치 구성이 어디까지 확인되는지를 적고, 필요하면 2문장째에 그 의미를 정리한다)
-
-- 차이점: (차이점이 없으면 `없음`으로 적고, 차이점이 있으면 각 항목을 줄바꿈으로 구분하되 `[차이점 1]` 같은 소제목은 쓰지 않는다. 각 항목은 차이가 나는 청구항 제한 문언으로 시작하되 반드시 `구성 (알파벳)에 대해` 또는 `[청구항 제한]인 구성 (알파벳)에 대해`처럼 어느 구성요소의 차이인지 알파벳을 자연스럽게 포함한다. 각 항목을 적을 때는 아래의 **작성 서식 규칙**을 철저히 준수한다.
-  차이점에는 기술적 차이와 문헌 근거만 작성한다. 정량 점수, 커버리지, 평가 신뢰도, 문헌 의존도, 구성 채택 여부 또는 거절 근거 구성 가능성 같은 평가·판정 내용은 작성하지 않는다.
-  [작성 서식 규칙]
-  ① 구성대비가 되는 내용(동일 기조 내용)은 하나의 자연스러운 한 문장의 흐름으로 완성한다. 인용발명 1에서 확인되지 않는 하위 제한이 무엇인지 매끄럽게 연결하여 "구성요소 (알파벳)과 관련하여, 인용발명 1에서는 ~한 하위 제한이 확인되지 않아 ~한 기술적 차이가 존재합니다." 형태로 쓴다.
-  ② 대비되지 않는 부분, 남는 차이가 통상적 치환·확장으로 극복 가능한지 여부, 추가 근거 필요성 등은 논리 관계에 맞는 접속사를 사용하여 자연스럽게 연결한다. 반대·한계에는 `다만,`, `그러나,`, `하지만,`, 보충에는 `또한,`, `더욱이,`, `아울러,`, 결과에는 `따라서,`, `이에 따라,` 등을 사용하며, 접속사가 필요하지 않으면 생략한다. 문장을 분리하는 경우에는 줄바꿈한다.
-  ③ 외국어 문헌의 괄호 안 따옴표 원문은 반드시 해당 외국어 원문 그대로 쓰고, 영어로 바꾸지 않는다.)"""
+- 신규성 검토: (주 인용발명 단일 문헌 관점에서의 완전 개시 여부를 요약 기재)
+- 주 인용발명 선정 이유: (청구항의 독창적인 핵심 기술 구성의 일치도 및 시스템 공통성에 의거하여 선정한 근거를 1~2문장으로 기재)
+- 유사점 요약: (주 인용발명과 청구항 간에 서로 기술적으로 완전치 일치하는 부분을 정리)
+- 차이점: (차이가 있는 구성요소의 핵심 발췌 구절 및 위치를 [0000] 형태로 다시 출력하고, 구조적/기능적 대비 차이점을 매끄러운 명사형/개조식으로 간결하게 작성)
+- 잔여 차이 및 방어 포인트: (문헌 결합으로도 확보되지 않는 고유한 청구 범위 및 한정을 근거로 삼아 진보성 극복을 위한 방어 포인트를 기재)
+- [신규 검색 제안]: (유사도 80% 미만인 구성요소가 존재할 경우에만 기재. 추가 조사를 위한 구체적인 우회 기술 및 타겟 검색 키워드를 작성. 없으면 해당 라인 생략)"""
 
 # Template B(복수 인용발명) Phase 1 전용 형식
 DEFAULT_PHASE1_FORMAT_COMBO = """\
 ### [구성요소]
 
-(알파벳 기호) (동일 / 실질적동일 / 일부차이 / 일부유사 / 대응안됨 중 택1) + 해당 판정 구간의 구체적 퍼센트
-
-- 청구항 구성:
-
-- **인용발명 대응 원문:**
-  복수 문헌의 발췌를 함께 적는 경우 문헌별로 분리하고 `인용발명 N:` 꼬리표만 붙인다. 발췌문 뒤에 `~고 기재되어 있습니다` 같은 보고형 문구를 덧붙이지 않는다.
-  [한국어 원문인 경우] 원문 그대로 적고 단락/본문 위치를 병기
-  [외국어 원문인 경우(일본어·중국어·영어 등)] 반드시 아래 2줄 구조 사용:
-    한국어 직역 또는 준직역 문장
-    (단락 [실제번호] 또는 본문 실제 페이지, "원문 발췌") — 안내용 표기를 그대로 출력하지 않음
-  [외국어 원문 추가 규칙] 괄호 안 따옴표의 원문 발췌는 중국어 문헌이면 중국어, 일본어 문헌이면 일본어, 영어 문헌이면 영어 그대로 적고 다른 언어로 바꾸지 않음
-
-- 인용발명 대응 부분 요약:
-
-- 판단 이유: (판정명이나 퍼센트를 반복 설명하지 말고, 청구항 제한과 인용발명 1의 대응 원문이 구조·기능·입력·출력·처리 조건 중 어느 점에서 대응되는지 또는 어느 핵심 제한이 빠져 대응이 불충분한지만 1~2문장으로 작성)
-
-- 보완 검토: (인용발명 1의 판정이 `동일` 또는 `실질적동일`이면 `불필요`라고만 적는다. 인용발명 1에 미개시·약한 하위 제한이 있고 인용발명 2 이상의 직접 발췌가 제공된 경우에만, `보완 문헌 → 보완되는 하위 제한 → 원문 발췌와 위치 → 보완 후 남는 제한` 순서로 간결하게 적는다. 구성 보완 여부와 결합 동기·기술적 양립성 판단을 혼동하지 말고, 결합 가능성의 최종 판단은 `[종합분석요약]`에서 한다. 예외적 제3문헌은 표시된 주지관용 구성의 명시 근거로만 사용한다. 보완 근거가 없으면 `직접 보완 근거 없음`으로 적는다.)
+- 청구항 구성: (N) 및 청구항 내용을 기재 (예: 청구항 구성 (A) 오디오 신호 소스로부터 소스 오디오 신호를 제공하는 단계)
+- 유사도 평가: (아래 5개 중 해당되는 판정 하나를 정확히 선택하여 그대로 기재)
+- 95% 이상: 동일 🔵
+- 90~94% 실질적 동일(용어 차이만 존재)🟢
+- 85~89%: 기술 사상 동일, 세부 구현 방식의 단순 변경 🟠
+- 80~84%: 핵심 기능 유사하나 목적/효과에 일부 차이🟡
+- 80% 미만: 대응 안됨 ⚪
+- 인용발명 대응 원문:
+- 판단 이유: (대응되는 기술적 근거에 대한 설명. 1~2문장의 명사형/개조식 구조)
+- 차이점: (문헌 간 용어 차이 또는 상세 기능의 부재 사항 명시. 차이가 없으면 `없음`으로 기재)
+- 보완 검토: (인용발명 1의 판정이 `동일` 또는 `실질적동일`이면 `불필요`라고 적는다. 인용발명 1에 미개시, 약한 하위 제한이 있고 인용발명 2 이상의 직접 발췌가 제공된 경우에만, `보완 문헌 -> 보완되는 하위 제한 -> 원문 발췌와 위치 [0000] -> 보완 후 남는 제한` 순서로 간결하게 적는다.)
 
 
 [종합분석요약]
 
-- 결론: (1~2문장으로만 작성한다. 1문장째에는 핵심 일치 구성과 남는 차이를 바탕으로 최종 판단을 적고, 필요하면 2문장째에 문헌 근거의 부족 여부 또는 거절 근거 구성 가능 여부를 정리한다)
-
-- 유사점 요약: (1~2문장으로만 작성한다. 1문장째에는 핵심 일치 구성이 어디까지 확인되는지를 적고, 필요하면 2문장째에 그 의미를 정리한다)
-
-- 차이점: (유사도가 `동일` 또는 `실질적동일`인 구성요소는 적지 않고 `없음`으로 처리한다. 실제 차이가 남는 구성요소만 각 항목을 줄바꿈으로 구분하되 `[차이점 1]`, `[차이점 2]` 같은 소제목은 쓰지 않는다. 각 항목을 적을 때는 아래의 **작성 서식 규칙**을 철저히 준수한다.
-  차이점에는 기술적 차이와 문헌 근거만 작성한다. 정량 점수, 커버리지, 평가 신뢰도, 문헌 의존도, 구성 채택 여부 또는 거절 근거 구성 가능성 같은 평가·판정 내용은 작성하지 않는다.
-  [작성 서식 규칙]
-  ① 구성대비가 되는 내용(동일 기조 내용)은 하나의 자연스러운 한 문장의 흐름으로 완성한다. 인용발명 1에서 확인되지 않는 하위 제한과 인용발명 2의 개시 내용 및 출처(예: 한국어 직역 또는 준직역문 + 괄호 안 원문 및 페이지)를 매끄럽게 연결하여 "구성요소 (알파벳)과 관련하여, 인용발명 1에서는 ~가 확인되지 않으나 인용발명 2에는 ~[직역문](페이지, \"원문\")~는 구성이 기재되어 있으며 이는 ~로 보완되는 범위에 해당합니다/판단됩니다." 형태로 쓴다. (절대로 "~ 확인되지 않습니다. 인용발명 2에서는 다음 구성이 개시되어 있습니다."와 같이 문장을 분리하거나 별도 개시 안내를 나열식으로 쓰지 않는다)
-  ② 보강 후 실질적인 차이가 남는 경우에는 줄바꿈하여 논리 관계에 맞는 접속사로 자연스럽게 이어 쓴다. 반대·한계에는 `다만,`, `그러나,`, `하지만,`, 보충에는 `또한,`, `더욱이,`, `아울러,`, 결과에는 `따라서,`, `이에 따라,` 등을 사용하며, 접속사가 필요하지 않으면 생략한다. 단순한 적용 대상 차이, 데이터 표현 차이 또는 통상적인 입력·출력 연결만으로 유기적 결합이 불충분하다고 판단하지 않는다. 결합 곤란성을 인정하려면 기술적 비호환성, 반대 교시, 작동 원리 변경 또는 예측하기 어려운 효과에 관한 구체적인 근거를 제시한다.
-  ③ 외국어 문헌의 괄호 안 따옴표 원문은 반드시 해당 외국어 원문 그대로 쓰고, 영어로 바꾸지 않는다. `차이점 요지:`, `인용발명 2 발췌:`, `대응 이유:`, `번역:`, `발췌:` 같은 꼬리표는 쓰지 않는다. 독립항 결합형에서 `주지관용 구성 입증자료`로 표시된 예외적 제3문헌만 표시된 일반 구성의 입증자료로 제한한다. 종속항에 새로 추가된 인용발명 3 이상에는 이 제한을 적용하지 않는다. SubScore 등 내부 점수는 출력 금지)"""
+- 결론: (핵심 일치 구성과 남는 차이를 바탕으로 최종 판단을 1~2문장으로 기재)
+- 신규성 검토: (주 인용발명 단일 문헌 관점에서의 완전 개시 여부를 요약 기재)
+- 주 인용발명 선정 이유: (청구항의 차별적 핵심 구성과 시스템 공통성에 의거한 선정 근거를 기재)
+- 유사점 요약: (주 인용발명과 청구항 사이에 기술적으로 일치하는 부분을 정리)
+- 차이점: (차이가 있는 구성마다 검증된 핵심 발췌와 실제 위치를 다시 출력한다. 주 인용발명의 미개시 제한과 이를 보완하는 인용발명의 발췌·위치를 함께 대비한다. 외국어는 `번역:`을 먼저 쓰고 다음 줄의 `발췌:`에는 한 줄로 줄인 원문 뒤에 단락번호 또는 단락번호가 없는 문헌의 본문 페이지를 적는다. 보완 후 남는 구조적·기능적 차이를 간결하게 작성)
+- 결합 검토: (직접 보완 근거, 결합 동기·양립성, 반대 교시·작동원리, 효과 예측성을 검토)
+- 잔여 차이 및 방어 포인트: (문헌 결합으로도 확보되지 않는 고유한 청구 범위 및 한정을 기재)"""
 
 DEFAULT_PHASE1_FORMAT_DEPENDENT = """\
 ### [추가 구성]
 
-(A) (동일 / 실질적동일 / 일부차이 / 일부유사 / 대응안됨 중 택1) + 해당 판정 구간의 구체적 퍼센트
-
-- 청구항 추가 구성: (`제~항에 있어서, ...` 문구를 포함하여 작성)
-
-- **인용발명 대응 원문:**
-  [한국어 원문인 경우] 원문 그대로 적고 단락/본문 위치를 병기.
-  발췌문 뒤에 `~고 기재되어 있습니다` 같은 보고형 문구를 덧붙이지 않음.
-  [외국어 원문인 경우(일본어·중국어·영어 등)] 한국어 직역 또는 준직역 문장 다음 줄에 원문 발췌와 단락/본문 위치를 병기.
-  [외국어 원문 추가 규칙] 괄호 안 따옴표의 원문 발췌는 중국어 문헌이면 중국어, 일본어 문헌이면 일본어, 영어 문헌이면 영어 그대로 적고 다른 언어로 바꾸지 않음.
-
-- 인용발명 대응 부분 요약:
-
-- 판단 이유: (판정명이나 퍼센트를 반복 설명하지 말고, 추가 구성과 인용발명 대응 원문이 구조·기능·입력·출력·처리 조건 중 어느 점에서 대응되는지 또는 어느 핵심 제한이 빠져 대응이 불충분한지만 1~2문장으로 작성)
+- 청구항 구성: (N) 및 청구항 내용을 기재 (예: 청구항 추가 구성: 제1항에 있어서, 상기 디지털 신호 처리는... 단계)
+- 유사도 평가: (아래 5개 중 해당되는 판정 하나를 정확히 선택하여 그대로 기재)
+- 95% 이상: 동일 🔵
+- 90~94% 실질적 동일(용어 차이만 존재)🟢
+- 85~89%: 기술 사상 동일, 세부 구현 방식의 단순 변경 🟠
+- 80~84%: 핵심 기능 유사하나 목적/효과에 일부 차이🟡
+- 80% 미만: 대응 안됨 ⚪
+- 인용발명 대응 원문:
+- 판단 이유: (대응되는 기술적 근거에 대한 설명. 1~2문장의 명사형/개조식 구조)
+- 차이점: (문헌 간 용어 차이 또는 상세 기능의 부재 사항 명시. 차이가 없으면 `없음`으로 기재)
 
 
 [종합분석요약]
 
 - 결론: (추가 구성의 대응 강도와 남은 차이에 따라 거절 근거 구성 가능 여부를 중립적으로 작성하되, `구성 (A)` 같은 임시 라벨 표현은 쓰지 않음)
-
-- 유사점 요약:
-
-- 차이점: (임시 라벨이 있더라도 `구성 (A)`처럼 쓰지 말고 `추가 구성` 또는 해당 기술 특징 문구로 작성한다. 일반적인 기술분야 유사성만 쓰지 말고 어떤 하위 제한이 원문으로 확인되지 않는지 특정한다. 각 항목을 적을 때는 아래의 **작성 서식 규칙**을 철저히 준수한다.
-  차이점에는 추가 구성의 기술적 차이와 문헌 근거만 작성한다. 정량 점수, 커버리지, 평가 신뢰도, 문헌 의존도, 추가 구성의 평가·채택 여부 또는 거절 근거 구성 가능성은 작성하지 않는다.
-  [작성 서식 규칙]
-  ① 구성대비가 되는 내용(동일 기조 내용)은 하나의 자연스러운 한 문장의 흐름으로 완성한다. 인용발명 1에서 확인되지 않는 하위 제한과 인용발명 2의 개시 내용 및 출처(예: 한국어 직역 또는 준직역문 + 괄호 안 원문 및 페이지)를 매끄럽게 연결하여 "추가 구성과 관련하여, 인용발명 1에서는 ~가 확인되지 않으나 인용발명 2에는 ~[직역문](페이지, \"원문\")~는 구성이 기재되어 있으며 이는 ~로 보완되는 범위에 해당합니다/판단됩니다." 형태로 쓴다. (절대로 "~ 확인되지 않습니다. 인용발명 2에서는 다음 구성이 개시되어 있습니다."와 같이 문장을 분리하거나 별도 개시 안내를 나열식으로 쓰지 않는다)
-  ② 보강이 된 이후에도 남는 하위 제한, 유기적 결합 관계의 차이, 추가 근거 필요성 등(대비되지 않는 부분)은 논리 관계에 맞는 접속사를 사용하여 자연스럽게 연결한다. 반대·한계에는 `다만,`, `그러나,`, `하지만,`, 보충에는 `또한,`, `더욱이,`, `아울러,`, 결과에는 `따라서,`, `이에 따라,` 등을 사용하며, 접속사가 필요하지 않으면 생략한다. 문장을 분리하는 경우에는 줄바꿈한다.
-  ③ 외국어 문헌의 괄호 안 따옴표 원문은 반드시 해당 외국어 원문 그대로 쓰고, 영어로 바꾸지 않는다. `차이점 요지:`, `인용발명 2 발췌:`, `대응 이유:`, `번역:`, `발췌:` 같은 꼬리표는 쓰지 않는다.)"""
+- 유사점 요약: (양 문헌과 추가 청구항 구성 간에 공통적으로 일치하는 부분을 요약 정리)
+- 차이점: (차이가 있는 구성요소의 핵심 발췌 구절 및 위치를 [0000] 형태로 다시 출력하고, 구조적/기능적 대비 차이점을 매끄러운 명사형/개조식으로 간결하게 작성)"""
 
 _BASE_SYSTEM = """당신은 대한민국 특허청 심사관 수준의 특허 분석 전문가입니다.
 
@@ -195,19 +194,25 @@ _BASE_SYSTEM = """당신은 대한민국 특허청 심사관 수준의 특허 �
 [문체 기준]
 - 문장은 짧고 단정하게 쓰되, 문헌 근거 없이 단정하지 말 것
 - `~에 대응된다`, `~로 볼 수 있다`, `~가 기재되어 있다`, `~는 확인되지 않는다`, `따라서 ~로 판단된다` 같은 실무형 문장을 우선 사용할 것
-- 단, `인용발명 대응 원문` 칸은 발췌문과 위치만 쓰고 `~고 기재되어 있습니다` 같은 보고형 종결을 붙이지 말 것
-- 같은 취지를 반복하지 말고, 차이점 항목은 인용발명 1과 인용발명 2 이상의 대비 내용(동일 기조 내용)을 한 문장으로 매끄럽게 연결할 것. 후속 문장은 논리 관계에 따라 접속사를 선택하고, 반대·한계에는 `다만`, `그러나`, `하지만`, 보충에는 `또한`, `더욱이`, `아울러`, 결과에는 `따라서`, `이에 따라` 등을 사용하며, 접속사가 필요하지 않으면 생략할 것
+- 단, `인용발명 대응 원문` 또는 발췌 칸은 발췌문 및 위치만 쓰고 `~고 기재되어 있습니다` 같은 보고형 종결을 붙이지 말 것
+- 같은 취지를 반복하지 말고, 판단 이유 등은 개조식 명사형으로 간결히 마무리할 것
 
 [인용 규칙]
-- 한국어 인용: 원문 그대로 기재 후 실제 단락번호 형식
-- 외국어 인용(일본어·중국어·영어 등 모든 외국어): 한국어 직역 또는 준직역 문장 다음 줄에 실제 단락번호 또는 본문 페이지와 원문 발췌를 기재합니다. 안내용 표기를 그대로 출력하지 마십시오.
+- 한국어 인용: 원문 그대로 기재 후 [0000] 형식의 실제 단락번호 병기
+- 외국어 인용(일본어·중국어·영어 등 모든 외국어): 먼저 `번역:` 뒤에 한국어 직역 또는 준직역을 적고, 다음 줄에 `발췌:` 뒤로 1줄 이내의 짧은 외국어 원문을 적을 것. 실제 단락번호 또는 단락번호가 없는 문헌의 본문 페이지는 발췌문 바로 뒤에 적을 것.
 - 괄호 안 따옴표의 원문 발췌는 중국어 문헌이면 중국어, 일본어 문헌이면 일본어, 영어 문헌이면 영어 그대로 적고 다른 언어로 바꾸지 말 것
-- 번역문은 발췌 부분의 직역 또는 준직역으로 작성하고, 요약·의역·평가를 섞지 말 것
+- 여러 인용발명이 하나의 `인용발명 대응 원문`에 함께 들어가면 문헌별로 `인용발명 N:` 또는 실제 문헌명을 줄 앞에 붙이고, 각 문헌의 번역·원문·위치를 한 묶음으로 작성할 것. 문헌 내용을 출처 표기 없이 섞지 말 것.
+- 안내 문구나 자리표시자를 본문에 그대로 출력하지 말 것
 
 [출력 형식]
 - 마크다운으로 출력
-- 독립항 Phase 1의 각 구성요소는 `### [구성요소]` 헤더 다음 줄에 `(A) 실질적동일 92%` 형식으로 시작할 것
-- 종속항 Phase 1의 각 추가 구성은 `### [추가 구성]` 헤더 다음 줄에 `(A) 일부차이 87%` 형식으로 시작할 것
+- 형식 파일에 적힌 필드 이름만 한 번씩 출력하고 작성 지시문은 출력하지 말 것
+- `인용발명 대응 원문`에는 번역문·극히 짧은 원문·실제 위치만 적을 것
+- 독립항 구성요소는 `청구항 구성 (알파벳) [청구항 한정 문언]` 형태로 시작하고, 내부의 `유사도 평가: [등급명]` 형태로 판정할 것
+- 종속항 추가 구성는 `청구항 구성 (알파벳) [청구항 추가 문언]` 형태로 시작하고, 내부의 `유사도 평가: [등급명]` 형태로 판정할 것
+- 구성요소별 `차이점`은 차이가 없으면 `없음`으로 적을 것
+- `[종합분석요약]`의 `차이점`에는 차이가 있는 구성의 검증된 핵심 발췌와 실제 위치를 반드시 다시 적을 것. 결합형은 주 인용발명의 미개시 제한과 이를 보완하는 인용발명의 발췌·위치를 함께 표시할 것. 외국어는 `번역:`을 먼저 쓰고 다음 줄의 `발췌:`에는 한 줄로 줄인 원문 뒤에 단락번호 또는 단락번호가 없는 문헌의 본문 페이지를 적을 것. 제공된 발췌가 없으면 원문을 만들지 말고 `직접 발췌 근거 없음`이라고 적을 것
+- `[신규 검색 제안]`은 유사도 80% 미만 구성이 있을 때만 출력할 것
 """
 
 
@@ -334,14 +339,21 @@ def _paragraph_location(chunk_id: str, doc: Optional[ExtractedDocument]) -> str:
     return match.group(1) if match else chunk_id
 
 
-def _format_evidence_lines(match: ElementMatch, prior_docs: List[ExtractedDocument], indent: str = "") -> list[str]:
+def _format_evidence_lines(
+    match: ElementMatch,
+    prior_docs: List[ExtractedDocument],
+    indent: str = "",
+    doc_name: str = "",
+) -> list[str]:
     if not match.evidence:
         return []
     lines = [f"{indent}하위 제한별 근거:"]
+    source_prefix = f"{doc_name}: " if doc_name else ""
     for ev in match.evidence[:5]:
         quote = (ev.quote or "").strip()
         if not quote:
             continue
+        translation = (getattr(ev, "quote_translation", "") or "").strip()
         label = (ev.limitation or "근거").strip()
         chunk_id = (ev.chunk_id or "").strip()
         location = ""
@@ -352,7 +364,11 @@ def _format_evidence_lines(match: ElementMatch, prior_docs: List[ExtractedDocume
                 location = f" (본문 {anchor} 페이지)"
             else:
                 location = f" (단락 {_paragraph_location(chunk_id, doc)})"
-        lines.append(f"{indent}- {label}: {quote}{location}")
+        if translation:
+            lines.append(f"{indent}- {source_prefix}{label} 번역: {translation}{location}")
+            lines.append(f'{indent}  {source_prefix}원문: "{quote}"')
+        else:
+            lines.append(f"{indent}- {source_prefix}{label}: {quote}{location}")
     return lines if len(lines) > 1 else []
 
 
@@ -389,7 +405,8 @@ def _combination_rationale_prompt_block(chain_info: Optional[Dict]) -> str:
             lines.append(f"- {doc_name}의 단일문헌 잔여 구성: {', '.join(map(str, missing))}")
         if primary_idx is not None:
             lines.append(
-                f"주 인용발명: {primary_name}. 독립항의 핵심 구조·작동관계와 직접 근거의 폭을 우선하여 선정"
+                f"주 인용발명: {primary_name}. 범용 입출력 흐름의 형식적 커버리지보다 "
+                "독립항의 차별적 핵심 구조·작동관계·목표 효과에 관한 직접 근거를 우선하여 선정"
             )
     label = rationale.get("label") or rationale.get("type")
     if label:
@@ -535,55 +552,209 @@ def enforce_phase1_judgment_headers(
     matches: List[ElementMatch],
 ) -> str:
     """구조화된 비교 판정과 보고서의 판정명·퍼센트가 어긋나지 않게 고정한다."""
-    display = {
-        "동일": ("동일", 97),
-        "실질적 동일": ("실질적동일", 92),
-        "일부 차이": ("일부차이", 87),
-        "일부 유사": ("일부유사", 82),
-        "차이": ("대응안됨", 70),
-        "대응 없음": ("대응안됨", 0),
-    }
     result = str(text or "")
     for match in matches:
-        judgment, percent = display.get(match.judgment, ("대응안됨", 0))
-        label = re.escape(match.label)
-        result = re.sub(
-            rf"(?m)^\(\s*{label}\s*\)\s*"
-            r"(?:동일|실질적\s*동일|실질적동일|일부\s*차이|일부차이|"
-            r"일부\s*유사|일부유사|차이|대응\s*없음|대응안됨)"
-            r"(?:\s+\d{1,3}(?:~\d{1,3})?%)?\s*$",
-            f"({match.label}) {judgment} {percent}%",
-            result,
+        judgment, percent = REPORT_JUDGMENT_DISPLAY.get(
+            match.judgment, ("80% 미만: 대응 안됨 ⚪", 0)
         )
-        if len(matches) == 1:
+        label_esc = re.escape(match.label)
+
+        # New format block matching
+        block_pattern = (
+            r"(?ms)(^(?:-\s*)?(?:\*\*)?(?:"
+            r"청구항\s*(?:추가\s*)?구성\s*(?:\(\s*" + label_esc + r"\s*\)|(?:\*\*)?\s*:\s*[^\r\n]*?\(\s*" + label_esc + r"\s*\))"
+            r"|청구항\s*추가\s*구성\s*:\s*제\d+항[^\r\n]*?\(\s*" + label_esc + r"\s*\)"
+            r").*?)"
+            r"(?=\n\s*#{1,6}\s|\n\s*(?:-\s*)?(?:\*\*)?청구항\s*(?:추가\s*)?구성\s*(?:\(|:)|\n.종합분석|\Z)"
+        )
+
+        def replace_judgment_line(m: re.Match) -> str:
+            block = m.group(1)
+            block_sub = re.sub(
+                r"(?m)^\s*-?\s*(?:\*\*)?유사도\s*평가(?:\*\*)?\s*:\s*[^\n]*$",
+                "- 유사도 평가: " + judgment,
+                block
+            )
+            return block_sub
+
+        new_result, count = re.subn(block_pattern, replace_judgment_line, result)
+        if count > 0:
+            result = new_result
+        else:
+            # Fallback to legacy format matching
+            if (
+                match.quote
+                and match.judgment in {"동일", "실질적 동일"}
+                and match.directness in {"", "direct"}
+                and not match.missing_limitations
+            ):
+                disclosure_status = "직접 개시"
+            elif match.quote or match.found:
+                disclosure_status = "부분 개시"
+            else:
+                disclosure_status = "미개시"
+
+            report_label = r"(?:%s|전제부\s*%s)" % (label_esc, label_esc) if match.label == "P" else label_esc
             result = re.sub(
-                r"(?m)^(?!\s*\()\s*"
-                r"(?:동일|실질적\s*동일|실질적동일|일부\s*차이|일부차이|"
-                r"일부\s*유사|일부유사|차이|대응\s*없음|대응안됨)"
-                r"(?:\s+\d{1,3}(?:~\d{1,3})?%)?\s*$",
-                f"{judgment} {percent}%",
+                r"(?m)^(?:\(\s*" + report_label + r"\s*\)\s*)?" + _REPORT_JUDGMENT_PATTERN + _REPORT_PERCENT_SUFFIX_PATTERN + r"\s*\n(?:\s*\n)?(?:-\s*개시\s*상태\s*:\s*[^\n]*\n(?:\s*\n)?)?",
+                "(" + match.label + ") " + judgment + " " + str(percent) + "%\n\n- 개시 상태: " + disclosure_status + "\n\n",
                 result,
                 count=1,
             )
-        if (
-            match.quote
-            and match.judgment in {"동일", "실질적 동일"}
-            and match.directness in {"", "direct"}
-            and not match.missing_limitations
-        ):
-            disclosure_status = "직접 개시"
-        elif match.quote or match.found:
-            disclosure_status = "부분 개시"
-        else:
-            disclosure_status = "미개시"
-        result = re.sub(
-            rf"(?m)^\({label}\)\s+{re.escape(judgment)}\s+{percent}%\s*\n"
-            r"(?:\s*\n)?(?:-\s*개시\s*상태\s*:\s*[^\n]*\n(?:\s*\n)?)?",
-            f"({match.label}) {judgment} {percent}%\n\n- 개시 상태: {disclosure_status}\n\n",
-            result,
-            count=1,
-        )
     return result
+
+
+def _one_line_report_excerpt(text: str, max_chars: int = 160) -> str:
+    """발췌를 줄바꿈 없는 짧은 한 줄로 축약하되 앞뒤 핵심 문맥을 보존한다."""
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+    if len(cleaned) <= max_chars:
+        return cleaned
+
+    separator = " ... "
+    sentences = re.split(r"(?<=[.!?])\s+", cleaned)
+    last_sentence = sentences[-1] if len(sentences) > 1 else ""
+    if last_sentence and len(last_sentence) <= int(max_chars * 0.45):
+        tail = last_sentence
+        head_budget = max_chars - len(separator) - len(tail)
+        head = cleaned[:head_budget].rstrip()
+        if head_budget < len(cleaned) and not cleaned[head_budget].isspace() and " " in head:
+            head = head.rsplit(" ", 1)[0]
+        return f"{head}{separator}{tail}"[:max_chars].rstrip()
+
+    head_budget = int((max_chars - len(separator)) * 0.68)
+    tail_budget = max_chars - len(separator) - head_budget
+    head = cleaned[:head_budget].rstrip()
+    tail_start = len(cleaned) - tail_budget
+    tail = cleaned[tail_start:].lstrip()
+    if head_budget < len(cleaned) and not cleaned[head_budget].isspace() and " " in head:
+        head = head.rsplit(" ", 1)[0]
+    if tail_start > 0 and not cleaned[tail_start - 1].isspace() and " " in tail:
+        tail = tail.split(" ", 1)[-1]
+    shortened = f"{head}{separator}{tail}".strip()
+    return shortened[:max_chars].rstrip()
+
+
+def ensure_phase1_summary_difference_citations(
+    text: str,
+    matches: List[ElementMatch],
+    prior_docs: List[ExtractedDocument],
+    chain_info: Optional[Dict] = None,
+    secondary_matches: Optional[List[ElementMatch]] = None,
+) -> str:
+    """종합분석 차이점에 검증된 발췌와 위치가 빠졌을 때 구조화 근거로 보강한다."""
+    result = str(text or "")
+    summary_header = re.search(
+        r"(?mi)^\s*(?:#{1,6}\s*)?\[종합\s*분석\s*요약\]\s*$",
+        result,
+    )
+    if not summary_header:
+        return result
+
+    summary = result[summary_header.end():]
+    difference = re.search(
+        r"(?mi)^\s*-\s*(?:\*\*)?차이점(?:\*\*)?\s*:\s*(.*)$",
+        summary,
+    )
+    if not difference:
+        return result
+    difference_value = difference.group(1).strip()
+    if re.fullmatch(r"(?:없음|차이\s*없음)[.!]?", difference_value):
+        return result
+
+    tail = summary[difference.end():]
+    next_field = re.search(
+        r"(?mi)^\s*-\s*(?:\*\*)?(?:결합\s*검토|잔여\s*차이\s*및\s*방어\s*포인트|"
+        r"신규성\s*검토|주\s*인용발명\s*선정\s*이유|유사점\s*요약|결론|"
+        r"\[신규\s*검색\s*제안\])(?:\*\*)?\s*:",
+        tail,
+    )
+    field_end = difference.end() + (next_field.start() if next_field else len(tail))
+    difference_block = summary[difference.start():field_end]
+
+    total_refs = list((chain_info or {}).get("total") or [])
+    primary_idx = total_refs[0] if total_refs else None
+    allowed_refs = set(total_refs)
+    mapping = (chain_info or {}).get("doc_name_mapping") or {}
+    all_matches = list(matches or []) + list(secondary_matches or [])
+    if allowed_refs:
+        all_matches = [m for m in all_matches if m.cited_invention_index in allowed_refs]
+    if primary_idx is None and all_matches:
+        primary_idx = all_matches[0].cited_invention_index
+
+    weak_labels: list[str] = []
+    for match in matches or []:
+        if primary_idx is not None and match.cited_invention_index != primary_idx:
+            continue
+        if match.judgment not in {"동일", "실질적 동일"} or match.missing_limitations:
+            if match.label not in weak_labels:
+                weak_labels.append(match.label)
+
+    selected: list[ElementMatch] = []
+    for label in weak_labels:
+        candidates = [
+            match for match in all_matches
+            if match.label == label and match.quote and match.chunk_id
+            and match.judgment not in NO_MATCH_LABELS
+        ]
+        candidates.sort(
+            key=lambda match: (
+                0 if primary_idx is not None and match.cited_invention_index != primary_idx else 1,
+                total_refs.index(match.cited_invention_index)
+                if match.cited_invention_index in total_refs else match.cited_invention_index,
+                -_JUDGMENT_ORDER.get(match.judgment, 0),
+            )
+        )
+        if candidates:
+            selected.append(candidates[0])
+
+    # 캐시 보고서처럼 주 문헌 전용 matches가 없는 경우에도 차이 판정의 직접 근거를 찾는다.
+    if not selected:
+        fallback_by_label: dict[str, ElementMatch] = {}
+        for match in all_matches:
+            if (
+                not match.quote
+                or not match.chunk_id
+                or match.judgment in NO_MATCH_LABELS
+                or match.judgment in {"동일", "실질적 동일"}
+            ):
+                continue
+            previous = fallback_by_label.get(match.label)
+            if previous is None or _JUDGMENT_ORDER.get(match.judgment, 0) > _JUDGMENT_ORDER.get(previous.judgment, 0):
+                fallback_by_label[match.label] = match
+        selected.extend(fallback_by_label.values())
+
+    evidence_lines: list[str] = []
+    seen: set[tuple[int, str, str]] = set()
+    for match in selected:
+        key = (match.cited_invention_index, match.label, match.chunk_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        location = _format_citation_location(match, prior_docs)
+        if match.chunk_id in difference_block or location in difference_block:
+            continue
+        doc_name = mapping.get(
+            str(match.cited_invention_index),
+            f"인용발명 {match.cited_invention_index + 1}",
+        )
+        quote = _one_line_report_excerpt(match.quote)
+        translation = re.sub(
+            r"\s+", " ", (getattr(match, "quote_translation", "") or "")
+        ).strip()
+        if translation:
+            evidence_lines.append(f"  - 번역({doc_name}): {translation}")
+            evidence_lines.append(f'    발췌: "{quote}" {location}')
+        else:
+            evidence_lines.append(f'  - 발췌({doc_name}): "{quote}" {location}')
+
+    if not evidence_lines:
+        if selected:
+            return result
+        evidence_lines.append("  - 근거 발췌: 직접 발췌 근거 없음.")
+
+    insertion = "\n" + "\n".join(evidence_lines)
+    insert_at = summary_header.end() + field_end
+    return result[:insert_at].rstrip() + insertion + "\n" + result[insert_at:].lstrip("\r\n")
 
 
 def _dedupe_phase1_sections(phase1_md: str) -> str:
@@ -604,8 +775,14 @@ def _dedupe_phase1_sections(phase1_md: str) -> str:
         if m:
             label = m.group(1) if m.lastindex else None
             if not label:
-                label_m = re.search(r'^\(((?:P|[A-J](?:-\d+)?))\)', sec, re.MULTILINE)
-                label = label_m.group(1) if label_m else None
+                label_m = re.search(
+                    r'^(?:\(((?:P|[A-J](?:-\d+)?))\)|'
+                    r'청구항\s*(?:추가\s*)?구성\s*\(\s*((?:P|[A-J](?:-\d+)?))\s*\))',
+                    sec,
+                    re.MULTILINE,
+                )
+                if label_m:
+                    label = label_m.group(1) or label_m.group(2)
             if not label:
                 if not seen_unlabeled_component:
                     seen_unlabeled_component = True
@@ -657,6 +834,7 @@ async def generate_independent_phase1_streaming(
         full = await _generate_novelty_rejection_report(
             claim, matches, prior_docs, settings, primary_idx, chain_info
         )
+        # 구형 모델이 덧붙이는 Phase 2 영역은 보고서에 포함하지 않는다.
         idx = full.find("# [Phase 2]")
         yield full[:idx].strip() if idx >= 0 else full
         return
@@ -757,7 +935,7 @@ def _make_phase1_prompt(
                 evidence_lines.append(f"구성요소 ({match.label}) [{match.judgment}]")
                 evidence_lines.append(f"원문 발췌: {match.quote}")
                 evidence_lines.append(f"단락/본문 위치: {_format_citation_location(match, prior_docs)}")
-                evidence_lines.extend(_format_evidence_lines(match, prior_docs))
+                evidence_lines.extend(_format_evidence_lines(match, prior_docs, doc_name=support_name))
                 if match.motivation_quote:
                     evidence_lines.append(f"문제·개선효과 직접 근거: {match.motivation_quote}")
                 if match.combination_risk in {"contrary_teaching", "principle_change"}:
@@ -1866,10 +2044,15 @@ def _format_component_comparison(
             return [f"- {doc_name}: 대응 없음", "  (해당 인용발명에서 구성 확인 불가)"]
 
         lines = [f"- {doc_name}: {match.judgment}"]
-        lines.append(f"  {match.quote}")
+        quote_translation = (getattr(match, "quote_translation", "") or "").strip()
+        if quote_translation:
+            lines.append(f"  {doc_name}: 번역: {quote_translation}")
+            lines.append(f'  {doc_name}: 원문: "{match.quote}"')
+        else:
+            lines.append(f"  {doc_name}: {match.quote}")
         if match.chunk_id:
-            lines.append(f"  {_format_citation_location(match, prior_docs)}")
-        lines.extend(_format_evidence_lines(match, prior_docs, indent="  "))
+            lines.append(f"  {doc_name}: {_format_citation_location(match, prior_docs)}")
+        lines.extend(_format_evidence_lines(match, prior_docs, indent="  ", doc_name=doc_name))
         if match.directness:
             lines.append(f"  직접성: {match.directness}")
         if match.missing_limitations:
@@ -1916,11 +2099,16 @@ def _format_component_comparison(
     for m in matches:
         doc_name = _doc_name(m.cited_invention_index)
         lines.append(f"({m.label}) {m.judgment} ({doc_name})")
-        if m.quote:
-            lines.append(m.quote)
+        quote_translation = (getattr(m, "quote_translation", "") or "").strip()
+        if quote_translation:
+            lines.append(f"{doc_name}: 번역: {quote_translation}")
+            if m.quote:
+                lines.append(f'{doc_name}: 원문: "{m.quote}"')
+        elif m.quote:
+            lines.append(f"{doc_name}: {m.quote}")
         if m.chunk_id:
-            lines.append(_format_citation_location(m, prior_docs))
-        lines.extend(_format_evidence_lines(m, prior_docs))
+            lines.append(f"{doc_name}: {_format_citation_location(m, prior_docs)}")
+        lines.extend(_format_evidence_lines(m, prior_docs, doc_name=doc_name))
         if m.directness:
             lines.append(f"직접성: {m.directness}")
         if m.missing_limitations:

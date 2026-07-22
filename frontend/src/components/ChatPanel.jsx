@@ -69,7 +69,7 @@ export default function ChatPanel({ open, onOpen, onClose, jobId, claimNumber, r
         <div className="flex flex-col">
           <span className="text-sm font-semibold text-slate-800">💬 보고서에 질문</span>
           <span className="text-[11px] text-slate-400">
-            청구항 {claimNumber} Phase 1 분석 · 보고서는 수정되지 않습니다
+            청구항 {claimNumber} 분석 · 보고서는 수정되지 않습니다
           </span>
         </div>
         <button
@@ -88,7 +88,7 @@ export default function ChatPanel({ open, onOpen, onClose, jobId, claimNumber, r
         </div>
         {messages.length === 0 && !loading && (
           <div className="text-xs text-slate-400 leading-relaxed mt-4">
-            이 청구항의 Phase 1 분석에 대해 궁금한 점을 물어보세요.<br />
+            이 청구항의 분석에 대해 궁금한 점을 물어보세요.<br />
             예: "구성 (C)는 왜 대응 없음으로 봤나요?", "인용발명 2가 더 적합하지 않나요?"
           </div>
         )}

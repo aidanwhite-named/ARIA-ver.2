@@ -75,14 +75,28 @@ const JUDGMENT_COLORS = {
 
 // ── Phase 1 유사도 배지 스타일 ───────────────────────────────────────────────
 const SIMILARITY_STYLES = {
-  '동일':           { badge: 'bg-green-100 text-green-800 border border-green-300' },
-  '실질적동일':     { badge: 'bg-orange-100 text-orange-800 border border-orange-300' },
-  '일부차이':       { badge: 'bg-amber-100 text-amber-700 border border-amber-300' },
-  '일부유사':       { badge: 'bg-green-100 text-green-800 border border-green-300' },
+  '동일':           { badge: 'bg-blue-100 text-blue-800 border border-blue-300' },
+  '실질적동일':     { badge: 'bg-green-100 text-green-800 border border-green-300' },
+  '일부차이':       { badge: 'bg-orange-100 text-orange-800 border border-orange-300' },
+  '일부유사':       { badge: 'bg-amber-100 text-amber-800 border border-amber-300' },
   '차이':           { badge: 'bg-gray-100 text-gray-700 border border-gray-300' },
 }
 
-function similarityPresentation(pct) {
+const SIMILARITY_PRESENTATION_BY_JUDGMENT = {
+  '동일':       { symbol: '🔵', row: 'bg-blue-50 border-l-4 border-blue-500' },
+  '실질적동일': { symbol: '🟢', row: 'bg-green-50 border-l-4 border-green-500' },
+  '일부차이':   { symbol: '🟠', row: 'bg-orange-50 border-l-4 border-orange-500' },
+  '일부유사':   { symbol: '🟡', row: 'bg-amber-50 border-l-4 border-amber-400' },
+  '차이':       { symbol: '⚪', row: 'bg-white border-l-4 border-gray-300' },
+  '대응없음':   { symbol: '⚪', row: 'bg-white border-l-4 border-gray-300' },
+  '대응안됨':   { symbol: '⚪', row: 'bg-white border-l-4 border-gray-300' },
+}
+
+function similarityPresentation(pct, judgment = '') {
+  const normalizedJudgment = String(judgment || '').replace(/\s+/g, '')
+  if (SIMILARITY_PRESENTATION_BY_JUDGMENT[normalizedJudgment]) {
+    return SIMILARITY_PRESENTATION_BY_JUDGMENT[normalizedJudgment]
+  }
   const value = Number.parseInt(String(pct || '').replace('%', ''), 10)
   if (value >= 95) return { symbol: '🔵', row: 'bg-blue-50 border-l-4 border-blue-500' }
   if (value >= 90) return { symbol: '🟢', row: 'bg-green-50 border-l-4 border-green-500' }
@@ -102,6 +116,8 @@ function normalizeReportStatusIcons(text) {
 
 function sanitizeReportText(text) {
   return String(text || '')
+    // 과거 생성 프롬프트의 단계 안내 문구는 현재 보고서에 표시하지 않는다.
+    .replace(/^\s*청구항\s*\d+에\s*대한\s*특허\s*분석\s*Phase\s*1\s*보고서입니다\.?\s*\r?\n?/gim, '')
 }
 
 const RELATED_A_TAB_KEY = '__relatedA'
@@ -163,13 +179,19 @@ function reportTabKeys(allReports) {
 
 // ── Phase 1 필드 라벨 스타일 ─────────────────────────────────────────────────
 const FIELD_LABEL_STYLES = [
-  { re: /^(청구항 구성)\s*:/,              cls: 'border-indigo-300 bg-indigo-50/50 text-indigo-950', labelCls: 'text-indigo-700' },
-  { re: /^(인용발명 대응 부분 요약)\s*:/,  cls: 'border-sky-300 bg-sky-50/50 text-sky-950', labelCls: 'text-sky-700' },
+  { re: /^(청구항\s*(?:추가\s*)?구성)\s*:/,      cls: 'border-indigo-300 bg-indigo-50/50 text-indigo-950', labelCls: 'text-indigo-700' },
   { re: /^(인용발명\s*대응 원문)\s*:/,     cls: 'border-teal-400 bg-teal-50/50 text-teal-950', labelCls: 'text-teal-700' },
+  { re: /^(유사도 평가)\s*:/,              cls: 'border-amber-300 bg-amber-50/70 text-amber-950', labelCls: 'text-amber-700' },
   { re: /^(판단 이유)\s*:/,               cls: 'border-violet-300 bg-violet-50/50 text-violet-950', labelCls: 'text-violet-700' },
   { re: /^(판단 근거)\s*:/,               cls: 'border-violet-400 bg-violet-50/50 text-violet-950', labelCls: 'text-violet-700' },
   { re: /^(차이점)\s*:/,                  cls: 'border-rose-300 bg-rose-50/50 text-rose-950', labelCls: 'text-rose-700' },
+  { re: /^(보완 검토)\s*:/,               cls: 'border-cyan-300 bg-cyan-50/50 text-cyan-950', labelCls: 'text-cyan-700' },
   { re: /^(유사점 요약)\s*:/,             cls: 'border-green-300 bg-green-50/50 text-green-950', labelCls: 'text-green-700' },
+  { re: /^(신규성\s*검토)\s*:/,           cls: 'border-blue-300 bg-blue-50/50 text-blue-950', labelCls: 'text-blue-700' },
+  { re: /^(주\s*인용발명\s*선정\s*이유)\s*:/, cls: 'border-slate-300 bg-slate-50/50 text-slate-950', labelCls: 'text-slate-700' },
+  { re: /^(결합\s*검토)\s*:/,             cls: 'border-purple-300 bg-purple-50/50 text-purple-950', labelCls: 'text-purple-700' },
+  { re: /^(잔여\s*차이\s*및\s*방어\s*포인트)\s*:/, cls: 'border-emerald-300 bg-emerald-50/50 text-emerald-950', labelCls: 'text-emerald-700' },
+  { re: /^(\[?신규\s*검색\s*제안\]?)\s*:/, cls: 'border-orange-300 bg-orange-50/50 text-orange-950', labelCls: 'text-orange-700' },
 ]
 
 function extractText(children) {
@@ -227,18 +249,18 @@ function Phase1ListItem({ children }) {
 
   // 유사도 라인 감지 — 이모지·기존 바탕색 지시 잔재도 흡수
   const newSimMatch = text.match(
-    /^(?:유사도\s*:\s*)?\(([A-JP](?:-\d+)?)\)\s*(동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음|대응안됨|대응 안됨)?\s*(\d+%)?/
+    /^(?:유사도\s*:\s*)?\(([A-JP](?:-\d+)?)\)\s*(동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음|대응안됨|대응 안됨)?(?:\s*(?:\(\s*)?(\d{1,3}(?:\s*~\s*\d{1,3})?%)(?:\s*\))?)?/
   )
   const oldSimMatch = text.match(
-    /^유사도\s*:\s*(동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음|대응안됨|대응 안됨)?\s*(\d+%)?/
+    /^유사도\s*:\s*(동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음|대응안됨|대응 안됨)?(?:\s*(?:\(\s*)?(\d{1,3}(?:\s*~\s*\d{1,3})?%)(?:\s*\))?)?/
   )
   if (newSimMatch || oldSimMatch) {
     const elementLabel = newSimMatch ? newSimMatch[1] : ''
     const labelText = newSimMatch ? (newSimMatch[2] || '') : (oldSimMatch?.[1] || '')
     const normalizedLabel = labelText.replace(/\s+/g, '') === '대응없음' ? '차이' : labelText.replace(/\s+/g, '')
-    const pct = newSimMatch ? (newSimMatch[3] || '') : (oldSimMatch?.[2] || '')
+    const pct = (newSimMatch ? (newSimMatch[3] || '') : (oldSimMatch?.[2] || '')).replace(/\s+/g, '')
     const style = SIMILARITY_STYLES[normalizedLabel] || SIMILARITY_STYLES['차이']
-    const presentation = similarityPresentation(pct)
+    const presentation = similarityPresentation(pct, normalizedLabel)
     return (
       <li className={`flex items-center gap-2 py-2 px-3 rounded-r my-1.5 list-none -ml-5 ${presentation.row}`}>
         {elementLabel && <span className="text-xs font-semibold text-gray-700 shrink-0">({elementLabel})</span>}
@@ -287,16 +309,17 @@ function escapeHtml(value) {
 }
 
 function renderJudgmentInline(text) {
-  const match = text.match(
-    /^(\([A-JP](?:-\d+)?\)(?:\s*(?:및|,)\s*\([A-JP](?:-\d+)?\))*)\s+(동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음|대응안됨|대응 안됨)(?:\s+(\d+%))?\s*$/
+  const normalizedText = text.replace(/^\(전제부\s+P\)/, '(P)')
+  const match = normalizedText.match(
+    /^(\([A-JP](?:-\d+)?\)(?:\s*(?:및|,)\s*\([A-JP](?:-\d+)?\))*)\s+(동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음|대응안됨|대응 안됨)(?:\s+(?:\(\s*)?(\d{1,3}(?:\s*~\s*\d{1,3})?%)(?:\s*\))?)?\s*$/
   )
-  const fallbackMatch = !match && text.match(
-    /^(동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음|대응안됨|대응 안됨)(?:\s+(\d+%))?\s*$/
+  const fallbackMatch = !match && normalizedText.match(
+    /^(?:\(\s*)?(동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음|대응안됨|대응 안됨)(?:\s+(\d{1,3}(?:\s*~\s*\d{1,3})?%))?(?:\s*\))?\s*$/
   )
   if (!match && !fallbackMatch) return null
   const label = match ? match[1] : ''
   const rawJudgment = match ? match[2] : fallbackMatch[1]
-  const pct = match ? (match[3] || '') : (fallbackMatch[2] || '')
+  const pct = (match ? (match[3] || '') : (fallbackMatch[2] || '')).replace(/\s+/g, '')
   const judgment = rawJudgment.replace(/\s+/g, '')
   return { label, judgment, pct }
 }
@@ -310,23 +333,27 @@ function ReportParagraph({ children }) {
   if (/^\[(인용발명\s*\d+\s*단독\(신규성\)|인용발명\s*\d+\s*\+\s*주지관용\(진보성\)|인용발명\s*\d+\s*과\s*인용발명\s*\d+\s*의\s*결합(?:\s*및\s*주지관용)?\(진보성\))\]$/.test(trimmed)) {
     return <p className="mt-2 mb-5 text-xl font-bold tracking-tight text-slate-950">{children}</p>
   }
-  if (/^\[(구성대비|종합분석요약|구성요소|종합 판단|유사점|차이점|결론)\]$/.test(trimmed)) {
+  if (/^\[(구성대비|종합분석요약|구성요소|종합 판단|유사점|차이점|결론|신규성 검토|주 인용발명 선정 이유|결합 검토|잔여 차이 및 방어 포인트|신규 검색 제안)\]$/.test(trimmed)) {
     const isMajor = /^\[(구성대비|종합분석요약|종합 판단)\]$/.test(trimmed)
     const isDiff = trimmed === '[차이점]'
     const isSimilar = trimmed === '[유사점]'
     const isConclusion = trimmed === '[결론]'
+    const isSubSummary = /^\[(신규성 검토|주 인용발명 선정 이유|결합 검토|잔여 차이 및 방어 포인트|신규 검색 제안)\]$/.test(trimmed)
     return (
       <p className={
         isMajor
-          ? 'mt-6 mb-3 px-4 py-3 rounded-xl bg-slate-100 border border-slate-200 text-lg font-bold text-slate-800'
+          ? 'mt-8 mb-4 px-4 py-3 rounded-xl bg-slate-800 text-white text-lg font-extrabold shadow-sm flex items-center gap-2'
           : isDiff
             ? 'mt-5 mb-2 px-3 py-2 rounded-lg bg-rose-50 border border-rose-200 text-sm font-bold text-rose-800'
             : isSimilar
               ? 'mt-5 mb-2 px-3 py-2 rounded-lg bg-emerald-50 border border-emerald-200 text-sm font-bold text-emerald-800'
               : isConclusion
                 ? 'mt-6 mb-3 px-4 py-3 rounded-lg bg-amber-50 border border-amber-200 text-xl font-extrabold text-amber-900'
-                : 'mt-4 mb-1 text-sm font-semibold text-slate-700'
+                : isSubSummary
+                  ? 'mt-4 mb-2 px-3 py-1.5 rounded-md bg-slate-100 border border-slate-200 text-sm font-bold text-slate-800'
+                  : 'mt-4 mb-1 text-sm font-semibold text-slate-700'
       }>
+        {isMajor && <span className="inline-block w-2 h-5 bg-blue-500 rounded-full mr-1"></span>}
         {children}
       </p>
     )
@@ -337,7 +364,7 @@ function ReportParagraph({ children }) {
   const judgmentInline = renderJudgmentInline(trimmed)
   if (judgmentInline) {
     const { label, judgment, pct } = judgmentInline
-    const presentation = similarityPresentation(pct)
+    const presentation = similarityPresentation(pct, judgment)
     return (
       <p className={`flex items-center gap-2 font-semibold text-sm pl-3 py-0.5 rounded-r mt-4 mb-1 overflow-x-auto ${presentation.row}`}>
         {label && <span className="shrink-0">{label}</span>}
@@ -353,11 +380,12 @@ function preprocessReport(md) {
   md = sanitizeReportText(md)
 
   function fieldClass(label) {
-    if (label === '청구항 구성') return 'phase1-field phase1-field-claim'
+    if (label === '청구항 구성' || label === '청구항 추가 구성' || label === '추가 구성' || label.startsWith('청구항')) return 'phase1-field phase1-field-claim'
     if (label === '인용발명 대응 원문') return 'phase1-field phase1-field-quote'
-    if (label === '인용발명 대응 부분 요약') return 'phase1-field phase1-field-summary'
+    if (label === '유사도 평가') return 'phase1-field phase1-field-similarity'
     if (label === '판단 이유' || label === '판단 근거') return 'phase1-field phase1-field-reason'
     if (label === '차이점') return 'phase1-field phase1-field-diff'
+    if (label === '보완 검토') return 'phase1-field phase1-field-supplement'
     if (label === '유사점 요약') return 'phase1-field phase1-field-similar'
     return 'phase1-field'
   }
@@ -367,14 +395,146 @@ function preprocessReport(md) {
   }
 
   function normalizePhase1Fields(text) {
-    const fieldRe = /^-\s*(?:\*\*)?(청구항 구성|인용발명\s*대응 원문|인용발명 대응 부분 요약|판단 이유|판단 근거|차이점|유사점 요약)(?:\*\*)?\s*:\s*(.*)$/
-    const sectionHeaderRe = /^#{1,6}\s*\[(구성요소|추가\s*구성|전제부)(?:\s*\([A-JP](?:-\d+)?\))?\]\s*$/
+    const fieldRe = /^\s*(?:-\s*)?(?:\*\*)?(청구항\s*(?:추가\s*)?구성|추가\s*구성|인용발명\s*대응 원문|인용발명 대응 부분 요약|유사도 평가|판단 이유|판단 근거|차이점|보완 검토|유사점 요약)(?:\*\*)?\s*:\s*(.*)$/
+    const sectionHeaderRe = /^#{1,6}\s*\[\s*(?:구성요소|추가\s*구성|추가구성|전제부|종속항|청구항\s*\d*(?:\s*추가\s*구성)?)(?:\s*[:\-]?\s*(?:\([^)]*\)|[A-Za-z0-9-]+))?\s*\]\s*$/i
+    const componentHeaderRe = /^\s*(?:#{1,6}\s*)?\[\s*(?:구성요소|추가\s*구성|추가구성|전제부|종속항|청구항\s*\d*(?:\s*추가\s*구성)?)(?:\s*[:\-]?\s*(?:\([^)]*\)|[A-Za-z0-9-]+))?\s*\]\s*$/i
     const lines = text.split('\n')
     const result = []
     let i = 0
 
     while (i < lines.length) {
       const line = lines[i]
+      const trimmedLine = line.trim()
+      const isCompHeader = componentHeaderRe.test(trimmedLine)
+
+      if (isCompHeader) {
+        result.push(line)
+        i += 1
+        let fields = {}
+        const otherLines = []
+
+        const flushFields = (fieldsDict) => {
+          if (!fieldsDict || Object.keys(fieldsDict).length === 0) return
+          const blockCards = []
+          const claimCard = fieldsDict['청구항 구성'] || fieldsDict['청구항 추가 구성'] || fieldsDict['추가 구성']
+          const simCard = fieldsDict['유사도 평가']
+          if (claimCard || simCard) {
+            const rowCards = []
+            if (claimCard) rowCards.push(claimCard)
+            if (simCard) rowCards.push(simCard)
+            if (rowCards.length === 1) {
+              blockCards.push(rowCards[0])
+            } else {
+              blockCards.push(`<div class="phase1-card-row">${rowCards.join('\n')}</div>`)
+            }
+          }
+
+          if (fieldsDict['인용발명 대응 원문']) {
+            blockCards.push(fieldsDict['인용발명 대응 원문'])
+          }
+
+          const reasonCard = fieldsDict['판단 이유'] || fieldsDict['판단 근거']
+          const diffCard = fieldsDict['차이점']
+          if (reasonCard || diffCard) {
+            const rowCards = []
+            if (reasonCard) rowCards.push(reasonCard)
+            if (diffCard) rowCards.push(diffCard)
+            if (rowCards.length === 1) {
+              blockCards.push(rowCards[0])
+            } else {
+              blockCards.push(`<div class="phase1-card-row">${rowCards.join('\n')}</div>`)
+            }
+          }
+
+          if (fieldsDict['보완 검토']) {
+            blockCards.push(fieldsDict['보완 검토'])
+          }
+
+          for (const [k, v] of Object.entries(fieldsDict)) {
+            if (!['청구항 구성', '청구항 추가 구성', '추가 구성', '유사도 평가', '인용발명 대응 원문', '판단 이유', '판단 근거', '차이점', '보완 검토', '인용발명 대응 부분 요약'].includes(k)) {
+              blockCards.push(v)
+            }
+          }
+
+          if (blockCards.length > 0) {
+            result.push(`<div class="phase1-component-block">\n${blockCards.join('\n')}\n</div>`)
+          }
+        }
+
+        while (i < lines.length) {
+          const current = lines[i]
+          const trimmed = current.trim()
+          if (componentHeaderRe.test(trimmed) || /^\[(종합분석요약|종합 판단|유사점|차이점|결론)\]/.test(trimmed) || /^#{1,6}\s/.test(trimmed)) {
+            break
+          }
+
+          const match = current.match(fieldRe)
+          if (match) {
+            const rawLabel = match[1]
+            const label = normalizeFieldLabel(rawLabel)
+
+            if ((label === '청구항 구성' || label === '청구항 추가 구성' || label === '추가 구성') && (fields['청구항 구성'] || fields['청구항 추가 구성'] || fields['추가 구성'])) {
+              flushFields(fields)
+              fields = {}
+            }
+
+            if (label === '인용발명 대응 부분 요약') {
+              i += 1
+              while (i < lines.length) {
+                const sub = lines[i].trim()
+                if (!sub || fieldRe.test(lines[i]) || componentHeaderRe.test(sub) || /^#{1,6}\s/.test(sub)) break
+                i += 1
+              }
+              continue
+            }
+
+            const bodyLines = []
+            if (match[2].trim()) bodyLines.push(match[2].trim())
+            i += 1
+
+            while (i < lines.length) {
+              const cur = lines[i]
+              const curTrimmed = cur.trim()
+              if (!curTrimmed) {
+                if (label === '차이점') {
+                  bodyLines.push('')
+                  i += 1
+                  continue
+                }
+                i += 1
+                break
+              }
+              if (
+                fieldRe.test(cur) ||
+                /^#{1,6}\s/.test(curTrimmed) ||
+                componentHeaderRe.test(curTrimmed) ||
+                (label !== '차이점' && /^\([A-JP](?:-\d+)?\)\s/.test(curTrimmed)) ||
+                /^\s*-?\s*(유사점 요약|차이점|결론)\s*:/.test(curTrimmed)
+              ) {
+                break
+              }
+              bodyLines.push(curTrimmed)
+              i += 1
+            }
+
+            const body = bodyLines.join('\n')
+            const fieldHtml = `<div class="${fieldClass(label)}"><div class="phase1-field-label">${escapeHtml(label)}</div>${body ? `<div class="phase1-field-body">${escapeHtml(body).replace(/\n/g, '<br />')}</div>` : ''}</div>`
+            fields[label] = fieldHtml
+          } else {
+            otherLines.push(current)
+            i += 1
+          }
+        }
+
+        flushFields(fields)
+
+        if (otherLines.length > 0) {
+          result.push(otherLines.join('\n'))
+        }
+
+        continue
+      }
+
       const match = line.match(fieldRe)
       if (!match) {
         result.push(line)
@@ -383,6 +543,16 @@ function preprocessReport(md) {
       }
 
       const label = normalizeFieldLabel(match[1])
+      if (label === '인용발명 대응 부분 요약') {
+        i += 1
+        while (i < lines.length) {
+          const sub = lines[i].trim()
+          if (!sub || fieldRe.test(lines[i]) || componentHeaderRe.test(sub) || /^#{1,6}\s/.test(sub)) break
+          i += 1
+        }
+        continue
+      }
+
       const bodyLines = []
       if (match[2].trim()) bodyLines.push(match[2].trim())
       i += 1
@@ -404,7 +574,7 @@ function preprocessReport(md) {
           /^#{1,6}\s/.test(trimmed) ||
           sectionHeaderRe.test(trimmed) ||
           (label !== '차이점' && /^\([A-JP](?:-\d+)?\)\s/.test(trimmed)) ||
-          /^-\s*(유사점 요약|차이점|결론)\s*:/.test(trimmed)
+          /^\s*-?\s*(유사점 요약|차이점|결론)\s*:/.test(trimmed)
         ) {
           break
         }
@@ -485,7 +655,8 @@ function preprocessReport(md) {
       new RegExp(`^${judgmentRe}\\s*\\n+${claimRe}`, 'gm'),
       (_, judgment, claimBody = '') => {
         const pct = (judgment.match(/(\d+%)\s*$/) || [])[1] || ''
-        const presentation = similarityPresentation(pct)
+        const parsedJudgment = renderJudgmentInline(judgment)
+        const presentation = similarityPresentation(pct, parsedJudgment?.judgment)
         return (
           `<div class="phase1-judgment-card ${presentation.row}">` +
           `<div class="phase1-judgment-line">${escapeHtml(judgment)}${pct ? ` <span aria-hidden="true">${presentation.symbol}</span>` : ''}</div>` +
@@ -496,41 +667,22 @@ function preprocessReport(md) {
     )
   }
 
-  function mergeSummaryIntoReasonCards(text) {
-    const summaryRe = String.raw`<div class="phase1-field phase1-field-summary"><div class="phase1-field-label">인용발명 대응 부분 요약<\/div>(?:<div class="phase1-field-body">([\s\S]*?)<\/div>)?<\/div>`
-    const reasonRe = String.raw`<div class="phase1-field phase1-field-reason"><div class="phase1-field-label">(판단 이유|판단 근거)<\/div>(?:<div class="phase1-field-body">([\s\S]*?)<\/div>)?<\/div>`
-    return text.replace(
-      new RegExp(`${summaryRe}\\s*\\n*${reasonRe}`, 'g'),
-      (_, summaryBody = '', reasonLabel, reasonBody = '') => {
-        const summary = summaryBody
-          ? `<div class="phase1-reason-summary"><div class="phase1-reason-subtitle">인용발명 대응 부분 요약</div>${summaryBody}</div>`
-          : ''
-        return (
-          `<div class="phase1-field phase1-field-reason">` +
-          `<div class="phase1-field-label">${reasonLabel}</div>` +
-          `<div class="phase1-field-body">${reasonBody}${summary}</div>` +
-          `</div>`
-        )
-      }
-    )
-  }
-
   function normalizeSummaryItems(text) {
-    const labels = '(유사점 요약|차이점|결론)'
+    const summaryRegex = /^-\s*(결론|신규성\s*검토|주\s*인용발명\s*선정\s*이유|유사점\s*요약|차이점|결합\s*검토|잔여\s*차이\s*및\s*방어\s*포인트|\[?신규\s*검색\s*제안\]?)\s*:\s*(.*)$/
     const lines = text.split('\n')
     const result = []
     let i = 0
 
     while (i < lines.length) {
       const line = lines[i]
-      const match = line.match(new RegExp(`^-\\s*${labels}\\s*:\\s*(.*)$`))
+      const match = line.match(summaryRegex)
       if (!match) {
         result.push(line)
         i += 1
         continue
       }
 
-      const label = match[1]
+      const rawLabel = match[1].replace(/\[|\]/g, '').replace(/\s+/g, ' ')
       const bodyLines = []
       if (match[2].trim()) bodyLines.push(match[2].trim())
       i += 1
@@ -547,8 +699,9 @@ function preprocessReport(md) {
           continue
         }
         if (
-          /^-\s*(유사점 요약|차이점|결론)\s*:/.test(trimmed) ||
-          /^\[(유사점|차이점|결론|종합분석요약)\]$/.test(trimmed) ||
+          summaryRegex.test(trimmed) ||
+          /^-\s*(?:[^\n:]+)\s*:/.test(trimmed) ||
+          /^\[(유사점|차이점|결론|종합분석요약|신규성 검토|주 인용발명 선정 이유|결합 검토|잔여 차이 및 방어 포인트|신규 검색 제안)\]$/.test(trimmed) ||
           /^#{1,6}\s/.test(trimmed)
         ) {
           break
@@ -558,11 +711,13 @@ function preprocessReport(md) {
       }
 
       const heading =
-        label === '유사점 요약'
+        rawLabel === '유사점 요약' || rawLabel === '유사점'
           ? '[유사점]'
-          : label === '차이점'
+          : rawLabel === '차이점'
             ? '[차이점]'
-            : '[결론]'
+            : rawLabel === '결론'
+              ? '[결론]'
+              : `[${rawLabel}]`
       result.push(`${heading}\n\n${bodyLines.join('\n').trim()}`)
     }
 
@@ -579,6 +734,11 @@ function preprocessReport(md) {
       if (/^\[(유사점|유사점\s*요약)\]$/.test(trimmed)) return '[유사점]'
       if (/^\[(차이점)\]$/.test(trimmed)) return '[차이점]'
       if (/^\[(결론)\]$/.test(trimmed)) return '[결론]'
+      if (/^\[(신규성\s*검토)\]$/.test(trimmed)) return '[신규성 검토]'
+      if (/^\[(주\s*인용발명\s*선정\s*이유)\]$/.test(trimmed)) return '[주 인용발명 선정 이유]'
+      if (/^\[(결합\s*검토)\]$/.test(trimmed)) return '[결합 검토]'
+      if (/^\[(잔여\s*차이\s*및\s*방어\s*포인트)\]$/.test(trimmed)) return '[잔여 차이 및 방어 포인트]'
+      if (/^\[(신규\s*검색\s*제안)\]$/.test(trimmed)) return '[신규 검색 제안]'
       return null
     }
 
@@ -617,7 +777,7 @@ function preprocessReport(md) {
         continue
       }
 
-      for (const key of ['[결론]', '[유사점]', '[차이점]']) {
+      for (const key of ['[결론]', '[신규성 검토]', '[주 인용발명 선정 이유]', '[유사점]', '[차이점]', '[결합 검토]', '[잔여 차이 및 방어 포인트]', '[신규 검색 제안]']) {
         if (blocks[key]) out.push(blocks[key].heading, ...blocks[key].body)
       }
       i = cursor
@@ -641,7 +801,6 @@ function preprocessReport(md) {
   md = keepFirstComponentHeader(md)
   md = normalizePhase1Fields(md)
   md = mergeClaimIntoJudgmentCards(md)
-  md = mergeSummaryIntoReasonCards(md)
   md = normalizeSummaryItems(md)
   md = md.replace(
     /([^\n])\s+(-\s*(유사점 요약|차이점|결론)\s*:)/g,
@@ -694,10 +853,50 @@ function preprocessReport(md) {
 }
 
 function preprocessPhase1Report(md) {
+  function moveSimilarityBeforeClaim(text) {
+    const componentHeaderRe = /^\s*(?:#{1,6}\s*)?\[\s*(?:구성요소|추가\s*구성|추가구성|전제부|종속항|청구항\s*\d*(?:\s*추가\s*구성)?)(?:\s*[:\-]?\s*(?:\([^)]*\)|[A-Za-z0-9-]+))?\s*\]\s*$/i
+    const sectionHeaderRe = /^\s*#{1,6}\s*\[/
+    const similarityRe = /^\s*(?:-\s*)?(?:\*\*)?유사도\s*평가(?:\*\*)?\s*:/
+    const claimRe = /^\s*(?:-\s*)?(?:\*\*)?(?:청구항\s*(?:추가\s*)?구성|추가\s*구성)(?:\s*\([^)]*\))?(?:\*\*)?\s*:/
+    const legacyClaimRe = /^\s*#{1,6}\s*(?:청구항\s*구성|추가\s*구성)\s*\([A-JP](?:-\d+)?\)/
+    const lines = String(text || '').split('\n')
+    const output = []
+    let component = null
+
+    function flushComponent() {
+      if (!component) return
+      const similarityIndex = component.findIndex(line => similarityRe.test(line))
+      const claimIndex = component.findIndex(line => claimRe.test(line) || legacyClaimRe.test(line))
+      if (similarityIndex > claimIndex && claimIndex >= 0) {
+        const [similarityLine] = component.splice(similarityIndex, 1)
+        component.splice(claimIndex, 0, similarityLine)
+      }
+      output.push(...component)
+      component = null
+    }
+
+    for (const line of lines) {
+      if (componentHeaderRe.test(line)) {
+        flushComponent()
+        component = [line]
+        continue
+      }
+      if (component && sectionHeaderRe.test(line)) {
+        flushComponent()
+        output.push(line)
+        continue
+      }
+      if (component) component.push(line)
+      else output.push(line)
+    }
+    flushComponent()
+    return output.join('\n')
+  }
+
   return preprocessReport(
-    String(md || '')
+    moveSimilarityBeforeClaim(String(md || ''))
       .replace(/^###\s+claim\s+(\d+)\s*$/gim, '### 청구항 $1')
-      .replace(/^\s*#{1,6}\s*(?:[^\w\r\n]*)?\s*종합\s*분석\s*요약\s*$/gim, '[종합분석요약]')
+      .replace(/^\s*(?:#{1,6}\s*)?\[?\s*종합\s*분석\s*요약\s*\]?\s*$/gim, '[종합분석요약]')
   )
 }
 
@@ -1208,8 +1407,17 @@ export default function App() {
       return updated
     })
   }
-  // 히스토리 개별 항목 삭제 (목록에서만 제거)
-  function deleteHistoryItem(id) {
+  // 히스토리 개별 항목 삭제 (서버 데이터 포함 삭제)
+  async function deleteHistoryItem(id) {
+    const target = history.find(h => h.id === id)
+    if (target && target.jobId) {
+      try {
+        await deleteJob(target.jobId)
+        addLog(`[히스토리 삭제] 서버의 연관 작업 데이터(${target.jobId})를 삭제했습니다.`)
+      } catch (e) {
+        console.warn('서버 개별 작업 삭제 실패:', e)
+      }
+    }
     setHistory(prev => {
       const updated = prev.filter(h => h.id !== id)
       saveHistory(updated)

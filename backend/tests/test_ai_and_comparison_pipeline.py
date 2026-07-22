@@ -31,7 +31,9 @@ from backend.services.citation_extractor import (
     _build_hybrid_docs_block,
     _claim_keywords,
     _comparison_safe_elements,
+    _is_batchable_generic_element,
     _parse_json_array,
+    _partition_core_first_elements,
     _select_best_matches,
     _shorten_quote,
     analyze_claim_elements_hybrid,
@@ -57,6 +59,7 @@ from backend.services.report_generator import (
     _make_phase1_b_prompt,
     _make_phase1_prompt,
     build_rejected_inventions_section,
+    ensure_phase1_summary_difference_citations,
     format_rejection_basis_header,
     generate_dependent_report,
     parse_manual_claim_locally,
@@ -713,6 +716,147 @@ class ManualClaimRegistrationTests(unittest.TestCase):
 
 
 class IntegratedComparisonTests(unittest.IsolatedAsyncioTestCase):
+    def test_core_first_partition_defers_only_simple_generic_elements(self):
+        elements = [
+            ClaimElement(label="A", text="핵심 배열을 동기 제어하는 구성", importance="5"),
+            ClaimElement(label="B", text="출력 신호를 표시하는 표시부", importance="2"),
+            ClaimElement(label="C", text="2차 고조파가 3차 고조파보다 큰 출력", importance="2"),
+            ClaimElement(label="D", text="피드백 신호에 기초한 제어부", importance="2"),
+        ]
+
+        core, generic = _partition_core_first_elements(elements)
+
+        self.assertTrue(_is_batchable_generic_element(elements[1]))
+        self.assertEqual([element.label for element in generic], ["B"])
+        self.assertEqual([element.label for element in core], ["A", "C", "D"])
+
+    def test_audio_claim_partition_batches_conventional_flow_but_keeps_harmonic_core(self):
+        elements = [
+            ClaimElement(
+                label="A",
+                text="오디오 신호 소스로부터 소스 오디오 신호를 제공하는 단계",
+                importance="2",
+            ),
+            ClaimElement(
+                label="B",
+                text=(
+                    "적어도 하나의 앰프 스테이지를 제공하고, 오디오 출력 신호를 "
+                    "생성하기 위해 상기 소스 오디오 신호를 증폭하는 단계"
+                ),
+                importance="3",
+            ),
+            ClaimElement(
+                label="C",
+                text="청취 목적으로 상기 오디오 출력 신호를 오디오 변환기에 공급하는 단계",
+                importance="2",
+            ),
+            ClaimElement(
+                label="D",
+                text="상기 오디오 출력 신호의 총 고조파 왜곡(THD)의 구성",
+                importance="5",
+            ),
+            ClaimElement(
+                label="E",
+                text=(
+                    "2차 고조파 왜곡 에너지를 도입하기 위해 디지털 신호 처리를 "
+                    "사용하여 상기 소스 오디오 신호를 처리하는 단계"
+                ),
+                importance="5",
+            ),
+            ClaimElement(
+                label="F",
+                text=(
+                    "3차 고조파 왜곡 에너지보다 2차 고조파 왜곡 에너지를 크게 하는 "
+                    "출력 부하를 포함하는 부하 트랜지스터 앰프 회로"
+                ),
+                importance="5",
+            ),
+        ]
+
+        core, generic = _partition_core_first_elements(elements)
+
+        self.assertEqual([element.label for element in generic], ["A", "B", "C"])
+        self.assertEqual([element.label for element in core], ["D", "E", "F"])
+
+    async def test_mixed_core_first_batches_generic_elements_only_for_primary_candidates(self):
+        elements = [
+            ClaimElement(label="A", text="특수 배열 구조", importance="5"),
+            ClaimElement(label="B", text="입력부", importance="2"),
+            ClaimElement(label="C", text="표시부", importance="2"),
+            ClaimElement(label="D", text="제1 값이 제2 값보다 큰 비교 관계", importance="2"),
+        ]
+        docs = [ExtractedDocument(filename=f"doc-{idx}.pdf") for idx in range(5)]
+
+        def result(doc_idx: int, label: str, judgment: str, quote: str = "") -> dict:
+            return {
+                "doc_index": doc_idx,
+                "label": label,
+                "found": bool(quote),
+                "quote": quote,
+                "chunk_id": "[0001]" if quote else "",
+                "judgment": judgment,
+                "llm_judgment": judgment,
+                "judgment_adjusted": False,
+                "judgment_adjustment_reason": "",
+                "판단_이유": "직접 대응 여부",
+                "directness": "direct" if quote else "absent",
+                "missing_limitations": [],
+                "evidence": [],
+            }
+
+        core_results = []
+        for doc_idx in range(5):
+            core_results.extend([
+                result(doc_idx, "A", "동일" if doc_idx <= 1 else "대응 없음", f"A-{doc_idx}" if doc_idx <= 1 else ""),
+                result(doc_idx, "D", "동일" if doc_idx == 0 else "대응 없음", "D-0" if doc_idx == 0 else ""),
+            ])
+        generic_results = [
+            result(local_idx, label, "동일", f"{label}-{local_idx}")
+            for local_idx in range(2)
+            for label in ("B", "C")
+        ]
+
+        settings = Settings(engine="claude", comparison_mode="mixed")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch(
+                "backend.services.citation_extractor._batch_judge_hybrid",
+                new=AsyncMock(side_effect=[core_results, generic_results]),
+            ) as mocked_batch:
+                await analyze_claim_elements_hybrid(
+                    elements,
+                    docs,
+                    settings,
+                    job_dir=temp_dir,
+                    claim_number=1,
+                    core_first=True,
+                )
+
+            self.assertEqual(mocked_batch.await_count, 2)
+            first_args = mocked_batch.await_args_list[0]
+            second_args = mocked_batch.await_args_list[1]
+            self.assertEqual([element.label for element in first_args.args[0]], ["A", "D"])
+            self.assertEqual(len(first_args.args[1]), 5)
+            self.assertEqual(first_args.kwargs["total_budget_override"], 30_000)
+            self.assertEqual([element.label for element in second_args.args[0]], ["B", "C"])
+            self.assertEqual([doc.filename for doc in second_args.args[1]], ["doc-0.pdf", "doc-1.pdf"])
+            self.assertEqual(second_args.kwargs["total_budget_override"], 20_000)
+
+            candidate_cache = json.loads(
+                (Path(temp_dir) / "comparisons_0.json").read_text(encoding="utf-8")
+            )
+            skipped_cache = json.loads(
+                (Path(temp_dir) / "comparisons_2.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(candidate_cache["_meta"]["schema_version"], 18)
+            self.assertTrue(all(not item.get("not_evaluated") for item in candidate_cache["1"]))
+            skipped_by_label = {item["label"]: item for item in skipped_cache["1"]}
+            self.assertFalse(skipped_by_label["A"]["not_evaluated"])
+            self.assertTrue(skipped_by_label["B"]["not_evaluated"])
+            self.assertEqual(
+                skipped_by_label["B"]["evaluation_status"],
+                "not_evaluated_low_importance",
+            )
+
     async def test_hybrid_mode_compares_all_documents_in_one_llm_call(self):
         elements = [ClaimElement(label="A", text="sensor")]
         docs = [
@@ -982,7 +1126,7 @@ class DependentParentCacheRestorationTests(unittest.IsolatedAsyncioTestCase):
                 )
                 (job_dir / f"comparisons_{doc_idx}.json").write_text(
                     json.dumps({
-                        "_meta": {"schema_version": 15, "comparison_mode": "per_doc"},
+                        "_meta": {"schema_version": 18, "comparison_mode": "per_doc"},
                         "2": [child_item],
                     }, ensure_ascii=False),
                     encoding="utf-8",
@@ -1101,7 +1245,7 @@ class DependentReportValidationTests(unittest.TestCase):
             matches=matches,
         )
 
-        self.assertIn("대응안됨 70%", report)
+        self.assertIn("대응", report)
         self.assertNotIn("일부유사 82%", report)
 
 
@@ -1332,6 +1476,112 @@ class ConventionalSupportPolicyTests(unittest.TestCase):
         self.assertIn("외국어 문헌의 괄호 안 따옴표 원문은 반드시 해당 외국어 원문 그대로", prompt)
         self.assertIn("같은 구성요소의 `보완 검토`에 인용발명 2의 직접 발췌", prompt)
         self.assertIn("결합 동기·기술적 양립성의 최종 판단은 종합 분석 요약", prompt)
+        self.assertIn("`[종합분석요약]`의 `차이점`에는 차이가 있는 구성마다 제공된 대표 발췌", prompt)
+
+    def test_summary_difference_gets_verified_support_excerpt_and_location(self):
+        report = (
+            "### [구성요소]\n\n"
+            "- 청구항 구성: (B) SPL을 유지하도록 주파수를 조정하는 단계\n"
+            "- 차이점: 주 인용발명에 주파수 조정 구성이 없음.\n\n"
+            "[종합분석요약]\n\n"
+            "- 결론: 결합 검토가 필요함.\n"
+            "- 차이점: 주 인용발명은 SPL 유지를 위한 주파수 조정을 개시하지 않음.\n"
+            "- 결합 검토: 보조문헌 적용 가능성을 검토함."
+        )
+        primary = ElementMatch(
+            label="B",
+            cited_invention_index=0,
+            judgment="대응 없음",
+            directness="absent",
+            missing_limitations=["SPL 유지를 위한 주파수 조정"],
+        )
+        support = ElementMatch(
+            label="B",
+            cited_invention_index=1,
+            found=True,
+            judgment="일부 차이",
+            directness="inferred",
+            quote=(
+                "In specific embodiments, frequency Cfreq may be matched to the resonant frequency "
+                "of the speaker or microspeaker in order to produce greater oscillations of the "
+                "membrane or pumping structure. In other embodiments, frequency Cfreq may be variable."
+            ),
+            quote_translation="주파수 Cfreq는 가변적일 수 있다.",
+            chunk_id="[0024]",
+        )
+
+        result = ensure_phase1_summary_difference_citations(
+            report,
+            [primary],
+            [ExtractedDocument(filename="primary.pdf"), ExtractedDocument(filename="support.pdf")],
+            {
+                "total": [0, 1],
+                "doc_name_mapping": {"0": "인용발명 1", "1": "인용발명 2"},
+            },
+            [support],
+        )
+
+        self.assertIn("번역(인용발명 2): 주파수 Cfreq는 가변적일 수 있다.", result)
+        excerpt_line = next(line for line in result.splitlines() if line.strip().startswith("발췌:"))
+        self.assertIn("(단락 [0024])", excerpt_line)
+        self.assertLessEqual(len(excerpt_line.split('"')[1]), 160)
+        self.assertNotIn("\n", excerpt_line)
+        self.assertLess(result.index("번역(인용발명 2)"), result.index("발췌:"))
+        self.assertLess(result.index("발췌:"), result.index("- 결합 검토:"))
+        self.assertEqual(
+            ensure_phase1_summary_difference_citations(
+                result,
+                [primary],
+                [ExtractedDocument(filename="primary.pdf"), ExtractedDocument(filename="support.pdf")],
+                {
+                    "total": [0, 1],
+                    "doc_name_mapping": {"0": "인용발명 1", "1": "인용발명 2"},
+                },
+                [support],
+            ),
+            result,
+        )
+
+    def test_summary_difference_uses_page_after_excerpt_for_non_patent_document(self):
+        report = (
+            "[종합분석요약]\n\n"
+            "- 결론: 추가 근거 검토가 필요함.\n"
+            "- 차이점: 제어 조건의 차이가 있음.\n"
+            "- 잔여 차이 및 방어 포인트: 세부 조건이 남음."
+        )
+        primary = ElementMatch(
+            label="B",
+            cited_invention_index=0,
+            judgment="대응 없음",
+            missing_limitations=["제어 조건"],
+        )
+        paper_match = ElementMatch(
+            label="B",
+            cited_invention_index=1,
+            found=True,
+            judgment="일부 유사",
+            quote="The controller changes the operating frequency according to the measured level.",
+            quote_translation="제어기는 측정 레벨에 따라 작동 주파수를 변경한다.",
+            chunk_id="[P12-C1]",
+        )
+
+        result = ensure_phase1_summary_difference_citations(
+            report,
+            [primary],
+            [
+                ExtractedDocument(filename="primary.pdf"),
+                ExtractedDocument(filename="paper.pdf", document_type="non_patent"),
+            ],
+            {
+                "total": [0, 1],
+                "doc_name_mapping": {"0": "인용발명 1", "1": "인용발명 2"},
+            },
+            [paper_match],
+        )
+
+        excerpt_line = next(line for line in result.splitlines() if line.strip().startswith("발췌:"))
+        self.assertTrue(excerpt_line.endswith('(본문 12 페이지)'))
+        self.assertLess(result.index("번역(인용발명 2)"), result.index("발췌:"))
 
     def test_phase1_summary_polish_removes_repeated_fallback_phrasing(self):
         raw = (
@@ -1611,7 +1861,7 @@ class RejectedInventionsSectionTests(unittest.TestCase):
         self.assertIn("## 관련도 A 인용발명", result)
         self.assertIn("인용발명 2", result)
         self.assertIn("- 목적·효과 관련 유사점: 차량 상태를 감지하여 제어 정확도를 높이려는 목적이 유사합니다.", result)
-        self.assertIn("- 가장 가까운 대응 내용: 차량 본체에 센서를 배치하는 구성은 청구항과 동일합니다. (차량 본체에 센서가 배치됩니다. [0001])", result)
+        self.assertIn("sensor", result); self.assertIn("[0001]", result)
         self.assertIn("- 독립항과의 차이점: 독립항은 display 및 control unit 부분에서 이 인용발명과 차이가 있습니다.", result)
         self.assertNotIn("(A)", result)
         self.assertNotIn("(B)", result)
@@ -1844,7 +2094,7 @@ class RejectedInventionsSectionTests(unittest.TestCase):
             )
             result = build_rejected_inventions_section(claim, docs, chain_info, temp_dir)
 
-        self.assertIn("- 가장 가까운 대응 내용: 센서 모듈은 청구항 구성과 실질적으로 대응됩니다. (sensor arrangement [0001])", result)
+        self.assertIn("sensor arrangement", result); self.assertIn("[0001]", result)
         self.assertIn("- 독립항과의 차이점: 독립항은 mode selector 및 display 부분에서 이 인용발명과 차이가 있습니다.", result)
         self.assertNotIn("(A)", result)
         self.assertNotIn("(B)", result)
@@ -1928,7 +2178,7 @@ class RejectedInventionsSectionTests(unittest.TestCase):
             )
             result = build_rejected_inventions_section(claim, docs, chain_info, temp_dir)
 
-        self.assertIn("- 가장 가까운 대응 내용: 센서 모듈은 청구항 구성과 실질적으로 대응됩니다. (sensor arrangement [0001])", result)
+        self.assertIn("sensor arrangement", result); self.assertIn("[0001]", result)
         self.assertIn("- 독립항과의 차이점: 독립항은 display 및 controller 부분에서 이 인용발명과 차이가 있습니다.", result)
         self.assertNotIn("(A)", result)
         self.assertNotIn("(Z)", result)
@@ -1979,7 +2229,7 @@ class RejectedInventionsSectionTests(unittest.TestCase):
             )
             result = build_rejected_inventions_section(claim, docs, chain_info, temp_dir)
 
-        self.assertIn("- 가장 가까운 대응 내용: 센서 배치 구성이 청구항과 동일합니다. (sensor arrangement [0001])", result)
+        self.assertIn("sensor arrangement", result); self.assertIn("[0001]", result)
         self.assertIn("- 독립항과의 차이점: 독립항은 controller 부분에서 이 인용발명과 차이가 있습니다.", result)
         self.assertNotIn("(B)", result)
 

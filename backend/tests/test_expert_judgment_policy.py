@@ -2,7 +2,11 @@ import json
 from backend.models.schemas import ClaimElement, ElementMatch, ParsedClaim
 from backend.services.citation_extractor import _parse_json_array
 from backend.services.prompt_loader import load_prompt
-from backend.services.report_generator import _normalize_report_markdown, enforce_phase1_judgment_headers
+from backend.services.report_generator import (
+    _dedupe_phase1_sections,
+    _normalize_report_markdown,
+    enforce_phase1_judgment_headers,
+)
 
 
 def test_independent_preamble_is_compared_as_p_limitation():
@@ -61,17 +65,60 @@ def test_report_header_is_clamped_to_structured_judgment():
 
     corrected = enforce_phase1_judgment_headers(report, matches)
 
-    assert "(A) 일부차이 87%" in corrected
+    assert "(A) 85~89%: 기술 사상 동일, 세부 구현 방식의 단순 변경 🟠 87%" in corrected
     assert "(A) 동일 100%" not in corrected
     assert original_quote in corrected
 
 
-def test_foreign_quote_format_keeps_translation_original_and_paragraph_number():
-    prompt = load_prompt("format_phase1_independent.txt", "")
+def test_new_format_report_headers_follow_structured_judgments_for_each_component():
+    report = (
+        "### (A)\n\n"
+        "- 청구항 구성: (A) 고 임피던스 입력\n"
+        "- 유사도 평가: 80% 미만: 대응 안됨 ⚪\n"
+        "- 판단 이유: 고 임피던스 입력이 직접 개시되어 있음.\n"
+        "- 차이점: 없음\n\n"
+        "### (B)\n\n"
+        "- 청구항 구성: (B) 조정 가능한 부하\n"
+        "- 유사도 평가: 95% 이상: 동일 🔵\n"
+        "- 판단 이유: 해당 구성이 확인되지 않음.\n"
+        "- 차이점: 조정 가능한 부하가 부재함.\n"
+    )
+    matches = [
+        ElementMatch(
+            label="A",
+            judgment="동일",
+            quote="high impedance inputs",
+            directness="direct",
+        ),
+        ElementMatch(
+            label="B",
+            judgment="대응 없음",
+            directness="absent",
+        ),
+    ]
 
-    assert "직역 또는 준직역한 한국어 문장" in prompt
-    assert '"원문 발췌"' in prompt
-    assert "실제번호" in prompt
+    corrected = enforce_phase1_judgment_headers(report, matches)
+
+    assert corrected.count("- 유사도 평가: 95% 이상: 동일 🔵") == 1
+    assert corrected.count("- 유사도 평가: 80% 미만: 대응 안됨 ⚪") == 1
+
+
+def test_report_format_keeps_instructions_out_of_output_skeleton():
+    system = load_prompt("system_report_base.txt", "")
+
+    for filename in (
+        "format_phase1_independent.txt",
+        "format_phase1_combo.txt",
+        "format_phase1_dependent.txt",
+    ):
+        output_format = load_prompt(filename, "")
+        assert "###" in output_format
+        assert "인용발명 대응 원문:" in output_format
+        assert "병기하십시오" not in output_format
+        assert "안내 문구" not in output_format
+    assert "[0000]" in system
+    assert "95%" in system
+    assert "80~84%" in system
 
 
 def test_report_quote_block_removes_redundant_reporting_ending_only():

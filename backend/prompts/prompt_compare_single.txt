@@ -5,3 +5,4 @@ ${elements_text}
 ${full_text}
 
 시스템 기준에 따라 각 label을 한 번씩 대비해 JSON 배열만 출력하십시오. 배경 설명보다 청구된 주체와 구조·입력·처리·출력 관계가 직접 드러나는 문단을 우선하고, 여러 문단이 필요하면 `evidence`에 나누십시오.
+${review_instruction}

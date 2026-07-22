@@ -4,7 +4,8 @@
 [최적화 구조]
 - 비교 단계에서 모든 문헌을 한 번에 비교하고 comparisons_{doc_idx}.json 캐시
 - 보고서 생성 시에는 캐시에서 로드만 함(인용발명 원문 재전송 없음)
-- 인용발명 1개당 LLM 1회 호출 (문헌 N개를 모두 처리)
+- 혼합 모드의 큰 독립항 행렬은 핵심 구성 선별 1회와 주 후보 범용 구성 배치 1회로 처리
+- 정밀 모드는 모든 문헌과 모든 구성을 한 번의 통합 호출로 처리
 """
 from __future__ import annotations
 import json
@@ -42,10 +43,19 @@ _ENGINE_BUDGETS = {
 _DEFAULT_BUDGET = (45_000, 60_000, 55_000, 5_000)
 _CHUNK_SIZE = 1_200
 _CACHE_META_KEY = "_meta"
-_CACHE_SCHEMA_VERSION = 15
+_CACHE_SCHEMA_VERSION = 18
 _MIXED_TOTAL_BUDGET = 80_000
 _MIXED_MIN_DOC_BUDGET = 8_000
+_CORE_SCREEN_TOTAL_BUDGET = 30_000
+_CORE_SCREEN_MIN_DOC_BUDGET = 3_000
+_GENERIC_PRIMARY_TOTAL_BUDGET = 20_000
+_GENERIC_PRIMARY_MIN_DOC_BUDGET = 3_000
+_CORE_FIRST_MIN_DOCS = 3
+_CORE_FIRST_MIN_MATRIX_CELLS = 20
+_CORE_FIRST_PRIMARY_CANDIDATES = 2
 _DEFAULT_DEPENDENT_CANDIDATE_DOC_LIMIT = 3
+_FALSE_NEGATIVE_REVIEW_MAX_DOCS = 5
+_FALSE_NEGATIVE_REVIEW_MIN_OVERLAP = 0.55
 _JUDGMENT_RANK = {
     "동일": 5,
     "실질적 동일": 4,
@@ -71,6 +81,202 @@ _SELECTION_STRUCTURE_KEYWORDS = [
     "category", "type", "mode", "condition", "criterion", "determine", "select", "switch", "branch",
     "alternative", "multiple",
 ]
+
+_GENERIC_COMPONENT_RE = re.compile(
+    r"(?:"
+    r"\bcpu\b|\bprocessor\b|\bcontroller\b|\bmemory\b|\bstorage\b|"
+    r"\binterface\b|\btransceiver\b|\bdisplay\b|\bbattery\b|\binput\b|"
+    r"\boutput\b|\bsource\b|\bamplifier\b|\btransducer\b|\bsensor\b|"
+    r"프로세서|제어부|제어기|컨트롤러|메모리|저장부|통신부|송수신부|"
+    r"인터페이스|입력부|출력부|표시부|디스플레이|전원부|배터리|센서|"
+    r"입력\s*신호|출력\s*신호|신호\s*소스|앰프|증폭기|변환기"
+    r")",
+    re.IGNORECASE,
+)
+_NON_GENERIC_LIMITATION_RE = re.compile(
+    r"(?:\d|수치|범위|이상|이하|초과|미만|보다\s*(?:크|작)|비율|상대|"
+    r"피드백|학습|암호|복호|보정|적응|동기|임계|조건|선택|전환|분기|"
+    r"상호\s*작용|연동|왜곡|고조파|에너지|트랜지스터|부하|효과|개선|"
+    r"based\s+on|in\s+response\s+to|greater\s+than|less\s+than|ratio|"
+    r"relative|feedback|adaptive|threshold|synchron|encrypt|decrypt|"
+    r"calibrat|distortion|harmonic|transistor|loaded|improv|effect)",
+    re.IGNORECASE,
+)
+
+# 통합 비교에서 한 문헌의 핵심 문단이 다른 문헌들 사이에 묻혀 ``대응 없음``으로
+# 끝나는 것을 막기 위한 다국어 기술 개념 축이다. 이는 대응을 자동 인정하는 규칙이
+# 아니라, 명시 원문이 있는 문헌만 개별 재검증 호출로 올리는 용도다.
+_TECHNICAL_CONCEPT_PATTERNS = {
+    "harmonic": re.compile(r"고조파|harmonic", re.IGNORECASE),
+    "distortion": re.compile(r"왜곡|distortion|non[- ]?linear|overdrive", re.IGNORECASE),
+    "adjustment": re.compile(
+        r"조정|조절|가변|변경|설정|보정|adjust|vary|control|setting|calibrat",
+        re.IGNORECASE,
+    ),
+    "relative_order": re.compile(
+        r"상대|비율|보다|차수|에너지|스펙트럼|relative|ratio|proportion|"
+        r"energy|spectrum|order|2nd|second|3rd|third|4th|fourth|5th|fifth",
+        re.IGNORECASE,
+    ),
+    "circuit": re.compile(
+        r"회로|트랜지스터|증폭기|피드백|circuit|transistor|jfet|fet|amplifier|feedback",
+        re.IGNORECASE,
+    ),
+    "load": re.compile(r"부하|load|resistor|저항", re.IGNORECASE),
+    "signal_path": re.compile(r"입력|출력|단계|input|output|gate|drain|stage", re.IGNORECASE),
+}
+_GENERIC_FUNCTION_RE = re.compile(
+    r"(?:제공|공급|수신|송신|저장|표시|출력|입력|증폭|변환|처리|"
+    r"provide|supply|receive|transmit|store|display|output|input|amplif|convert|process)",
+    re.IGNORECASE,
+)
+
+
+def _importance_value(value: object) -> int:
+    try:
+        return max(1, min(5, int(value)))
+    except (TypeError, ValueError):
+        return 3
+
+
+def _is_batchable_generic_element(element: ClaimElement) -> bool:
+    """Return True only for a simple, low-weight element safe to defer.
+
+    `importance` alone is not trusted: numerical, comparative, conditional,
+    relational and effect-linked limitations always stay in the core screen.
+    """
+    text = " ".join((element.text or "").split())
+    if not text or len(text) > 140:
+        return False
+    if _importance_value(element.importance) > 3 or bool(element.is_sub):
+        return False
+    if _is_conditioned_selection_text(text):
+        return False
+    if not _GENERIC_COMPONENT_RE.search(text):
+        return False
+    if _NON_GENERIC_LIMITATION_RE.search(text):
+        return False
+    functions = {match.lower() for match in _GENERIC_FUNCTION_RE.findall(text)}
+    if len(functions) > 3:
+        return False
+    if len(re.findall(r"(?:및|또는|그리고|\band\b|\bor\b)", text, re.IGNORECASE)) > 1:
+        return False
+    return True
+
+
+def _is_conditioned_selection_text(text: str) -> bool:
+    return bool(_SELECTION_OR_RE.search(text or "") and _SELECTION_CONDITION_RE.search(text or ""))
+
+
+def _technical_concepts(text: str) -> set[str]:
+    """Return the technical concept axes explicitly present in Korean or English text."""
+    source = text or ""
+    return {
+        name for name, pattern in _TECHNICAL_CONCEPT_PATTERNS.items()
+        if pattern.search(source)
+    }
+
+
+def _needs_false_negative_review(element: ClaimElement) -> bool:
+    """Identify a compound technical limitation that should not be dismissed in one batch."""
+    text = " ".join((element.text or "").split())
+    concepts = _technical_concepts(text)
+    return bool(text) and (
+        len(text) > 100
+        or len(concepts - {"signal_path"}) >= 2
+        or _is_conditioned_selection_text(text)
+    )
+
+
+def _best_document_concept_overlap(doc: ExtractedDocument, element: ClaimElement) -> float:
+    """Measure whether one source chunk carries the element's unusual technical axes.
+
+    The score is intentionally only a *review trigger*.  It does not produce a
+    judgment and never substitutes for a model-provided quotation.
+    """
+    expected = _technical_concepts(element.text)
+    expected.discard("signal_path")  # input/output alone is not a differentiating clue.
+    if len(expected) < 2:
+        return 0.0
+
+    best = 0.0
+    for _chunk_id, chunk_text in _doc_chunks(doc):
+        found = _technical_concepts(chunk_text)
+        overlap = len(expected & found) / len(expected)
+        best = max(best, overlap)
+    return best
+
+
+def _false_negative_review_candidates(
+    elements: List[ClaimElement],
+    prior_docs: List[ExtractedDocument],
+    doc_results: List[List[Dict]],
+) -> List[tuple[int, List[ClaimElement]]]:
+    """Find a small set of documents whose compound-feature evidence merits retry.
+
+    An integrated response can be syntactically complete while missing every
+    relevant passage in one document.  We only retry a document where a single
+    source chunk has multiple technical axes from a compound element and the
+    integrated response supplied no quotation for that element.
+    """
+    candidates: List[tuple[float, int, List[ClaimElement]]] = []
+    for doc_idx, doc in enumerate(prior_docs):
+        items_by_label = {
+            normalize_label(item.get("label", "")): item
+            for item in (doc_results[doc_idx] if doc_idx < len(doc_results) else [])
+        }
+        review_elements: List[ClaimElement] = []
+        score = 0.0
+        for element in elements:
+            if not _needs_false_negative_review(element):
+                continue
+            item = items_by_label.get(normalize_label(element.label), {})
+            if item.get("quote") or item.get("judgment") not in {"대응 없음", "차이"}:
+                continue
+            overlap = _best_document_concept_overlap(doc, element)
+            if overlap < _FALSE_NEGATIVE_REVIEW_MIN_OVERLAP:
+                continue
+            review_elements.append(element)
+            score += overlap * max(1, _importance_value(element.importance))
+        if review_elements:
+            candidates.append((score, doc_idx, review_elements))
+
+    candidates.sort(key=lambda value: (-value[0], value[1]))
+    return [
+        (doc_idx, review_elements)
+        for _score, doc_idx, review_elements in candidates[:_FALSE_NEGATIVE_REVIEW_MAX_DOCS]
+    ]
+
+
+def _merge_precision_review_results(existing: List[Dict], reviewed: List[Dict]) -> None:
+    """Keep a recheck only when it upgrades a previously unsupported judgment."""
+    by_label = {
+        normalize_label(item.get("label", "")): index
+        for index, item in enumerate(existing)
+    }
+    for item in reviewed:
+        index = by_label.get(normalize_label(item.get("label", "")))
+        if index is None:
+            continue
+        previous = existing[index]
+        old_rank = _JUDGMENT_RANK.get(previous.get("judgment", "대응 없음"), 0)
+        new_rank = _JUDGMENT_RANK.get(item.get("judgment", "대응 없음"), 0)
+        if item.get("quote") and new_rank > old_rank:
+            upgraded = dict(item)
+            upgraded["precision_review"] = True
+            existing[index] = upgraded
+
+
+def _partition_core_first_elements(
+    elements: List[ClaimElement],
+) -> tuple[List[ClaimElement], List[ClaimElement]]:
+    generic = [element for element in elements if _is_batchable_generic_element(element)]
+    generic_labels = {normalize_label(element.label) for element in generic}
+    core = [
+        element for element in elements
+        if normalize_label(element.label) not in generic_labels
+    ]
+    return core, generic
 
 # 한국어 청구항과 영문 인용발명을 혼합 비교할 때, 한국어 토큰만으로 문헌을
 # 압축하면 직접 대응하는 영문 실시예가 입력에서 통째로 빠질 수 있다. 자주 쓰이는
@@ -248,6 +454,7 @@ def _normalize_evidence(raw_evidence: object, fallback_quote: str = "", fallback
             evidence.append({
                 "limitation": str(item.get("limitation", "") or "").strip(),
                 "quote": quote,
+                "quote_translation": _shorten_quote(str(item.get("quote_translation", "") or "")),
                 "chunk_id": str(item.get("chunk_id", "") or "").strip(),
             })
             if len(evidence) >= 5:
@@ -421,6 +628,8 @@ def _build_hybrid_docs_block(
     elements: List[ClaimElement],
     engine: str = "",
     settings: Optional[Settings] = None,
+    total_budget_override: Optional[int] = None,
+    min_doc_budget_override: Optional[int] = None,
 ) -> str:
     """Build one compact, chat-like comparison context from all prior documents."""
     if not prior_docs:
@@ -433,6 +642,10 @@ def _build_hybrid_docs_block(
     if mixed_mode:
         hybrid_total = min(hybrid_total, _MIXED_TOTAL_BUDGET)
         hybrid_min = min(hybrid_min, _MIXED_MIN_DOC_BUDGET)
+    if total_budget_override is not None:
+        hybrid_total = min(hybrid_total, max(1_000, int(total_budget_override)))
+    if min_doc_budget_override is not None:
+        hybrid_min = min(hybrid_min, max(500, int(min_doc_budget_override)))
 
     full_blocks = [
         f"[doc_index={doc_idx}] {doc.filename}\n{_full_doc_text(doc)}"
@@ -810,6 +1023,182 @@ async def analyze_claim_elements(
     return _select_best_matches(elements, doc_results, num_docs)
 
 
+_CORE_SCREEN_SIMILARITY = {
+    "동일": 1.00,
+    "실질적 동일": 0.85,
+    "일부 차이": 0.55,
+    "일부 유사": 0.35,
+    "차이": 0.15,
+    "대응 없음": 0.00,
+}
+
+
+def _comparison_placeholder(element: ClaimElement) -> Dict:
+    return {
+        "label": element.label,
+        "found": False,
+        "judgment": "대응 없음",
+        "quote": "",
+        "quote_translation": "",
+        "chunk_id": "",
+        "판단_이유": "",
+        "directness": "absent",
+        "missing_limitations": [],
+        "evidence": [],
+        "not_evaluated": True,
+        "evaluation_status": "not_evaluated_low_importance",
+        "skip_reason": "주 인용발명 후보가 아닌 문헌의 단순 범용 구성 비교를 생략함",
+    }
+
+
+def _merge_flat_comparison_results(
+    doc_results: List[List[Dict]],
+    results: List[Dict],
+    local_to_global: Optional[Dict[int, int]] = None,
+) -> None:
+    mapping = local_to_global or {}
+    for item in results:
+        try:
+            local_idx = int(item.get("doc_index", 0))
+        except (TypeError, ValueError):
+            continue
+        doc_idx = mapping.get(local_idx, local_idx)
+        if doc_idx < 0 or doc_idx >= len(doc_results):
+            continue
+        label = normalize_label(item.get("label", ""))
+        target_idx = next(
+            (
+                idx for idx, target in enumerate(doc_results[doc_idx])
+                if normalize_label(target.get("label", "")) == label
+            ),
+            None,
+        )
+        if target_idx is None:
+            continue
+        stored = dict(item)
+        stored.pop("doc_index", None)
+        stored["not_evaluated"] = False
+        stored["evaluation_status"] = "evaluated"
+        stored.pop("skip_reason", None)
+        doc_results[doc_idx][target_idx] = stored
+
+
+def _core_primary_candidate_indices(
+    core_results: List[Dict],
+    core_elements: List[ClaimElement],
+    num_docs: int,
+) -> List[int]:
+    """Keep the strongest core candidates and every possible novelty candidate."""
+    by_doc: Dict[int, Dict[str, Dict]] = {idx: {} for idx in range(num_docs)}
+    for item in core_results:
+        try:
+            doc_idx = int(item.get("doc_index", 0))
+        except (TypeError, ValueError):
+            continue
+        if 0 <= doc_idx < num_docs:
+            by_doc[doc_idx][normalize_label(item.get("label", ""))] = item
+
+    ranked: List[tuple[float, float, int, int]] = []
+    novelty_candidates: List[int] = []
+    for doc_idx in range(num_docs):
+        weighted_score = 0.0
+        covered_weight = 0.0
+        total_weight = 0.0
+        possible_novelty = True
+        for element in core_elements:
+            weight = float(_importance_value(element.importance))
+            total_weight += weight
+            item = by_doc.get(doc_idx, {}).get(normalize_label(element.label), {})
+            similarity = _CORE_SCREEN_SIMILARITY.get(item.get("judgment", "대응 없음"), 0.0)
+            directness = str(item.get("directness") or "direct").strip().lower()
+            if not item.get("quote") or directness == "absent":
+                evidence_factor = 0.0
+            elif directness == "inferred":
+                evidence_factor = 0.65
+            else:
+                evidence_factor = 1.0
+            weighted_score += weight * similarity * evidence_factor
+            if similarity >= 0.55 and evidence_factor > 0:
+                covered_weight += weight
+            if not (
+                item.get("judgment") in {"동일", "실질적 동일"}
+                and bool(item.get("quote"))
+                and directness in {"", "direct"}
+                and not item.get("missing_limitations")
+            ):
+                possible_novelty = False
+        score = weighted_score / total_weight if total_weight else 0.0
+        coverage = covered_weight / total_weight if total_weight else 0.0
+        ranked.append((score, coverage, -doc_idx, doc_idx))
+        if possible_novelty:
+            novelty_candidates.append(doc_idx)
+
+    ranked.sort(reverse=True)
+    selected = list(novelty_candidates)
+    for _score, _coverage, _tie, doc_idx in ranked[:_CORE_FIRST_PRIMARY_CANDIDATES]:
+        if doc_idx not in selected:
+            selected.append(doc_idx)
+    return selected or ([0] if num_docs else [])
+
+
+async def _judge_core_first_mixed(
+    elements: List[ClaimElement],
+    prior_docs: List[ExtractedDocument],
+    settings: Settings,
+) -> Optional[List[List[Dict]]]:
+    """Run a compact core screen, then batch generic elements for primary candidates."""
+    core_elements, generic_elements = _partition_core_first_elements(elements)
+    matrix_cells = len(elements) * len(prior_docs)
+    if (
+        len(prior_docs) < _CORE_FIRST_MIN_DOCS
+        or matrix_cells < _CORE_FIRST_MIN_MATRIX_CELLS
+        or not core_elements
+        or len(generic_elements) < 2
+    ):
+        return None
+
+    core_results = await _batch_judge_hybrid(
+        core_elements,
+        prior_docs,
+        settings,
+        total_budget_override=_CORE_SCREEN_TOTAL_BUDGET,
+        min_doc_budget_override=_CORE_SCREEN_MIN_DOC_BUDGET,
+    )
+    candidate_indices = _core_primary_candidate_indices(
+        core_results,
+        core_elements,
+        len(prior_docs),
+    )
+    candidate_docs = [prior_docs[idx] for idx in candidate_indices]
+    generic_results = await _batch_judge_hybrid(
+        generic_elements,
+        candidate_docs,
+        settings,
+        total_budget_override=_GENERIC_PRIMARY_TOTAL_BUDGET,
+        min_doc_budget_override=_GENERIC_PRIMARY_MIN_DOC_BUDGET,
+    )
+
+    doc_results = [
+        [_comparison_placeholder(element) for element in elements]
+        for _ in prior_docs
+    ]
+    _merge_flat_comparison_results(doc_results, core_results)
+    _merge_flat_comparison_results(
+        doc_results,
+        generic_results,
+        {local_idx: doc_idx for local_idx, doc_idx in enumerate(candidate_indices)},
+    )
+    logger.info(
+        "Core-first mixed comparison: %s core + %s generic elements, "
+        "%s/%s documents received generic comparison",
+        len(core_elements),
+        len(generic_elements),
+        len(candidate_indices),
+        len(prior_docs),
+    )
+    return doc_results
+
+
 async def analyze_claim_elements_hybrid(
     elements: List[ClaimElement],
     prior_docs: List[ExtractedDocument],
@@ -817,11 +1206,16 @@ async def analyze_claim_elements_hybrid(
     job_dir: Optional[str] = None,
     claim_number: Optional[int] = None,
     doc_index_map: Optional[List[int]] = None,
+    core_first: bool = False,
 ) -> List[ElementMatch]:
     """
-    Compare one claim against all prior documents in a single LLM call.
+    Compare one claim against all prior documents and cache the full matrix.
 
-    Hybrid mode still stores a per-document, per-element judgment matrix.
+    The normal path uses one integrated call.  For sufficiently large independent
+    claims in mixed mode, ``core_first`` may use a core-screening call followed by
+    one generic-element call limited to the retained primary candidates.
+
+    Both paths store an explicit per-document, per-element judgment matrix.
     Citation-chain scoring depends on comparisons_{doc_idx}.json representing
     each document's own coverage, not only the globally best document per element.
     """
@@ -856,7 +1250,14 @@ async def analyze_claim_elements_hybrid(
     ]
 
     try:
-        hybrid_results = await _batch_judge_hybrid(elements, prior_docs, settings)
+        staged_results = (
+            await _judge_core_first_mixed(elements, prior_docs, settings)
+            if core_first and _comparison_mode(getattr(settings, "comparison_mode", "")) == "mixed"
+            else None
+        )
+        hybrid_results = None if staged_results is not None else await _batch_judge_hybrid(
+            elements, prior_docs, settings
+        )
     except CompareFailed as exc:
         logger.warning(
             "Hybrid comparison failed; falling back to per-document comparison: %s",
@@ -869,41 +1270,41 @@ async def analyze_claim_elements_hybrid(
         logger.error(f"Hybrid batch judge error: {e}")
         raise CompareFailed(f"하이브리드 구성대비 LLM 호출 실패: {e}") from e
     else:
-        for item in hybrid_results:
-            label = item.get("label", "")
-            try:
-                doc_idx = int(item.get("doc_index", item.get("cited_invention_index", 0)))
-            except (TypeError, ValueError):
-                doc_idx = 0
-            if doc_idx < 0 or doc_idx >= num_docs:
-                doc_idx = 0
+        if staged_results is not None:
+            doc_results = staged_results
+        else:
+            _merge_flat_comparison_results(doc_results, hybrid_results or [])
 
-            target = next(
-                (m for m in doc_results[doc_idx]
-                 if normalize_label(m.get("label")) == normalize_label(label)),
-                None,
-            )
-            if target is None:
+        # A syntactically complete integrated response can still overlook every
+        # compound-feature passage in one source.  Retry only documents where a
+        # single source chunk contains multiple technical axes from a missed
+        # element; the retry can add evidence but never fabricates a match.
+        for doc_idx, review_elements in _false_negative_review_candidates(
+            elements, prior_docs, doc_results
+        ):
+            try:
+                reviewed = await _batch_judge_for_doc(
+                    review_elements,
+                    prior_docs[doc_idx],
+                    doc_idx,
+                    settings,
+                    precision_review=True,
+                )
+            except CompareFailed as exc:
+                logger.warning(
+                    "Precision review skipped for doc[%s] %s: %s",
+                    doc_idx,
+                    prior_docs[doc_idx].filename,
+                    exc,
+                )
                 continue
-            target.update({
-                "label": label,
-                "found": bool(item.get("found", False)),
-                "judgment": item.get("judgment", "대응 없음"),
-                "llm_judgment": item.get("llm_judgment", item.get("judgment", "대응 없음")),
-                "judgment_adjusted": bool(item.get("judgment_adjusted", False)),
-                "judgment_adjustment_reason": item.get("judgment_adjustment_reason", ""),
-                "quote": item.get("quote", ""),
-                "quote_translation": item.get("quote_translation", ""),
-                "chunk_id": item.get("chunk_id", ""),
-                "판단_이유": item.get("판단_이유", item.get("similarity_reason", "")),
-                "purpose_effect_similarity": item.get("purpose_effect_similarity", ""),
-                "directness": item.get("directness", "direct" if item.get("quote") else "absent"),
-                "missing_limitations": item.get("missing_limitations", []),
-                "evidence": item.get("evidence", []),
-                "motivation_quote": item.get("motivation_quote", ""),
-                "combination_risk": item.get("combination_risk", "uncertain"),
-                "combination_risk_reason": item.get("combination_risk_reason", ""),
-            })
+            _merge_precision_review_results(doc_results[doc_idx], reviewed)
+            logger.info(
+                "Precision review completed for doc[%s] %s (%s elements)",
+                doc_idx,
+                prior_docs[doc_idx].filename,
+                len(review_elements),
+            )
 
     if job_dir is not None and claim_number is not None:
         for doc_idx, results in enumerate(doc_results):
@@ -957,6 +1358,8 @@ async def _batch_judge_for_doc(
     doc: ExtractedDocument,
     doc_idx: int,
     settings: Settings,
+    *,
+    precision_review: bool = False,
 ) -> List[Dict]:
     full_text = _build_doc_text(doc, elements, engine=settings.engine, settings=settings)
 
@@ -967,6 +1370,14 @@ async def _batch_judge_for_doc(
         doc_filename=doc.filename,
         elements_text=elements_text,
         full_text=full_text,
+        review_instruction=(
+            "\n[정밀 재검증]\n"
+            "앞선 통합 비교에서 복합 구성의 부분 대응이 누락될 수 있어, 이 문헌만 다시 검토합니다. "
+            "구성 전체가 정확히 일치하지 않아도 조절·회로·고조파 관계 등 하나 이상의 기술적 근거가 "
+            "원문에 있으면 found=true와 적절한 부분 판정을 사용하고, 남은 제한은 missing_limitations에 "
+            "명시하십시오. 원문 근거가 전혀 없을 때만 대응 없음으로 하십시오.\n"
+            if precision_review else ""
+        ),
     )
 
     return await _call_and_parse_comparison(
@@ -985,8 +1396,17 @@ async def _batch_judge_hybrid(
     elements: List[ClaimElement],
     prior_docs: List[ExtractedDocument],
     settings: Settings,
+    total_budget_override: Optional[int] = None,
+    min_doc_budget_override: Optional[int] = None,
 ) -> List[Dict]:
-    docs_block = _build_hybrid_docs_block(prior_docs, elements, engine=settings.engine, settings=settings)
+    docs_block = _build_hybrid_docs_block(
+        prior_docs,
+        elements,
+        engine=settings.engine,
+        settings=settings,
+        total_budget_override=total_budget_override,
+        min_doc_budget_override=min_doc_budget_override,
+    )
     elements_text = "\n".join(f"({e.label}) {e.text}" for e in elements)
     doc_list = "\n".join(
         f"- doc_index={idx}: {doc.filename}"
@@ -1066,6 +1486,7 @@ def _select_best_matches(
                 label=elem.label,
                 found=bool(best_match.get("found", False)),
                 quote=_shorten_quote(best_match.get("quote", "")),
+                quote_translation=_shorten_quote(best_match.get("quote_translation", "")),
                 chunk_id=best_match.get("chunk_id", ""),
                 judgment=best_match.get("judgment", "대응 없음"),
                 cited_invention_index=best_doc_idx,

@@ -63,6 +63,7 @@ from backend.services.report_generator import (
     _strip_agent_tool_calls,
     detect_category_same_claims,
     enforce_phase1_judgment_headers,
+    ensure_phase1_summary_difference_citations,
     enhance_claim_parsing_with_llm,
     enhance_purpose_effects_with_llm,
     find_unselected_reference_mentions,
@@ -158,8 +159,15 @@ def _find_legacy_final_boundary(body: str) -> int:
 def _phase1_only_report(body: str) -> str:
     idx = _find_legacy_final_boundary(body)
     if idx < 0:
-        return body
-    return body[:idx].rstrip()
+        result = body
+    else:
+        result = body[:idx].rstrip()
+    return re.sub(
+        r"^\s*청구항\s*\d+에\s*대한\s*특허\s*분석\s*Phase\s*1\s*보고서입니다\.?\s*\n?",
+        "",
+        result,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
 
 
 def _matches_directly_cover_single_reference(matches, reference_idx: int) -> bool:
@@ -955,8 +963,19 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                 and cached_all
                 and policy_cache_current
             ):
-                cached_report = sanitize_report_status_icons(_phase1_only_report(cached.read_text(encoding="utf-8")))
+                cached_report = enforce_phase1_judgment_headers(
+                    sanitize_report_status_icons(
+                        _phase1_only_report(cached.read_text(encoding="utf-8"))
+                    ),
+                    matches,
+                )
                 cached_chain_info = get_claim_chain_info(cached_chain, claim_number)
+                cached_report = ensure_phase1_summary_difference_citations(
+                    cached_report,
+                    matches,
+                    prior_docs,
+                    cached_chain_info,
+                )
                 cached_scope_violations = find_unselected_reference_mentions(
                     cached_report, cached_chain_info
                 )
@@ -1000,7 +1019,12 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                             job_dir=str(job_dir), claim_number=claim_number,
                         )
                     else:
-                        if compare_mode in {"mixed", "hybrid"}:
+                        if compare_mode == "mixed" and claim.claim_type == "independent":
+                            yield _ev(
+                                "analyze",
+                                f"core-first comparison of {len(prior_docs)} prior docs",
+                            )
+                        elif compare_mode in {"mixed", "hybrid"}:
                             yield _ev(
                                 "analyze",
                                 f"comparing {len(prior_docs)} prior docs in integrated mode",
@@ -1010,11 +1034,20 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                                 "analyze",
                                 f"comparing {len(prior_docs)} prior docs in per-doc mode",
                             )
-                        compare_fn = analyze_claim_elements if compare_mode == "per_doc" else analyze_claim_elements_hybrid
-                        await compare_fn(
-                            claim.elements, prior_docs, settings,
-                            job_dir=str(job_dir), claim_number=claim_number,
-                        )
+                        if compare_mode == "per_doc":
+                            await analyze_claim_elements(
+                                claim.elements, prior_docs, settings,
+                                job_dir=str(job_dir), claim_number=claim_number,
+                            )
+                        else:
+                            await analyze_claim_elements_hybrid(
+                                claim.elements, prior_docs, settings,
+                                job_dir=str(job_dir), claim_number=claim_number,
+                                core_first=(
+                                    compare_mode == "mixed"
+                                    and claim.claim_type == "independent"
+                                ),
+                            )
                 except CompareFailed as e:
                     yield _ev("error", f"구성요소 비교 분석 실패: {e}")
                     return
@@ -1086,7 +1119,7 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
             used_inventions = _used_inventions_for(
                 chain_info, prior_docs, matches=report_matches
             )
-            yield _ev("generate", "Phase 1 analysis in progress")
+            yield _ev("generate", "보고서 작성 중")
             phase1_start = time.perf_counter()
             phase1_chunks: list[str] = []
             if claim.claim_type == "independent":
@@ -1115,7 +1148,7 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                         secondary_matches=secondary_matches,
                     ),
                     _emit_progress,
-                    label=f"청구항 {claim_number} Phase 1 작성",
+                    label=f"청구항 {claim_number} 보고서 작성",
                 )
                 for event in nonlocal_yield_events:
                     yield event
@@ -1125,6 +1158,7 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                 phase1_md = polish_phase1_summary_text(
                     sanitize_report_status_icons(_dedupe_phase1_sections(phase1_body))
                 )
+                phase1_md = enforce_phase1_judgment_headers(phase1_md, report_matches)
 
             scope_violations = find_unselected_reference_mentions(phase1_md, chain_info)
             if scope_violations and claim.claim_type == "independent":
@@ -1154,6 +1188,13 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                     "보고서가 최종 인용 체인에 포함되지 않은 문헌을 사용했습니다: "
                     + ", ".join(scope_violations)
                 )
+            phase1_md = ensure_phase1_summary_difference_citations(
+                phase1_md,
+                report_matches,
+                prior_docs,
+                chain_info,
+                secondary_matches,
+            )
             phase1_md = f"### claim {claim_number}\n\n{phase1_md}"
             async for event in _yield_timing("phase1", phase1_start):
                 yield event
@@ -1352,6 +1393,10 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
                     claim.elements, selected_docs, settings,
                     job_dir=str(job_dir), claim_number=claim.claim_number,
                     doc_index_map=target_doc_idxs,
+                    core_first=(
+                        compare_mode == "mixed"
+                        and claim.claim_type == "independent"
+                    ),
                 )
                 return
             if missing_doc_idxs:
@@ -1360,11 +1405,20 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
                     job_dir=str(job_dir), claim_number=claim.claim_number,
                 )
                 return
-            compare_fn = analyze_claim_elements if compare_mode == "per_doc" else analyze_claim_elements_hybrid
-            await compare_fn(
-                claim.elements, prior_docs, settings,
-                job_dir=str(job_dir), claim_number=claim.claim_number,
-            )
+            if compare_mode == "per_doc":
+                await analyze_claim_elements(
+                    claim.elements, prior_docs, settings,
+                    job_dir=str(job_dir), claim_number=claim.claim_number,
+                )
+            else:
+                await analyze_claim_elements_hybrid(
+                    claim.elements, prior_docs, settings,
+                    job_dir=str(job_dir), claim_number=claim.claim_number,
+                    core_first=(
+                        compare_mode == "mixed"
+                        and claim.claim_type == "independent"
+                    ),
+                )
 
         ancestor_numbers: set[int] = set()
         for claim in targets:

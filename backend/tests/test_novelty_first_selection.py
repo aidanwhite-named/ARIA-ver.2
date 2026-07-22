@@ -14,6 +14,9 @@ from backend.services.citation_chain import (
     build_citation_chain_from_comparisons,
     get_claim_chain_info,
 )
+from backend.services.citation_extractor import (
+    _false_negative_review_candidates,
+)
 from backend.services.report_generator import (
     _build_system,
     _generate_rejection_impossible_report,
@@ -126,6 +129,203 @@ def test_no_complete_document_uses_difference_filling_pair() -> None:
     assert len(result["chains"]["1"]["total"]) == 2
 
 
+def test_distinctive_core_direct_disclosure_selects_primary_before_generic_breadth() -> None:
+    claim = ParsedClaim(
+        claim_number=1,
+        claim_type="independent",
+        text="범용 오디오 흐름과 서로 다른 두 고조파 생성 수단을 포함하는 방법",
+        elements=[
+            # 사용자가 (A)~(F)를 직접 붙여넣었을 때의 기존 위치 기반 중요도를 재현합니다.
+            ClaimElement(label="A", text="소스 오디오 신호를 제공", importance="5"),
+            ClaimElement(label="B", text="앰프 스테이지에서 증폭", importance="3"),
+            ClaimElement(label="C", text="오디오 변환기에 공급", importance="3"),
+            ClaimElement(label="D", text="출력 신호의 고조파 왜곡 구성을 변경", importance="2"),
+            ClaimElement(label="E", text="디지털 처리로 2차 고조파 에너지를 도입", importance="2"),
+            ClaimElement(label="F", text="부하 트랜지스터 회로에서 2차 고조파를 3차보다 크게 함", importance="2"),
+        ],
+    )
+    caches = [
+        {"1": [
+            _item("A", "일부 차이", "generic source signal"),
+            _item("B", "일부 차이", "generic amplifier"),
+            _item("C", "일부 차이", "generic audio output"),
+            _item("D", "일부 유사", "harmonic processing", directness="inferred", missing=["왜곡 구성 변경"]),
+            _item("E", "일부 유사", "digital audio processing", directness="inferred", missing=["2차 고조파 도입"]),
+            _item("F", "대응 없음", "", directness="absent", missing=["2차와 3차의 상대 크기"]),
+        ]},
+        {"1": [
+            _item("A", "일부 차이", "audio input"),
+            _item("B", "실질적 동일", "loaded amplifier stage"),
+            _item("C", "일부 차이", "audio output"),
+            _item("D", "실질적 동일", "harmonic composition is altered"),
+            _item("E", "대응 없음", "", directness="absent", missing=["디지털 2차 고조파 도입"]),
+            _item("F", "동일", "second harmonic is greater than third harmonic"),
+        ]},
+        {"1": [
+            _item("A", "일부 차이", "audio input"),
+            _item("B", "일부 차이", "audio processing stage"),
+            _item("C", "일부 차이", "audio output"),
+            _item("D", "실질적 동일", "harmonic composition control"),
+            _item("E", "동일", "digital second harmonic generator"),
+            _item("F", "대응 없음", "", directness="absent", missing=["부하 트랜지스터 회로"]),
+        ]},
+    ]
+    docs = [
+        ExtractedDocument(filename="generic-patent.pdf"),
+        ExtractedDocument(filename="pass-h2.pdf"),
+        ExtractedDocument(filename="pkharmonic.pdf"),
+    ]
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        for idx, cache in enumerate(caches):
+            (Path(temp_dir) / f"comparisons_{idx}.json").write_text(
+                json.dumps(cache, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        result = build_citation_chain_from_comparisons(temp_dir, [claim], docs)
+
+    family = result["families"]["1"]
+    assert family["primary_idx"] == 1
+    assert family["secondary_idx"] == 2
+    assert result["chains"]["1"]["total"] == [1, 2]
+    assert family["selection_method"] == "novelty_gate_then_distinctive_core_gap_pair_v2"
+    detail = family["primary_score_details"]["1"]
+    assert set(detail["distinctive_core_labels"]) == {"D", "E", "F"}
+    assert detail["generic_breadth_is_tiebreak_only"] is True
+
+
+def test_compound_harmonic_claim_prefers_pass_h2_over_generic_interface_matches() -> None:
+    claim = ParsedClaim(
+        claim_number=14,
+        claim_type="independent",
+        text="조절 가능한 고조파 왜곡 회로를 갖는 오디오 증폭 시스템",
+        elements=[
+            ClaimElement(label="A", text="고 임피던스 입력", importance="5"),
+            ClaimElement(label="B", text="저 임피던스 출력", importance="3"),
+            ClaimElement(
+                label="C",
+                text="조정 가능한 부하에 따라 2차와 3차 고조파 왜곡 에너지의 상대량을 변경하는 트랜지스터 입력 회로",
+                importance="3",
+            ),
+            ClaimElement(
+                label="D",
+                text="입력 및 출력 스테이지를 포함하고 고조파 차수별 에너지 관계를 생성하는 비선형 파워앰프 회로",
+                importance="2",
+            ),
+        ],
+    )
+    caches = [
+        {"14": [
+            _item("A", "대응 없음", "", directness="absent", missing=["고 임피던스 입력"]),
+            _item("B", "대응 없음", "", directness="absent", missing=["저 임피던스 출력"]),
+            _item("C", "일부 차이", "varying the supply voltage adjusts harmonic content", directness="inferred", missing=["조정 가능한 부하"]),
+            _item("D", "대응 없음", "", directness="absent", missing=["3차 및 5차 파워앰프 제한"]),
+        ]},
+        {"14": [
+            _item("A", "대응 없음", "", directness="absent", missing=["고 임피던스 입력"]),
+            _item("B", "대응 없음", "", directness="absent", missing=["저 임피던스 출력"]),
+            _item("C", "일부 유사", "slider control for each harmonic", directness="inferred", missing=["트랜지스터 회로"]),
+            _item("D", "일부 유사", "set any combinations of 2nd through 8th harmonics", directness="inferred", missing=["파워앰프 회로"]),
+        ]},
+        {"14": [
+            _item("A", "동일", "high impedance input"),
+            _item("B", "동일", "low output impedance"),
+            _item("C", "대응 없음", "", directness="absent", missing=["고조파 비율 조절 회로"]),
+            _item("D", "대응 없음", "", directness="absent", missing=["고조파 차수별 에너지 관계"]),
+        ]},
+    ]
+    docs = [
+        ExtractedDocument(filename="pass-h2.pdf"),
+        ExtractedDocument(filename="pkharmonic.pdf"),
+        ExtractedDocument(filename="US20130136278A1.pdf"),
+    ]
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        for idx, cache in enumerate(caches):
+            (Path(temp_dir) / f"comparisons_{idx}.json").write_text(
+                json.dumps(cache, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        result = build_citation_chain_from_comparisons(temp_dir, [claim], docs)
+
+    family = result["families"]["14"]
+    assert family["primary_idx"] == 0
+    assert family["secondary_idx"] == 1
+    detail = family["primary_score_details"]["0"]
+    assert detail["dynamic_weight_by_label"] == {"A": 2.0, "B": 1.5, "C": 5.0, "D": 4.0}
+    assert detail["dynamic_weight_reason_by_label"]["A"] == "short_generic_interface_cap"
+    assert detail["dynamic_weight_reason_by_label"]["C"] == "distinctive_with_rare_direct_evidence"
+
+
+def test_compound_text_overlap_triggers_single_document_precision_review() -> None:
+    elements = [
+        ClaimElement(label="A", text="고 임피던스 입력", importance="5"),
+        ClaimElement(
+            label="C",
+            text="조정 가능한 부하에 따라 2차와 3차 고조파 왜곡 에너지의 상대량을 변경하는 트랜지스터 입력 회로",
+            importance="3",
+        ),
+        ClaimElement(
+            label="D",
+            text="고조파 차수별 에너지 관계를 생성하는 비선형 파워앰프 출력 회로",
+            importance="2",
+        ),
+    ]
+    docs = [
+        ExtractedDocument(
+            filename="pass-h2.pdf",
+            raw_text=(
+                "A JFET transistor circuit can adjust harmonic distortion by varying the supply voltage. "
+                "The 2nd harmonic energy is greater than the 3rd harmonic at the output."
+            ),
+        ),
+        ExtractedDocument(filename="unrelated.pdf", raw_text="A display controller stores images."),
+    ]
+    no_matches = [
+        [_item(element.label, "대응 없음", "", directness="absent") for element in elements]
+        for _doc in docs
+    ]
+
+    candidates = _false_negative_review_candidates(elements, docs, no_matches)
+
+    assert candidates == [(0, [elements[1], elements[2]])]
+
+
+def test_not_evaluated_generic_rows_do_not_create_false_rarity_weight() -> None:
+    claim = ParsedClaim(
+        claim_number=1,
+        claim_type="independent",
+        text="핵심 처리부와 표시부를 포함하는 장치",
+        elements=[
+            ClaimElement(label="A", text="핵심 처리 관계", importance="5"),
+            ClaimElement(label="B", text="결과를 표시하는 표시부", importance="2"),
+        ],
+    )
+    skipped_generic = {
+        **_item("B", "대응 없음", "", directness="absent"),
+        "not_evaluated": True,
+        "evaluation_status": "not_evaluated_low_importance",
+    }
+    caches = [
+        {"1": [_item("A", "동일", "core A"), _item("B", "동일", "display B")]},
+        {"1": [_item("A", "일부 차이", "related A"), _item("B", "동일", "display B2")]},
+        {"1": [_item("A", "대응 없음", "", directness="absent"), skipped_generic]},
+    ]
+    docs = [ExtractedDocument(filename=f"doc-{idx}.pdf") for idx in range(3)]
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        for idx, cache in enumerate(caches):
+            (Path(temp_dir) / f"comparisons_{idx}.json").write_text(
+                json.dumps(cache, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        result = build_citation_chain_from_comparisons(temp_dir, [claim], docs)
+
+    detail = result["families"]["1"]["primary_score_details"]["0"]
+    assert detail["direct_disclosure_frequency_by_label"]["B"] == 1.0
+    assert detail["dynamic_weight_by_label"]["B"] == 1.0
+
+
 def test_partial_similarity_boundary_is_not_complete_combination_coverage() -> None:
     claim = ParsedClaim(
         claim_number=1,
@@ -204,7 +404,7 @@ def test_report_disclosure_status_is_derived_from_structured_evidence() -> None:
         missing_limitations=[],
     )
     normalized = enforce_phase1_judgment_headers(report, [direct])
-    assert "(A) 실질적동일 92%" in normalized
+    assert "(A) 90~94% 실질적 동일(용어 차이만 존재)🟢 92%" in normalized
     assert "- 개시 상태: 직접 개시" in normalized
 
     partial = direct.model_copy(update={

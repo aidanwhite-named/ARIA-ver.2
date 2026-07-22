@@ -49,16 +49,30 @@ body {
 }
 
 .report-content .phase1-field {
-  @apply my-2 rounded-md border-l-4 px-3 py-2 text-sm leading-relaxed;
+  @apply my-4 rounded-md border-l-4 px-3.5 py-2.5 text-sm leading-relaxed shadow-sm;
+}
+.report-content .phase1-component-block {
+  @apply mb-8 pb-6 border-b border-dashed border-slate-200;
+}
+.report-content .phase1-component-block:last-child {
+  @apply mb-4 pb-0 border-b-0;
+}
+.report-content .phase1-card-row {
+  @apply my-4 grid grid-cols-2 gap-3 items-stretch;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+.report-content .phase1-card-row .phase1-field {
+  @apply my-0 h-full;
+  min-width: 0;
 }
 .report-content .phase1-field-label {
-  @apply block text-xs font-bold;
+  @apply block text-xs font-bold mb-1;
 }
 .report-content .phase1-field-body {
   @apply mt-1 block text-slate-800;
 }
 .report-content .phase1-judgment-card {
-  @apply my-3 rounded-md border-l-4 border-blue-500 bg-blue-50/60 px-3 py-3 text-sm leading-relaxed text-slate-900;
+  @apply my-4 rounded-md border-l-4 border-blue-500 bg-blue-50/60 px-3.5 py-3 text-sm leading-relaxed text-slate-900 shadow-sm;
 }
 .report-content .phase1-judgment-line {
   @apply mb-2 inline-flex items-center rounded border border-blue-200 bg-white px-2 py-1 text-sm font-bold text-blue-800;
@@ -78,11 +92,11 @@ body {
 .report-content .phase1-field-quote .phase1-field-label {
   @apply text-teal-700;
 }
-.report-content .phase1-field-summary {
-  @apply border-sky-300 bg-sky-50/50 text-sky-950;
+.report-content .phase1-field-similarity {
+  @apply border-amber-300 bg-amber-50/70 text-amber-950;
 }
-.report-content .phase1-field-summary .phase1-field-label {
-  @apply text-sky-700;
+.report-content .phase1-field-similarity .phase1-field-label {
+  @apply text-amber-700;
 }
 .report-content .phase1-field-reason {
   @apply border-violet-300 bg-violet-50/50 text-violet-950;
@@ -101,6 +115,12 @@ body {
 }
 .report-content .phase1-field-diff .phase1-field-label {
   @apply text-rose-700;
+}
+.report-content .phase1-field-supplement {
+  @apply border-cyan-300 bg-cyan-50/50 text-cyan-950;
+}
+.report-content .phase1-field-supplement .phase1-field-label {
+  @apply text-cyan-700;
 }
 .report-content .phase1-field-similar {
   @apply border-green-300 bg-green-50/50 text-green-950;

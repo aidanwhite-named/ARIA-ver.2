@@ -98,6 +98,7 @@ class ClaimElement(BaseModel):
 class EvidenceSpan(BaseModel):
     limitation: str = ""
     quote: str = ""
+    quote_translation: str = ""
     chunk_id: str = ""
 
 
@@ -133,6 +134,7 @@ class ElementMatch(BaseModel):
     label: str
     found: bool = False
     quote: str = ""
+    quote_translation: str = ""
     chunk_id: str = ""
     judgment: str = "대응 없음"
     cited_invention_index: int = 0

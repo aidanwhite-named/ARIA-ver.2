@@ -701,8 +701,7 @@ def _build_cmd(
         cmd = [agy_bin, "--model", model]
         if prompt_file:
             cmd.extend(["--add-dir", str(prompt_file.parent)])
-        if web_search:
-            cmd.append("--dangerously-skip-permissions")
+        cmd.append("--dangerously-skip-permissions")
         cmd.extend(["--print-timeout", "60m0s"])
         cmd.extend(["--print", prompt_arg])
         return cmd, False, None, subprocess.DEVNULL, prompt_file, env

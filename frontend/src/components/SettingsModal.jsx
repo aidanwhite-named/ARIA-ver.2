@@ -214,7 +214,7 @@ export default function SettingsModal({ onClose }) {
                   {[
                     { key: 'model_parser', label: '청구항 파서', desc: '청구항 추출 및 구성요소 분해' },
                     { key: 'model_compare', label: '구성요소 대비', desc: '인용발명 전문 대비 판단' },
-                    { key: 'model_report', label: 'Phase 1 생성', desc: '구성요소 분석 보고서 작성' },
+                    { key: 'model_report', label: '보고서 생성', desc: '구성요소 분석 보고서 작성' },
                   ].map(({ key, label, desc }) => (
                     <div key={key} className="flex items-center gap-2">
                       <div className="w-28 shrink-0">
@@ -240,8 +240,8 @@ export default function SettingsModal({ onClose }) {
                     {
                       value: 'mixed',
                       title: '혼합 모드',
-                      description: '기본값. 관련 문단을 먼저 압축한 뒤 전체 문헌을 한 번에 비교합니다.',
-                      caution: '빠른 후보 검토와 보고서 품질의 균형',
+                      description: '기본값. 핵심 구성으로 전체 문헌을 먼저 선별하고, 주 후보에만 범용 구성을 배치 비교합니다.',
+                      caution: '큰 독립항에서 입력·출력 토큰 절약. 작은 사건과 종속항은 통합 비교 유지',
                     },
                     {
                       value: 'hybrid',
