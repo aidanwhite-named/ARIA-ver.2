@@ -43,7 +43,7 @@ _ENGINE_BUDGETS = {
 _DEFAULT_BUDGET = (45_000, 60_000, 55_000, 5_000)
 _CHUNK_SIZE = 1_200
 _CACHE_META_KEY = "_meta"
-_CACHE_SCHEMA_VERSION = 18
+_CACHE_SCHEMA_VERSION = 26
 _MIXED_TOTAL_BUDGET = 80_000
 _MIXED_MIN_DOC_BUDGET = 8_000
 _CORE_SCREEN_TOTAL_BUDGET = 30_000
@@ -56,6 +56,8 @@ _CORE_FIRST_PRIMARY_CANDIDATES = 2
 _DEFAULT_DEPENDENT_CANDIDATE_DOC_LIMIT = 3
 _FALSE_NEGATIVE_REVIEW_MAX_DOCS = 5
 _FALSE_NEGATIVE_REVIEW_MIN_OVERLAP = 0.55
+_NON_PATENT_RELEVANT_TEXT_MAX_CHARS = 30_000
+_MIN_SUBSTANTIVE_NON_PATENT_QUOTE_CHARS = 40
 _JUDGMENT_RANK = {
     "동일": 5,
     "실질적 동일": 4,
@@ -107,6 +109,37 @@ _NON_GENERIC_LIMITATION_RE = re.compile(
 # 끝나는 것을 막기 위한 다국어 기술 개념 축이다. 이는 대응을 자동 인정하는 규칙이
 # 아니라, 명시 원문이 있는 문헌만 개별 재검증 호출로 올리는 용도다.
 _TECHNICAL_CONCEPT_PATTERNS = {
+    "three_dimensional_model": re.compile(
+        r"3\s*D|3차원|삼차원|three[- ]?dimensional|3-dimensional|"
+        r"\bmesh(?:es)?\b|메시|point\s+cloud|점군",
+        re.IGNORECASE,
+    ),
+    "cad_design": re.compile(
+        r"\bCAD\b|computer[- ]aided\s+design|캐드|설계\s*표현|design\s+representation",
+        re.IGNORECASE,
+    ),
+    "visual_extraction": re.compile(
+        r"이미지|영상|비전|시각|윤곽|형상|image|vision|visual|contour|shape|"
+        r"extract(?:ion|ing|ed)?|추출",
+        re.IGNORECASE,
+    ),
+    "multimodal_fusion": re.compile(
+        r"종합|융합|결합|통합|fuse|fused|fusion|combin(?:e|ed|ing|ation)|"
+        r"integrat(?:e|ed|ing|ion)|multimodal|multi-modal",
+        re.IGNORECASE,
+    ),
+    "structured_instruction": re.compile(
+        r"구조화된\s*(?:명령|지시)|기술\s*지침|작업\s*계획|"
+        r"structured\s+(?:command|instruction)|technical\s+instruction|"
+        r"working\s+plan|spec(?:ification)?",
+        re.IGNORECASE,
+    ),
+    "conditional_processing": re.compile(
+        r"필요한\s*경우|필요\s*여부|조건|판단|분기|"
+        r"if\s+(?:needed|required|necessary)|determin(?:e|es|ed|ing)|"
+        r"condition|branch|when\s+required",
+        re.IGNORECASE,
+    ),
     "harmonic": re.compile(r"고조파|harmonic", re.IGNORECASE),
     "distortion": re.compile(r"왜곡|distortion|non[- ]?linear|overdrive", re.IGNORECASE),
     "adjustment": re.compile(
@@ -123,6 +156,16 @@ _TECHNICAL_CONCEPT_PATTERNS = {
         re.IGNORECASE,
     ),
     "load": re.compile(r"부하|load|resistor|저항", re.IGNORECASE),
+    "coordinate_transform": re.compile(
+        r"좌표(?:계|축)?|좌표\s*변환|coordinate(?:\s+system|\s+axis)?|"
+        r"transform(?:ation)?|target\s+coordinate",
+        re.IGNORECASE,
+    ),
+    "camera_control": re.compile(
+        r"카메라.*(?:구동|제어|방향|팬|틸트)|(?:팬|틸트).*카메라|"
+        r"camera.*(?:control|direction|pan|tilt)|(?:pan|tilt).*camera",
+        re.IGNORECASE,
+    ),
     "signal_path": re.compile(r"입력|출력|단계|input|output|gate|drain|stage", re.IGNORECASE),
 }
 _GENERIC_FUNCTION_RE = re.compile(
@@ -137,6 +180,32 @@ def _importance_value(value: object) -> int:
         return max(1, min(5, int(value)))
     except (TypeError, ValueError):
         return 3
+
+
+_CORE_RELATION_RE = re.compile(
+    r"(?:동작\s*주파수|작동\s*주파수|운용\s*주파수|주파수.*(?:조정|조절|변경)|"
+    r"(?:조정|조절|변경).*주파수|파라미터.*(?:되도록|하도록)|"
+    r"(?:통해|따라|기초하여|기반하여|대응하여).*(?:조정|조절|변경|생성|제어)|"
+    r"(?:조정|조절|변경|생성|제어).*(?:통해|따라|기초하여|기반하여|대응하여)|"
+    r"operat(?:ing|ion)\s+frequency|frequency.*(?:adjust|vary|control)|"
+    r"(?:adjust|vary|control).*(?:frequency|parameter))",
+    re.IGNORECASE,
+)
+
+
+def _core_focus_text(elements: List[ClaimElement]) -> str:
+    labels = [
+        str(element.label)
+        for element in elements
+        if _CORE_RELATION_RE.search(" ".join((element.text or "").split()))
+    ]
+    if not labels:
+        return "별도 고정 관계 없음. 각 구성의 구조·입력·처리·출력 관계를 기준으로 판단."
+    return (
+        "중심 쟁점 구성: "
+        + ", ".join(labels)
+        + ". 이 구성들의 원인·제어변수·결과 관계를 분리하거나 일반 구성의 명칭만으로 대체하지 말 것."
+    )
 
 
 def _is_batchable_generic_element(element: ClaimElement) -> bool:
@@ -189,7 +258,7 @@ def _needs_false_negative_review(element: ClaimElement) -> bool:
 
 
 def _best_document_concept_overlap(doc: ExtractedDocument, element: ClaimElement) -> float:
-    """Measure whether one source chunk carries the element's unusual technical axes.
+    """Measure whether a short source-paragraph chain carries the technical axes.
 
     The score is intentionally only a *review trigger*.  It does not produce a
     judgment and never substitutes for a model-provided quotation.
@@ -199,9 +268,16 @@ def _best_document_concept_overlap(doc: ExtractedDocument, element: ClaimElement
     if len(expected) < 2:
         return 0.0
 
+    chunks = _doc_chunks(doc)
     best = 0.0
-    for _chunk_id, chunk_text in _doc_chunks(doc):
-        found = _technical_concepts(chunk_text)
+    for index in range(len(chunks)):
+        # 변환 관계가 한 단락, 좌표 계산이 다음 단락, 보상·제어가 그 다음
+        # 단락에 이어지는 특허 서술을 하나의 기능사슬로 검토한다.
+        window_text = "\n".join(
+            chunks[position][1]
+            for position in range(index, min(len(chunks), index + 3))
+        )
+        found = _technical_concepts(window_text)
         overlap = len(expected & found) / len(expected)
         best = max(best, overlap)
     return best
@@ -215,9 +291,9 @@ def _false_negative_review_candidates(
     """Find a small set of documents whose compound-feature evidence merits retry.
 
     An integrated response can be syntactically complete while missing every
-    relevant passage in one document.  We only retry a document where a single
-    source chunk has multiple technical axes from a compound element and the
-    integrated response supplied no quotation for that element.
+    relevant passage in one document. We retry a document where up to three
+    consecutive source paragraphs carry the compound element's technical axes
+    and the integrated response either missed it or left a substantive gap.
     """
     candidates: List[tuple[float, int, List[ClaimElement]]] = []
     for doc_idx, doc in enumerate(prior_docs):
@@ -231,7 +307,10 @@ def _false_negative_review_candidates(
             if not _needs_false_negative_review(element):
                 continue
             item = items_by_label.get(normalize_label(element.label), {})
-            if item.get("quote") or item.get("judgment") not in {"대응 없음", "차이"}:
+            if (
+                item.get("judgment") in {"동일", "실질적 동일"}
+                and not item.get("missing_limitations")
+            ):
                 continue
             overlap = _best_document_concept_overlap(doc, element)
             if overlap < _FALSE_NEGATIVE_REVIEW_MIN_OVERLAP:
@@ -249,7 +328,7 @@ def _false_negative_review_candidates(
 
 
 def _merge_precision_review_results(existing: List[Dict], reviewed: List[Dict]) -> None:
-    """Keep a recheck only when it upgrades a previously unsupported judgment."""
+    """Keep a recheck when it improves support quality or the judgment."""
     by_label = {
         normalize_label(item.get("label", "")): index
         for index, item in enumerate(existing)
@@ -261,10 +340,73 @@ def _merge_precision_review_results(existing: List[Dict], reviewed: List[Dict]) 
         previous = existing[index]
         old_rank = _JUDGMENT_RANK.get(previous.get("judgment", "대응 없음"), 0)
         new_rank = _JUDGMENT_RANK.get(item.get("judgment", "대응 없음"), 0)
-        if item.get("quote") and new_rank > old_rank:
+        old_issues = len(previous.get("quality_issues") or [])
+        new_issues = len(item.get("quality_issues") or [])
+        quality_improved = old_issues > 0 and new_issues < old_issues
+        if item.get("quote") and (new_rank > old_rank or quality_improved):
             upgraded = dict(item)
             upgraded["precision_review"] = True
             existing[index] = upgraded
+
+
+_NON_PATENT_ACTION_RE = re.compile(
+    r"(?:generate|generated|generates|extract|extracted|extracts|process|processed|"
+    r"encode|encoded|fuse|fused|combine|combined|transform|transformed|create|created|"
+    r"receive|received|use|used|based\s+on|input|output|생성|추출|처리|인코딩|"
+    r"융합|결합|변환|수신|입력|출력|기초하여|기반으로)",
+    re.IGNORECASE,
+)
+
+
+def _apply_non_patent_evidence_quality(results: List[Dict], doc: ExtractedDocument) -> List[Dict]:
+    """Annotate non-patent evidence quality without making another model call."""
+    if doc.document_type != "non_patent":
+        return results
+    for item in results:
+        issues: List[str] = []
+        if item.get("found"):
+            quote = _normalize_verbatim_text(item.get("quote", ""))
+            evidence = item.get("evidence") or []
+            structured_roles = {
+                role
+                for span in evidence
+                for role in ("subject", "input", "process", "output", "condition", "relationship")
+                if str(span.get(role, "") or "").strip()
+            }
+            if len(quote) < _MIN_SUBSTANTIVE_NON_PATENT_QUOTE_CHARS:
+                issues.append("non_patent_quote_too_short")
+            if not _NON_PATENT_ACTION_RE.search(quote):
+                issues.append("non_patent_quote_lacks_action")
+            if (
+                item.get("judgment") in {"동일", "실질적 동일", "일부 차이"}
+                and len(structured_roles & {"input", "process", "output", "condition", "relationship"}) < 2
+            ):
+                issues.append("non_patent_evidence_chain_incomplete")
+        item["quality_issues"] = issues
+        item["evidence_quality"] = "needs_review" if issues else "verified"
+        item["analysis_status"] = "needs_review" if issues else "evaluated"
+    return results
+
+
+def _non_patent_quality_review_candidates(
+    elements: List[ClaimElement],
+    prior_docs: List[ExtractedDocument],
+    doc_results: List[List[Dict]],
+) -> List[tuple[int, List[ClaimElement]]]:
+    candidates: List[tuple[int, List[ClaimElement]]] = []
+    by_label = {normalize_label(element.label): element for element in elements}
+    for doc_idx, doc in enumerate(prior_docs):
+        if doc.document_type != "non_patent" or doc_idx >= len(doc_results):
+            continue
+        review = [
+            by_label[normalize_label(item.get("label", ""))]
+            for item in doc_results[doc_idx]
+            if item.get("quality_issues")
+            and normalize_label(item.get("label", "")) in by_label
+        ]
+        if review:
+            candidates.append((doc_idx, review))
+    return candidates
 
 
 def _partition_core_first_elements(
@@ -278,10 +420,12 @@ def _partition_core_first_elements(
     ]
     return core, generic
 
-# 한국어 청구항과 영문 인용발명을 혼합 비교할 때, 한국어 토큰만으로 문헌을
-# 압축하면 직접 대응하는 영문 실시예가 입력에서 통째로 빠질 수 있다. 자주 쓰이는
-# 기능 축을 영문 검색어로 확장하되, 최종 대응 판단은 LLM이 원문 전체 문맥에서 한다.
-_KO_EN_CLAIM_KEYWORD_GROUPS = (
+# 한국어 청구항과 외국어 인용발명을 혼합 비교할 때, 한국어 토큰만으로 문헌을
+# 압축하면 직접 대응하는 실시예가 입력에서 통째로 빠질 수 있다. 자주 쓰이는
+# 기능 축을 영어·일본어·중국어 검색어로 확장하되, 최종 대응 판단은 LLM이 원문
+# 전체 문맥에서 한다. 일본어의 신자체/표기 변형과 중국어의 간체/번역 변형을 함께
+# 넣어 JP/CN 공보의 기계 번역 여부와 무관하게 관련 청크를 회수한다.
+_KO_MULTILINGUAL_CLAIM_KEYWORD_GROUPS = (
     (("텍스트", "문자", "자막", "발화"),
      ("text", "subtitle", "caption", "transcript", "utterance", "sentence")),
     (("메타데이터", "메타 데이터"), ("metadata", "meta-data")),
@@ -295,6 +439,33 @@ _KO_EN_CLAIM_KEYWORD_GROUPS = (
     (("영상", "비디오", "미디어"), ("video", "media")),
     (("시청", "재생", "탐색"), ("view", "watch", "playback", "presentation", "navigation")),
     (("서비스", "제공", "검색"), ("service", "provide", "present", "search")),
+    (("교정", "보정", "조정", "튜닝"),
+     ("calibrat", "adjust", "tune", "較正", "校正", "補正", "調整",
+      "校准", "标定", "调节")),
+    (("작동 주파수", "동작 주파수", "운용 주파수"),
+     ("operating frequency", "operation frequency", "動作周波数", "作動周波数",
+      "工作频率", "操作频率", "运行频率")),
+    (("공기 펄스", "에어 펄스"),
+     ("air pulse", "air-pulse", "空気パルス", "空気圧パルス",
+      "空气脉冲", "气流脉冲", "气压脉冲")),
+    (("음압", "음압 레벨"),
+     ("sound pressure", "sound pressure level", "spl", "音圧", "音圧レベル",
+      "声压", "声压级")),
+    (("메모리", "저장", "기억"),
+     ("memory", "storage", "store", "メモリ", "記憶", "保存", "格納",
+      "存储器", "存储", "内存", "保存")),
+    (("사운드", "소리", "음향", "오디오"),
+     ("sound", "audio", "acoustic", "サウンド", "音響", "音声",
+      "声音", "音频", "声学")),
+    (("생성", "발생"),
+     ("generat", "produc", "生成", "発生", "产生")),
+    (("일치", "동일", "같은"),
+     ("match", "same", "equal", "一致", "同一", "等しい", "相同", "等于")),
+    (("다른", "상이", "별개", "독립"),
+     ("different", "distinct", "separate", "異なる", "相違", "別個", "独立",
+      "不同", "相异", "单独", "独立")),
+    (("모듈", "디바이스", "장치"),
+     ("module", "device", "モジュール", "デバイス", "装置", "模块", "设备", "装置")),
 )
 
 
@@ -305,6 +476,20 @@ def _budgets(engine: str) -> tuple[int, int, int, int]:
 def _full_doc_text(doc: ExtractedDocument) -> str:
     chunks = _doc_chunks(doc)
     return "\n".join(f"{cid} {text}" for cid, text in chunks)
+
+
+_NON_DESCRIPTION_PAGE_RE = re.compile(
+    r"(?im)^\s*(?:초록|요약|abstract|summary|what\s+is\s+claimed\s*:?)\s*$"
+    r"|^\s*(?:특허)?청구(?:의)?\s*범위\s*$"
+)
+
+
+def _page_is_non_description(page_text: str) -> bool:
+    """문단번호가 없는 fallback 페이지의 초록/요약/청구항 여부를 판정한다."""
+    text = page_text or ""
+    if _NON_DESCRIPTION_PAGE_RE.search(text):
+        return True
+    return bool(re.search(r"(?im)^\s*claims\s*:?\s*$", text))
 
 
 def select_candidate_doc_indices_for_elements(
@@ -335,12 +520,6 @@ _QUOTE_HEAD_CHARS = 190
 _QUOTE_TAIL_CHARS = 140
 _ELLIPSIS = " ... "
 _HIGH_JUDGMENTS = {"동일", "실질적 동일"}
-_COMPOSITE_MISSING_RE = re.compile(
-    r"(?:제\s*[12]\s*|최종|결합|조합|함께|모두|각각|별도|"
-    r"산출|계산|판단|선택|전환|제어\s*로직|알고리즘|이미지\s*프레임|프레임\s*기반|"
-    r"second|first|final|combine|combination|respectively|separate|frame|algorithm|logic)",
-    re.IGNORECASE,
-)
 _NON_DISCLOSURE_RE = re.compile(
     r"(?:확인되지|명시되지|개시되지|부재|차이|불충분|추론|"
     r"not\s+disclosed|not\s+confirmed|missing|absent|insufficient|inferred)",
@@ -351,6 +530,21 @@ _TERMINOLOGY_ONLY_RE = re.compile(
     r"차이(?:만|\s*뿐|\s*불과)|"
     r"차이\s*외(?:에|에는)?\s*(?:실질적으로\s*)?(?:동일|같)"
     r")",
+    re.IGNORECASE,
+)
+_MINIMUM_LIMIT_RE = re.compile(r"(?:최소|minimum|at\s+least|lower\s+bound)", re.IGNORECASE)
+_AVERAGE_ONLY_RE = re.compile(r"(?:평균|average|mean)", re.IGNORECASE)
+_MINIMUM_EVIDENCE_RE = re.compile(
+    r"(?:최소|minimum|at\s+least|not\s+less\s+than|lower\s+bound)",
+    re.IGNORECASE,
+)
+_EXECUTED_ADJUSTMENT_RE = re.compile(
+    r"(?:조정하여|수정하여|변경하여|adjust(?:ing|s|ed)?|modif(?:y|ies|ied)|"
+    r"chang(?:e|es|ed|ing)|apply|applies|applied|perform|execute)",
+    re.IGNORECASE,
+)
+_RECOMMENDATION_ONLY_RE = re.compile(
+    r"(?:권고|추천|제안|recommend|suggest|propose)",
     re.IGNORECASE,
 )
 
@@ -369,7 +563,6 @@ def _cap_judgment_for_coverage(
     are directly supported by excerpts.
     """
     directness = (directness or "").strip().lower()
-    missing_text = " ".join(missing_limitations or [])
     terminology_only = bool(_TERMINOLOGY_ONLY_RE.search(reason or ""))
     coverage_problem = bool(missing_limitations) or (
         not terminology_only and bool(_NON_DISCLOSURE_RE.search(reason or ""))
@@ -380,27 +573,42 @@ def _cap_judgment_for_coverage(
             return "일부 유사"
         return judgment
 
-    if directness == "inferred" and judgment in _HIGH_JUDGMENTS:
-        return "일부 차이"
-
     if not coverage_problem:
         return judgment
 
+    if directness == "inferred" and judgment in _HIGH_JUDGMENTS:
+        return "일부 차이"
+
     if judgment in _HIGH_JUDGMENTS:
-        if (
-            len(missing_limitations or []) >= 2
-            or _COMPOSITE_MISSING_RE.search(missing_text)
-            or _COMPOSITE_MISSING_RE.search(reason or "")
-        ):
+        if len(missing_limitations or []) >= 2:
             return "일부 유사"
         return "일부 차이"
 
-    if judgment == "일부 차이" and (
-        len(missing_limitations or []) >= 2
-        or _COMPOSITE_MISSING_RE.search(missing_text)
-    ):
+    if judgment == "일부 차이" and len(missing_limitations or []) >= 2:
         return "일부 유사"
 
+    return judgment
+
+
+def _reconcile_judgment_with_reason(
+    judgment: str,
+    directness: str,
+    missing_limitations: list[str],
+    reason: str,
+    quote: str,
+) -> str:
+    """좁은 범위의 판정 라벨·판단 이유 모순을 해소한다."""
+    if (
+        judgment == "일부 차이"
+        and (directness or "").strip().lower() == "direct"
+        and not missing_limitations
+        and bool((quote or "").strip())
+        and (
+            "실질적으로 동일" in (reason or "")
+            or _TERMINOLOGY_ONLY_RE.search(reason or "")
+        )
+    ):
+        return "실질적 동일"
     return judgment
 
 
@@ -414,17 +622,18 @@ def _judgment_adjustment_reason(
     """Return an auditable reason when local policy changes the LLM judgment."""
     if llm_judgment == final_judgment:
         return ""
+    if (
+        llm_judgment == "일부 차이"
+        and final_judgment == "실질적 동일"
+        and not missing_limitations
+    ):
+        return "reason_label_reconciliation"
     normalized_directness = (directness or "").strip().lower()
     if normalized_directness == "absent":
         return "directness_absent"
     if normalized_directness == "inferred" and llm_judgment in _HIGH_JUDGMENTS:
         return "directness_inferred"
-    missing_text = " ".join(missing_limitations or [])
-    if (
-        len(missing_limitations or []) >= 2
-        or _COMPOSITE_MISSING_RE.search(missing_text)
-        or _COMPOSITE_MISSING_RE.search(reason or "")
-    ):
+    if len(missing_limitations or []) >= 2:
         return "multiple_or_composite_missing_limitations"
     if missing_limitations or _NON_DISCLOSURE_RE.search(reason or ""):
         return "missing_or_undisclosed_limitation"
@@ -441,6 +650,40 @@ def _shorten_quote(quote: str) -> str:
     return f"{head}{_ELLIPSIS}{tail}"
 
 
+_EMPTY_MISSING_LIMITATION_MARKERS = {
+    "",
+    "-",
+    "n/a",
+    "na",
+    "none",
+    "null",
+    "없음",
+    "해당 없음",
+    "차이 없음",
+    "누락 없음",
+}
+
+
+def _normalize_missing_limitations(raw_missing) -> list[str]:
+    """모델이 빈 누락 목록을 자연어 표지로 반환한 경우 실제 공백으로 정규화한다."""
+    if isinstance(raw_missing, str):
+        values = [raw_missing]
+    elif isinstance(raw_missing, list):
+        values = raw_missing
+    else:
+        return []
+
+    normalized: list[str] = []
+    for value in values:
+        text = str(value).strip()
+        marker = re.sub(r"[.\s]+$", "", text).strip().lower()
+        if marker in _EMPTY_MISSING_LIMITATION_MARKERS:
+            continue
+        if text:
+            normalized.append(text)
+    return normalized[:5]
+
+
 def _normalize_evidence(raw_evidence: object, fallback_quote: str = "", fallback_chunk_id: str = "") -> list[dict]:
     """Normalize optional multi-paragraph evidence while preserving legacy quote behavior."""
     evidence: list[dict] = []
@@ -453,9 +696,17 @@ def _normalize_evidence(raw_evidence: object, fallback_quote: str = "", fallback
                 continue
             evidence.append({
                 "limitation": str(item.get("limitation", "") or "").strip(),
+                "subject": str(item.get("subject", "") or "").strip(),
+                "input": str(item.get("input", "") or "").strip(),
+                "process": str(item.get("process", "") or "").strip(),
+                "output": str(item.get("output", "") or "").strip(),
+                "condition": str(item.get("condition", "") or "").strip(),
+                "relationship": str(item.get("relationship", "") or "").strip(),
                 "quote": quote,
                 "quote_translation": _shorten_quote(str(item.get("quote_translation", "") or "")),
                 "chunk_id": str(item.get("chunk_id", "") or "").strip(),
+                "page": item.get("page"),
+                "section": str(item.get("section", "") or "").strip(),
             })
             if len(evidence) >= 5:
                 break
@@ -463,10 +714,245 @@ def _normalize_evidence(raw_evidence: object, fallback_quote: str = "", fallback
     if not evidence and fallback_quote:
         evidence.append({
             "limitation": "대표 근거",
+            "subject": "",
+            "input": "",
+            "process": "",
+            "output": "",
+            "condition": "",
+            "relationship": "",
             "quote": fallback_quote,
+            "quote_translation": "",
             "chunk_id": str(fallback_chunk_id or "").strip(),
+            "page": None,
+            "section": "",
         })
     return evidence
+
+
+def _normalize_verbatim_text(value: str) -> str:
+    """Normalize extraction-only whitespace without changing quoted wording."""
+    text = str(value or "").replace("\u00a0", " ")
+    text = re.sub(r"(?<=\w)-\s*\r?\n\s*(?=\w)", "", text)
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def _quote_is_verbatim(quote: str, corpus: str, min_segment_len: int = 12) -> bool:
+    """Return True only when every quoted segment occurs verbatim in the source.
+
+    A loose word-overlap check is useful for diagnostics, but it must not authorize
+    a direct-disclosure or novelty finding.  In particular, a model-written sentence
+    assembled from claim language and scattered source terms is not a quotation.
+    """
+    normalized_corpus = _normalize_verbatim_text(corpus)
+    if not normalized_corpus:
+        return False
+    segments = [
+        re.sub(r"^\s*\[[^\]]+\]\s*", "", segment).strip()
+        for segment in re.split(r"\s*(?:…|\.{3,})\s*", str(quote or ""))
+    ]
+    normalized_segments = [
+        _normalize_verbatim_text(segment)
+        for segment in segments
+        if len(_normalize_verbatim_text(segment)) >= min_segment_len
+    ]
+    return bool(normalized_segments) and all(
+        segment in normalized_corpus for segment in normalized_segments
+    )
+
+
+_QUOTE_RECOVERY_STOPWORDS = {
+    "the", "a", "an", "and", "or", "of", "to", "for", "in", "on", "with",
+    "is", "are", "be", "by", "that", "this", "상기", "및", "또는", "따라",
+    "기초", "하는", "한다", "위한", "으로", "에서", "대한", "포함",
+}
+
+
+def _quote_recovery_tokens(value: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[A-Za-z0-9가-힣]{2,}", str(value or "").lower())
+        if token not in _QUOTE_RECOVERY_STOPWORDS
+    }
+
+
+def _source_chunk_text(doc: ExtractedDocument, chunk_id: str) -> str:
+    """Return only the source text attached to an exact model-cited chunk id."""
+    target = str(chunk_id or "").strip()
+    if not target:
+        return ""
+    for candidate_id, text in _doc_chunks(doc):
+        if str(candidate_id or "").strip() == target:
+            return str(text or "").strip()
+    return ""
+
+
+def _recover_verbatim_quote(
+    model_quote: str,
+    source_doc: ExtractedDocument,
+    chunk_id: str,
+) -> str:
+    """Recover a conservative exact excerpt from the model-cited source chunk.
+
+    The recovery never searches another document or an unrelated paragraph.  It
+    merely replaces a paraphrased representative quote with exact wording from the
+    cited chunk.  Because the excerpt may support only part of a compound element,
+    callers must keep it as inferred evidence rather than direct disclosure.
+    """
+    source_text = _source_chunk_text(source_doc, chunk_id)
+    probe_tokens = _quote_recovery_tokens(model_quote)
+    source_tokens = _quote_recovery_tokens(source_text)
+    overlap = probe_tokens & source_tokens
+    if not source_text or len(overlap) < 2:
+        return ""
+
+    coverage = len(overlap) / max(1, len(probe_tokens))
+    if coverage < 0.20:
+        return ""
+    if len(source_text) <= _QUOTE_MAX_CHARS:
+        return source_text
+
+    units = [
+        unit.strip()
+        for unit in re.split(r"(?<=[.!?。！？])\s+|\r?\n+", source_text)
+        if unit.strip()
+    ]
+    candidates: list[tuple[float, int, str]] = []
+    for start in range(len(units)):
+        excerpt = ""
+        for end in range(start, min(len(units), start + 4)):
+            combined = " ".join(units[start:end + 1]).strip()
+            if len(combined) > _QUOTE_MAX_CHARS:
+                break
+            excerpt = combined
+            excerpt_tokens = _quote_recovery_tokens(excerpt)
+            matched = probe_tokens & excerpt_tokens
+            score = len(matched) / max(1, len(probe_tokens))
+            candidates.append((score, len(matched), excerpt))
+        if not excerpt and len(units[start]) > _QUOTE_MAX_CHARS:
+            shortened = _shorten_quote(units[start])
+            excerpt_tokens = _quote_recovery_tokens(shortened)
+            matched = probe_tokens & excerpt_tokens
+            candidates.append((
+                len(matched) / max(1, len(probe_tokens)),
+                len(matched),
+                shortened,
+            ))
+
+    if not candidates:
+        return ""
+    score, matched_count, recovered = max(
+        candidates,
+        key=lambda value: (value[0], value[1], len(value[2])),
+    )
+    return recovered if matched_count >= 2 and score >= 0.20 else ""
+
+
+def _append_missing_limitation(missing: list[str], limitation: str) -> None:
+    if limitation and limitation not in missing and len(missing) < 5:
+        missing.append(limitation)
+
+
+def _apply_korean_compound_relationship_guard(
+    claim_text: str,
+    evidence_text: str,
+    directness: str,
+    missing_limitations: list[str],
+) -> tuple[str, list[str]]:
+    """Conservatively audit Korean compound limitations against verbatim evidence.
+
+    This guard covers relationship errors that keyword similarity cannot resolve:
+    conversion plus calibration, state-conditioned decisions, and controls driven
+    by multiple named upstream results.  It does not attempt a general semantic
+    comparison and therefore activates only for explicit Korean claim patterns.
+    """
+    claim = re.sub(r"\s+", " ", str(claim_text or "")).strip()
+    evidence = re.sub(r"\s+", " ", str(evidence_text or "")).strip()
+    if not re.search(r"[가-힣]", claim):
+        return directness, missing_limitations
+
+    guarded = False
+    if "변환" in claim and re.search(r"(?:좌표|제어\s*정보)", claim):
+        if not re.search(
+            r"(?:변환|환산|매핑|좌표계\s*(?:변경|변환)|"
+            r"convert(?:s|ed|ing)?|transform(?:s|ed|ing|ation)?|"
+            r"coordinate\s+(?:system|axis).{0,80}(?:to|into)|mapping)",
+            evidence,
+            re.IGNORECASE,
+        ):
+            _append_missing_limitation(
+                missing_limitations,
+                "입력 정보를 카메라 제어 좌표 정보로 변환하는 명시적 처리 관계",
+            )
+            guarded = True
+
+    if re.search(r"설치\s*환경", claim) and re.search(r"오차.{0,12}보정|보정.{0,12}오차", claim):
+        installation_context = re.search(
+            r"(?:설치\s*(?:환경|상태|조건|위치)|설치된|배치된|현장\s*환경|"
+            r"환경\s*오차|상대\s*(?:위치|배치)|"
+            r"install(?:ation|ed)?|mount(?:ing|ed)?|position(?:ing|ed)?|"
+            r"relative\s+(?:position|location|orientation)|independently\s+positioned)",
+            evidence,
+            re.IGNORECASE,
+        )
+        calibration_action = re.search(
+            r"(?:보정|교정|보상|오차|편차|왜곡|"
+            r"compensat(?:e|es|ed|ing|ion)|calibrat(?:e|es|ed|ing|ion)|"
+            r"correct(?:s|ed|ing|ion)|alignment)",
+            evidence,
+            re.IGNORECASE,
+        )
+        coordinate_context = re.search(
+            r"(?:좌표|좌표계|좌표축|coordinate|axis|pan\s+angle|tilt\s+angle)",
+            evidence,
+            re.IGNORECASE,
+        )
+        if not (installation_context and calibration_action and coordinate_context):
+            _append_missing_limitation(
+                missing_limitations,
+                "설치 환경에 따른 좌표 오차를 보정하는 명시적 처리 관계",
+            )
+            guarded = True
+
+    if (
+        re.search(r"현재\s*동작\s*상태", claim)
+        and re.search(r"(?:여부를?\s*결정|여부\s*판단)", claim)
+    ):
+        state_decision_link = re.search(
+            r"(?:동작\s*상태|현재\s*상태|operating\s+state|current\s+(?:state|mode)|"
+            r"idle|tracking\s+state).{0,140}"
+            r"(?:기초|따라|고려|입력|based\s+on|according\s+to|consider|depending\s+on)"
+            r".{0,140}(?:방향\s*전환|여부|결정|판단|turn|switch|direction|determin|decid)",
+            evidence,
+            re.IGNORECASE,
+        )
+        if not state_decision_link:
+            _append_missing_limitation(
+                missing_limitations,
+                "카메라의 현재 동작 상태를 판단 입력으로 사용하여 방향 전환 여부를 결정하는 관계",
+            )
+            guarded = True
+
+    if re.search(r"결정\s*결과.{0,80}및.{0,80}출력값.{0,80}따라", claim):
+        combined_input_link = (
+            re.search(r"(?:결정\s*결과|decision\s+(?:result|output))", evidence, re.IGNORECASE)
+            and re.search(r"(?:출력값|output\s+(?:value|result))", evidence, re.IGNORECASE)
+            and re.search(
+                r"(?:함께|동시에|및|both|together|and).{0,120}"
+                r"(?:따라|기초|입력|based\s+on|according\s+to|input)",
+                evidence,
+                re.IGNORECASE,
+            )
+        )
+        if not combined_input_link:
+            _append_missing_limitation(
+                missing_limitations,
+                "의사결정 결과와 좌표 보정부 출력값을 함께 입력하여 카메라를 제어하는 결합관계",
+            )
+            guarded = True
+
+    if guarded and directness == "direct":
+        directness = "inferred"
+    return directness, missing_limitations
 
 
 def _evidence_spans(raw_evidence: object) -> list[EvidenceSpan]:
@@ -486,7 +972,7 @@ def normalize_label(label: str) -> str:
     if re.match(r"^[\s(\[{]*P[\s)\]}]*(?=$|\s|[:：._-])", raw, re.IGNORECASE):
         return "P"
     m = re.match(
-        r"^[\s(\[{]*([A-Ja-j])\s*(?:-\s*(\d+))?[\s)\]}]*(?=$|\s|[:：._-])",
+        r"^[\s(\[{]*([A-Za-z])\s*(?:-\s*(\d+))?[\s)\]}]*(?=$|\s|[:：._-])",
         raw,
     )
     if not m:
@@ -495,7 +981,7 @@ def normalize_label(label: str) -> str:
     return f"{base}-{m.group(2)}" if m.group(2) else base
 
 
-_COMPARISON_LABELS = tuple("ABCDEFGHIJ")
+_COMPARISON_LABELS = tuple("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 
 
 def _comparison_safe_elements(elements: List[ClaimElement]) -> List[ClaimElement]:
@@ -506,7 +992,7 @@ def _comparison_safe_elements(elements: List[ClaimElement]) -> List[ClaimElement
 
     for elem in elements:
         label = normalize_label(elem.label)
-        if not re.fullmatch(r"(?:P|[A-J](?:-\d+)?)", label or "") or label in used:
+        if not re.fullmatch(r"(?:P|[A-Z](?:-\d+)?)", label or "") or label in used:
             while auto_idx < len(_COMPARISON_LABELS) and _COMPARISON_LABELS[auto_idx] in used:
                 auto_idx += 1
             label = _COMPARISON_LABELS[auto_idx] if auto_idx < len(_COMPARISON_LABELS) else f"X{len(used) + 1}"
@@ -526,15 +1012,14 @@ def _build_doc_text(
     max_chars: Optional[int] = None,
     engine: str = "",
     settings: Optional[Settings] = None,
+    force_non_patent_full_text: bool = False,
 ) -> str:
-    """
-    대응관계 텍스트를 LLM 입력용으로 최적화해 반환.
+    """대응관계 텍스트를 LLM 입력용으로 최적화해 반환.
 
-    우선순위:
-    1. doc.paragraphs (파일번호[XXXX] 기준 문단/페이지별 분할, chunk_id 포함 가능)
-    2. doc.raw_text 단순 텍스트 대안 (청크 없을 경우)
+    문헌 전문이 입력 예산 안에 들어오면 그대로 쓰고, 넘칠 때만 청구항 키워드가
+    적중한 청크와 그 앞뒤 청크를 예산까지 모아 압축한다(벡터 검색은 쓰지 않는다).
 
-    max_chars: 이 함수에서 잘라낼 최대 길이 사용. 호출자가 직접 지정 시 사용.
+    max_chars: 이 함수에서 잘라낼 최대 길이. 호출자가 직접 지정 시 사용.
     """
     chunks = _doc_chunks(doc)
     if not chunks:
@@ -547,10 +1032,11 @@ def _build_doc_text(
     relevant_limit = min(max_chars, relevant_default) if max_chars else relevant_default
 
     full_text = "\n".join(f"{cid} {text}" for cid, text in chunks)
+    if doc.document_type == "non_patent":
+        relevant_limit = min(relevant_limit, _NON_PATENT_RELEVANT_TEXT_MAX_CHARS)
+        hard_limit = min(hard_limit, _NON_PATENT_RELEVANT_TEXT_MAX_CHARS)
     if not elements:
         return full_text[:hard_limit]
-
-    # RAG branch removed. Directly using full text or keyword context.
 
     if len(full_text) <= hard_limit:
         return full_text[:hard_limit]
@@ -570,17 +1056,25 @@ def _build_doc_text(
         logger.info(f"{doc.filename}: no keyword hits, using first {relevant_limit} chars")
         return full_text[:relevant_limit]
 
-    selected_orders = {0}
-    total = len(chunks[0][0]) + len(chunks[0][1]) + 2
-    # break와 continue: 잘라낸 문단 앞에는 반드시 이전 문단의 연결 맥락이 필요하다.
-    # 홀수 인덱스의 문단이 캐시에 없는 상황을 막기 위해, break를 쓰면 잘라낸 이후 문단으로
-    # 건너뛰게 되어서 문단 연결이 깨지는 문제가 있었음.
+    selected_orders = set() if doc.document_type == "non_patent" else {0}
+    total = sum(len(chunks[order][0]) + len(chunks[order][1]) + 2 for order in selected_orders)
     for score, order, _chunk_id, text in sorted(scored, key=lambda x: (-x[0], x[1])):
-        item_len = len(text) + 20
-        if total + item_len > relevant_limit:
+        # 적중 청크와 앞뒤 청크를 하나의 번들로 추가하되 전체 예산을 넘기지 않는다.
+        bundle = [
+            neighbor
+            for neighbor in (max(0, order - 1), order, min(len(chunks) - 1, order + 1))
+            if neighbor not in selected_orders
+        ]
+        bundle_len = sum(len(chunks[neighbor][0]) + len(chunks[neighbor][1]) + 2 for neighbor in bundle)
+        if total + bundle_len > relevant_limit:
+            if order not in selected_orders:
+                item_len = len(chunks[order][0]) + len(text) + 2
+                if total + item_len <= relevant_limit:
+                    selected_orders.add(order)
+                    total += item_len
             continue
-        selected_orders.add(order)
-        total += item_len
+        selected_orders.update(bundle)
+        total += bundle_len
 
     selected = [
         f"{chunk_id} {text}"
@@ -596,7 +1090,38 @@ def _build_doc_text(
 
 
 def _doc_chunks(doc: ExtractedDocument) -> List[tuple[str, str]]:
+    if doc.paragraph_chunks:
+        # 비특허문헌의 초록·참고문헌·감사의 글 제외는 추출 단계
+        # (pdf_extractor._build_non_patent_records_and_chunks)에서 이미 끝난다.
+        # 여기서 섹션명으로 한 번 더 거르면, 섹션 검출이 실패해 본문이 초록으로
+        # 라벨링된 문헌이 통째로 비교 대상에서 사라진다. 특허문헌의 초록/청구항
+        # 섹션만 방어적으로 제외한다.
+        return [
+            (chunk.chunk_id or chunk.paragraph_no or "", chunk.original_text.strip())
+            for chunk in doc.paragraph_chunks
+            if chunk.original_text
+            and chunk.original_text.strip()
+            and (
+                doc.document_type == "non_patent"
+                or not re.fullmatch(
+                    r"\s*(?:초록|요약|abstract|summary|claims?|(?:특허)?청구(?:의)?\s*범위)\s*",
+                    chunk.section or "",
+                    re.IGNORECASE,
+                )
+            )
+        ]
+
     if doc.paragraphs:
+        if doc.paragraph_records:
+            records = [record for record in doc.paragraph_records if not record.chunk_excluded]
+            return [
+                (
+                    f"[{record.paragraph_no}]" if record.paragraph_no else "",
+                    record.original_text.strip() or record.normalized_text.strip(),
+                )
+                for record in records
+                if record.original_text.strip() or record.normalized_text.strip()
+            ]
         return [
             (para_id, text.strip())
             for para_id, text in doc.paragraphs.items()
@@ -607,7 +1132,7 @@ def _doc_chunks(doc: ExtractedDocument) -> List[tuple[str, str]]:
         chunks = []
         for page_num, page_text in doc.pages.items():
             text = (page_text or "").strip()
-            if not text:
+            if not text or _page_is_non_description(text):
                 continue
             for idx in range(0, len(text), _CHUNK_SIZE):
                 chunk = text[idx:idx + _CHUNK_SIZE].strip()
@@ -661,7 +1186,7 @@ def _build_hybrid_docs_block(
 
     # The integrated mode must keep every cited document in the one prompt. If
     # the combined full text is too large, divide the input budget across all
-    # documents and compact each one independently (RAG first, keyword fallback).
+    # documents and compact each one independently with claim-keyword selection.
     separator_chars = len("\n\n---\n\n") * max(0, len(prior_docs) - 1)
     header_chars = sum(
         len(f"[doc_index={doc_idx}] {doc.filename}\n")
@@ -691,7 +1216,10 @@ def _build_hybrid_docs_block(
 def _claim_keywords(elements: List[ClaimElement]) -> List[str]:
     text = " ".join(e.text for e in elements)
     lowered_claim = text.lower()
-    tokens = re.findall(r"[A-Za-z0-9가-힣]{2,}", text.lower())
+    tokens = re.findall(
+        r"[A-Za-z0-9가-힣]{2,}|[ぁ-んァ-ヶー一-龯]{2,}",
+        text.lower(),
+    )
     stopwords = {
         "하는", "하고", "하며", "포함", "포함하는", "구비", "구비하는", "상기",
         "및", "또는", "위해", "위한", "방법", "장치", "시스템", "단계",
@@ -715,7 +1243,7 @@ def _claim_keywords(elements: List[ClaimElement]) -> List[str]:
         seen.add(token)
         keywords.append(token)
 
-    for triggers, expansions in _KO_EN_CLAIM_KEYWORD_GROUPS:
+    for triggers, expansions in _KO_MULTILINGUAL_CLAIM_KEYWORD_GROUPS:
         if not any(trigger in lowered_claim for trigger in triggers):
             continue
         for token in expansions:
@@ -805,13 +1333,9 @@ def verify_quotes(
                              "icon": "warning", "message": f"({label}) 인용발명 문서를 찾을 수 없음"})
             continue
 
-        # 검색 대상 텍스트는 paragraphs + pages + raw_text를 모두 합친다.
+        # 검색·검증 대상은 초록·요약·청구항을 제외한 발명의 상세한 설명 청크다.
         if doc_idx not in corpus_cache:
-            corpus_cache[doc_idx] = (
-                " ".join(doc.paragraphs.values()) + " "
-                + " ".join(doc.pages.values()) + " "
-                + doc.raw_text
-            ).lower()
+            corpus_cache[doc_idx] = _full_doc_text(doc).lower()
         search_corpus = corpus_cache[doc_idx]
 
         # '...'으로 축약된 발췌문은 각 구간을 나눠 검증한다. 축약이 없으면 전체 인용문에
@@ -1250,6 +1774,8 @@ async def analyze_claim_elements_hybrid(
     ]
 
     try:
+        staged_results = None
+        hybrid_results = None
         staged_results = (
             await _judge_core_first_mixed(elements, prior_docs, settings)
             if core_first and _comparison_mode(getattr(settings, "comparison_mode", "")) == "mixed"
@@ -1279,9 +1805,17 @@ async def analyze_claim_elements_hybrid(
         # compound-feature passage in one source.  Retry only documents where a
         # single source chunk contains multiple technical axes from a missed
         # element; the retry can add evidence but never fabricates a match.
-        for doc_idx, review_elements in _false_negative_review_candidates(
-            elements, prior_docs, doc_results
-        ):
+        review_by_doc: Dict[int, Dict[str, ClaimElement]] = {}
+        for doc_idx, review_elements in [
+            *_false_negative_review_candidates(elements, prior_docs, doc_results),
+            *_non_patent_quality_review_candidates(elements, prior_docs, doc_results),
+        ]:
+            bucket = review_by_doc.setdefault(doc_idx, {})
+            for element in review_elements:
+                bucket[normalize_label(element.label)] = element
+
+        for doc_idx, review_map in review_by_doc.items():
+            review_elements = list(review_map.values())
             try:
                 reviewed = await _batch_judge_for_doc(
                     review_elements,
@@ -1289,6 +1823,7 @@ async def analyze_claim_elements_hybrid(
                     doc_idx,
                     settings,
                     precision_review=True,
+                    force_non_patent_full_text=False,
                 )
             except CompareFailed as exc:
                 logger.warning(
@@ -1299,6 +1834,12 @@ async def analyze_claim_elements_hybrid(
                 )
                 continue
             _merge_precision_review_results(doc_results[doc_idx], reviewed)
+            for item in doc_results[doc_idx]:
+                if (
+                    normalize_label(item.get("label", "")) in review_map
+                    and item.get("quality_issues")
+                ):
+                    item["analysis_status"] = "manual_review_required"
             logger.info(
                 "Precision review completed for doc[%s] %s (%s elements)",
                 doc_idx,
@@ -1360,8 +1901,15 @@ async def _batch_judge_for_doc(
     settings: Settings,
     *,
     precision_review: bool = False,
+    force_non_patent_full_text: bool = False,
 ) -> List[Dict]:
-    full_text = _build_doc_text(doc, elements, engine=settings.engine, settings=settings)
+    full_text = _build_doc_text(
+        doc,
+        elements,
+        engine=settings.engine,
+        settings=settings,
+        force_non_patent_full_text=force_non_patent_full_text,
+    )
 
     elements_text = "\n".join(f"({e.label}) {e.text}" for e in elements)
 
@@ -1369,6 +1917,7 @@ async def _batch_judge_for_doc(
         "prompt_compare_single.txt",
         doc_filename=doc.filename,
         elements_text=elements_text,
+        core_focus=_core_focus_text(elements),
         full_text=full_text,
         review_instruction=(
             "\n[정밀 재검증]\n"
@@ -1380,12 +1929,14 @@ async def _batch_judge_for_doc(
         ),
     )
 
-    return await _call_and_parse_comparison(
+    results = await _call_and_parse_comparison(
         prompt,
         elements,
         settings,
+        source_docs=[doc],
         context=f"인용발명 {doc_idx + 1} 구성대비",
     )
+    return _apply_non_patent_evidence_quality(results, doc)
 
 
 # ---------------------------------------------------------------------------
@@ -1417,6 +1968,7 @@ async def _batch_judge_hybrid(
         "prompt_compare_hybrid.txt",
         doc_list=doc_list,
         elements_text=elements_text,
+        core_focus=_core_focus_text(elements),
         docs_block=docs_block,
     )
 
@@ -1425,6 +1977,7 @@ async def _batch_judge_hybrid(
         elements,
         settings,
         expected_doc_indices=list(range(len(prior_docs))),
+        source_docs=prior_docs,
         context="하이브리드 구성대비",
     )
 
@@ -1435,6 +1988,7 @@ async def _call_and_parse_comparison(
     settings: Settings,
     *,
     expected_doc_indices: Optional[List[int]] = None,
+    source_docs: Optional[List[ExtractedDocument]] = None,
     context: str,
 ) -> List[Dict]:
     """Call the comparison model once and validate its recovered response locally."""
@@ -1445,9 +1999,39 @@ async def _call_and_parse_comparison(
         raise CompareFailed(f"{context} LLM 호출 실패: {exc}") from exc
 
     try:
-        return _parse_json_array(response, elements, expected_doc_indices)
+        return _parse_json_array(
+            response,
+            elements,
+            expected_doc_indices,
+            source_docs=source_docs,
+        )
     except CompareFailed as exc:
-        raise CompareFailed(f"{context} 응답 형식 검증 실패: {exc}") from exc
+        if "quote_translation" not in str(exc):
+            raise CompareFailed(f"{context} 응답 형식 검증 실패: {exc}") from exc
+        repair_prompt = (
+            prompt
+            + "\n\n[응답 보정]\n"
+            + "직전 응답에서 외국어 quote의 한국어 quote_translation이 누락되었습니다. "
+            + "각 found=true 외국어 인용에 원문에 충실한 한국어 번역을 반드시 채우고, "
+            + "동일한 JSON 스키마 전체를 다시 출력하십시오."
+        )
+        try:
+            repaired_response = await call_ai(
+                repair_prompt,
+                system,
+                settings,
+                agent="compare",
+            )
+            return _parse_json_array(
+                repaired_response,
+                elements,
+                expected_doc_indices,
+                source_docs=source_docs,
+            )
+        except Exception as repair_exc:
+            raise CompareFailed(
+                f"{context} 번역 누락 보정 실패: {repair_exc}"
+            ) from repair_exc
 
 
 def _select_best_matches(
@@ -1494,6 +2078,15 @@ def _select_best_matches(
                 evidence=_evidence_spans(best_match.get("evidence", [])),
                 directness=best_match.get("directness", "direct" if best_match.get("quote") else "absent"),
                 missing_limitations=best_match.get("missing_limitations", []),
+                technical_judgment=best_match.get(
+                    "technical_judgment",
+                    best_match.get("llm_judgment", best_match.get("judgment", "")),
+                ),
+                evidence_status=best_match.get(
+                    "evidence_status",
+                    "verified" if best_match.get("quote") else "absent",
+                ),
+                unverified_quote=_shorten_quote(best_match.get("unverified_quote", "")),
                 motivation_quote=_shorten_quote(best_match.get("motivation_quote", "")),
                 combination_risk=best_match.get("combination_risk", "uncertain"),
                 combination_risk_reason=best_match.get("combination_risk_reason", ""),
@@ -1593,7 +2186,25 @@ def _canonicalize_comparison_item(
 
 def _label_from_mapping_key(key: object) -> str:
     label = normalize_label(str(key or ""))
-    return label if re.fullmatch(r"(?:P|[A-J](?:-\d+)?)", label) else ""
+    return label if re.fullmatch(r"(?:P|[A-Z](?:-\d+)?)", label) else ""
+
+
+def _label_from_element_text(
+    value: object,
+    elements: List[ClaimElement],
+) -> str:
+    """Recover a label only when the model returned one exact element body."""
+    text_key = re.sub(r"\s+", " ", str(value or "")).strip(" \t\r\n,;:：.")
+    if not text_key:
+        return ""
+    matches = [
+        normalize_label(element.label)
+        for element in elements
+        if re.sub(r"\s+", " ", str(element.text or "")).strip(
+            " \t\r\n,;:：."
+        ) == text_key
+    ]
+    return matches[0] if len(set(matches)) == 1 else ""
 
 
 def _expand_comparison_items(
@@ -1650,6 +2261,8 @@ def _parse_json_array(
     response: str,
     elements: List[ClaimElement],
     expected_doc_indices: Optional[List[int]] = None,
+    *,
+    source_docs: Optional[List[ExtractedDocument]] = None,
 ) -> List[Dict]:
     text = re.sub(r"```(?:json)?", "", response.strip()).replace("```", "").strip()
     parsed = _extract_json_payloads(text)
@@ -1660,14 +2273,29 @@ def _parse_json_array(
     parsed = _expand_comparison_items(parsed)
 
     expected_labels = {normalize_label(element.label) for element in elements}
+    elements_by_label = {
+        normalize_label(element.label): element
+        for element in elements
+    }
     expected_docs = set(expected_doc_indices or [])
     normalized: List[Dict] = []
     invalid_reasons: List[str] = []
     required_fields = {"label", "found", "quote", "chunk_id", "judgment"}
     judgment_aliases = {
+        "동일 95~100": "동일",
+        "실질적 동일 90~94": "실질적 동일",
+        "일부 차이 85~89": "일부 차이",
+        "일부 유사 80~84": "일부 유사",
+        "차이 1~79": "차이",
+        "대응 없음 0": "대응 없음",
+        "동일 개시": "동일",
+        "부분 대응": "일부 차이",
         "부분 차이": "일부 차이",
+        "기술적 관련성": "일부 유사",
         "부분 유사": "일부 유사",
         "유사": "일부 유사",
+        "관련성": "일부 유사",
+        "약한 관련성": "차이",
         "없음": "대응 없음",
     }
 
@@ -1689,7 +2317,12 @@ def _parse_json_array(
             )
             continue
 
-        label = normalize_label(str(item.get("label", "")))
+        raw_label = item.get("label", "")
+        label = normalize_label(str(raw_label))
+        if expected_labels and label not in expected_labels:
+            recovered_label = _label_from_element_text(raw_label, elements)
+            if recovered_label in expected_labels:
+                label = recovered_label
         if not label or (expected_labels and label not in expected_labels):
             if "claim_element" in item and "label" not in item:
                 invalid_reasons.append("claim_element 대신 label 필드를 사용해야 함")
@@ -1716,20 +2349,136 @@ def _parse_json_array(
 
         quote = _shorten_quote(str(item.get("quote", "") or ""))
         quote_translation = _shorten_quote(str(item.get("quote_translation", "") or ""))
+        original_quote_translation = quote_translation
         evidence = _normalize_evidence(item.get("evidence", []), quote, item.get("chunk_id", ""))
         directness = str(item.get("directness", "") or "").strip().lower()
         if directness not in {"direct", "inferred", "absent"}:
             directness = "direct" if quote else "absent"
         raw_missing = item.get("missing_limitations", [])
-        if isinstance(raw_missing, str):
-            missing_limitations = [raw_missing.strip()] if raw_missing.strip() else []
-        elif isinstance(raw_missing, list):
-            missing_limitations = [
-                str(value).strip() for value in raw_missing if str(value).strip()
-            ][:5]
-        else:
-            missing_limitations = []
+        missing_limitations = _normalize_missing_limitations(raw_missing)
         reason = str(item.get("판단_이유", item.get("similarity_reason", "")) or "")
+        claim_element_text = str(
+            getattr(elements_by_label.get(label), "text", "") or ""
+        )
+        quote_fidelity_issue = False
+        quote_recovered = False
+        unverified_quote = ""
+        evidence_status = "verified" if quote else "absent"
+        if source_docs:
+            source_idx = doc_idx if doc_idx is not None else 0
+            source_doc = (
+                source_docs[source_idx]
+                if 0 <= source_idx < len(source_docs)
+                else None
+            )
+            if source_doc is not None:
+                source_corpus = _full_doc_text(source_doc)
+                valid_evidence = [
+                    span for span in evidence
+                    if _quote_is_verbatim(str(span.get("quote", "") or ""), source_corpus)
+                ]
+                if quote and not _quote_is_verbatim(quote, source_corpus):
+                    quote_fidelity_issue = True
+                    unverified_quote = quote
+                    if valid_evidence:
+                        quote = str(valid_evidence[0].get("quote", "") or "")
+                        quote_translation = str(
+                            valid_evidence[0].get("quote_translation", "") or ""
+                        )
+                        item["chunk_id"] = str(
+                            valid_evidence[0].get("chunk_id", "") or ""
+                        )
+                        evidence_status = "verified_from_evidence"
+                    else:
+                        recovered_quote = _recover_verbatim_quote(
+                            quote,
+                            source_doc,
+                            str(item.get("chunk_id", "") or ""),
+                        )
+                        if recovered_quote:
+                            quote = recovered_quote
+                            # 원문은 지정 문단에서 정확한 문장으로 교체하되, 모델이
+                            # 제공한 한국어 번역은 표시용으로 보존한다. 번역 자체가
+                            # 없으면 아래 완전성 검증에서 재시도를 요구한다.
+                            quote_translation = original_quote_translation
+                            valid_evidence = [{
+                                "limitation": "지정 문단에서 복구된 부분 근거",
+                                "quote": recovered_quote,
+                                "quote_translation": quote_translation,
+                                "chunk_id": str(item.get("chunk_id", "") or ""),
+                            }]
+                            quote_recovered = True
+                            evidence_status = "recovered_from_cited_chunk"
+                            if directness == "direct":
+                                directness = "inferred"
+                        else:
+                            quote = ""
+                            quote_translation = ""
+                            evidence_status = "unverified"
+                evidence = valid_evidence
+                if quote_fidelity_issue and not quote_recovered and not quote:
+                    _append_missing_limitation(
+                        missing_limitations,
+                        "대표 발췌가 인용발명 원문과 일치하지 않아 직접 근거로 사용할 수 없음",
+                    )
+                    if directness == "direct":
+                        directness = "inferred"
+        if (
+            source_docs
+            and
+            quote
+            and not re.search(r"[\uac00-\ud7a3]", quote)
+            and not re.search(r"[\uac00-\ud7a3]", quote_translation)
+        ):
+            invalid_reasons.append(f"{label}의 외국어 quote에 한국어 quote_translation이 없음")
+            continue
+        evidence_text = " ".join([
+            quote,
+            quote_translation,
+            *[
+                " ".join([
+                    str(span.get("quote", "") or ""),
+                    str(span.get("quote_translation", "") or ""),
+                ])
+                for span in evidence
+            ],
+        ])
+        directness, missing_limitations = _apply_korean_compound_relationship_guard(
+            claim_element_text,
+            evidence_text,
+            directness,
+            missing_limitations,
+        )
+        # 평균값 제어는 최소값/하한 조건의 직접 개시가 아니다. 특히 살두께처럼
+        # 평균과 국소 최소값의 기술적 의미가 다른 경우 LLM이 둘을 같은 조건으로
+        # 승격하지 못하도록 원문 표현을 기준으로 하위 제한을 보존한다.
+        if (
+            _MINIMUM_LIMIT_RE.search(claim_element_text)
+            and _AVERAGE_ONLY_RE.search(evidence_text)
+            and not _MINIMUM_EVIDENCE_RE.search(evidence_text)
+        ):
+            minimum_limitation = next(
+                (
+                    part.strip()
+                    for part in re.split(r"(?:및|그리고|,)", claim_element_text)
+                    if _MINIMUM_LIMIT_RE.search(part)
+                ),
+                "최소값 또는 하한 조건",
+            )
+            if minimum_limitation not in missing_limitations:
+                missing_limitations.append(minimum_limitation)
+            if directness == "direct":
+                directness = "inferred"
+        if (
+            _EXECUTED_ADJUSTMENT_RE.search(claim_element_text)
+            and _RECOMMENDATION_ONLY_RE.search(quote)
+            and not _EXECUTED_ADJUSTMENT_RE.search(quote)
+        ):
+            execution_limitation = "형상 파라미터를 실제로 조정하여 모델을 생성하는 실행 단계"
+            if execution_limitation not in missing_limitations:
+                missing_limitations.append(execution_limitation)
+            if directness == "direct":
+                directness = "inferred"
         purpose_effect_similarity = re.sub(
             r"\s+",
             " ",
@@ -1749,8 +2498,15 @@ def _parse_json_array(
             reason,
         ))
         # 객관적 차이, 추론 의존, 핵심 하위 제한 누락이 있으면 과도한 판정을 상한 처리한다.
-        judgment = _cap_judgment_for_coverage(
+        reconciled_judgment = _reconcile_judgment_with_reason(
             llm_judgment,
+            directness,
+            missing_limitations,
+            reason,
+            quote,
+        )
+        judgment = _cap_judgment_for_coverage(
+            reconciled_judgment,
             directness,
             missing_limitations,
             reason,
@@ -1767,6 +2523,10 @@ def _parse_json_array(
             found = found_value.strip().lower() in {"true", "1", "yes"}
         else:
             found = bool(found_value)
+        if found and not quote and quote_fidelity_issue:
+            found = False
+            judgment = "대응 없음"
+            judgment_adjustment_reason = "quote_not_verbatim"
         if found and not quote:
             invalid_reasons.append(f"{label}의 found=true 항목에 quote가 없음")
             continue
@@ -1784,9 +2544,12 @@ def _parse_json_array(
             "quote_translation": quote_translation if quote else "",
             "chunk_id": str(item.get("chunk_id", "") or ""),
             "judgment": judgment,
+            "technical_judgment": llm_judgment,
             "llm_judgment": llm_judgment,
             "judgment_adjusted": judgment != llm_judgment,
             "judgment_adjustment_reason": judgment_adjustment_reason,
+            "evidence_status": evidence_status,
+            "unverified_quote": unverified_quote,
             "판단_이유": reason,
             "purpose_effect_similarity": purpose_effect_similarity,
             "evidence": evidence if found else [],

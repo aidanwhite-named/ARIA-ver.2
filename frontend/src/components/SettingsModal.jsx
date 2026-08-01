@@ -8,20 +8,14 @@ const DEFAULT_SETTINGS = {
   comparison_mode: 'mixed',
   model_parser: 'claude-haiku-4-5-20251001',
   model_compare: 'claude-sonnet-4-6',
-  model_report: 'claude-haiku-4-5-20251001',
 }
 const DEFAULT_MODELS = {
   claude: ['claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'],
   openai: ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini'],
   agy: [
-    'Gemini 3.5 Flash (Medium)',
-    'Gemini 3.5 Flash (High)',
-    'Gemini 3.5 Flash (Low)',
-    'Gemini 3.1 Pro (Low)',
-    'Gemini 3.1 Pro (High)',
-    'Claude Sonnet 4.6 (Thinking)',
-    'Claude Opus 4.6 (Thinking)',
-    'GPT-OSS 120B (Medium)',
+    'Gemini 3.6 Flash (Low)',
+    'Gemini 3.6 Flash (Medium)',
+    'Gemini 3.6 Flash (High)',
   ],
 }
 
@@ -52,7 +46,7 @@ export default function SettingsModal({ onClose }) {
         if (!['mixed', 'hybrid', 'per_doc'].includes(sanitized.comparison_mode)) {
           sanitized.comparison_mode = 'mixed'
         }
-        for (const key of ['model_parser', 'model_report']) {
+        for (const key of ['model_parser']) {
           if (!sanitized[key] || (validModels.length > 0 && !validModels.includes(sanitized[key]))) {
             sanitized[key] = s.engine === 'claude'
               ? 'claude-haiku-4-5-20251001'
@@ -78,21 +72,17 @@ export default function SettingsModal({ onClose }) {
   useEffect(() => {
     if (!settings) return
     let cancelled = false
-    setStatus(prev => ({ ...prev, label: '확인 중...', detail: '' }))
-    const timer = setTimeout(() => {
-      getEngineStatus(settings)
-        .then(st => {
-          if (!cancelled) setStatus(st)
-        })
-        .catch(() => {
-          if (!cancelled) {
-            setStatus({ status: 'server_error', label: '백엔드 연결 실패', account_label: '' })
-          }
-        })
-    }, 400)
+    getEngineStatus(settings)
+      .then(st => {
+        if (!cancelled) setStatus(st)
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setStatus({ status: 'server_error', label: '백엔드 연결 실패', account_label: '' })
+        }
+      })
     return () => {
       cancelled = true
-      clearTimeout(timer)
     }
   }, [settings?.engine, settings?.model_parser])
 
@@ -107,15 +97,12 @@ export default function SettingsModal({ onClose }) {
     if (newEngine === 'claude') {
       updates.model_parser = 'claude-haiku-4-5-20251001'
       updates.model_compare = 'claude-sonnet-4-6'
-      updates.model_report = 'claude-haiku-4-5-20251001'
     } else if (newEngine === 'openai') {
       updates.model_parser = 'gpt-5.4-mini'
       updates.model_compare = 'gpt-5.5'
-      updates.model_report = 'gpt-5.4-mini'
     } else {
       updates.model_parser = first
       updates.model_compare = first
-      updates.model_report = first
     }
     setSettings(prev => ({ ...prev, ...updates }))
   }
@@ -214,7 +201,6 @@ export default function SettingsModal({ onClose }) {
                   {[
                     { key: 'model_parser', label: '청구항 파서', desc: '청구항 추출 및 구성요소 분해' },
                     { key: 'model_compare', label: '구성요소 대비', desc: '인용발명 전문 대비 판단' },
-                    { key: 'model_report', label: '보고서 생성', desc: '구성요소 분석 보고서 작성' },
                   ].map(({ key, label, desc }) => (
                     <div key={key} className="flex items-center gap-2">
                       <div className="w-28 shrink-0">
@@ -295,7 +281,6 @@ export default function SettingsModal({ onClose }) {
                   comparison_mode: 'mixed',
                   model_parser: '',
                   model_compare: 'claude-sonnet-4-6',
-                  model_report: '',
                 })
               }
             }}

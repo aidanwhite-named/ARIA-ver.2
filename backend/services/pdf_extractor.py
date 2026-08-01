@@ -21,6 +21,12 @@ from backend.models.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+PDF_EXTRACTOR_SCHEMA_VERSION = 5
+# 공보 서지면(발행국·공개번호·명칭)이 들어 있는 선두 구간 길이
+_BIBLIOGRAPHIC_HEAD_CHARS = 5_000
+# 논문 초록의 현실적인 상한. 섹션 검출이 실패해 본문 전체가 초록으로 묶이는 경우
+# 본문까지 통째로 비교 대상에서 제외되는 사고를 막는 안전장치다.
+_NON_PATENT_ABSTRACT_MAX_CHARS = 3_000
 
 # 단락번호 패턴:
 # - 일반 특허: [0001], 【0001】, (0001)
@@ -34,12 +40,9 @@ _SHORT_PARA_PATTERN = re.compile(r"[\[【\(]\s*([1-9]\d{0,2})\s*[\]】\)\[]?")
 _PARA_PATTERN_BARE = re.compile(r"^\s*(0\d{3})(?:\.|\s|$)")
 # 청구항 섹션 시작 패턴 (한국 특허 다양한 포맷 모두 지원)
 _KR_CLAIMS_START = re.compile(
-    r"【\s*청구의\s*범위\s*】"          # 【청구의 범위】
-    r"|【\s*특허청구의?\s*범위\s*】"     # 【특허청구의 범위】 / 【특허청구범위】
-    r"|^\s*청구의\s*범위\s*$"            # 줄 단독: 청구의 범위
-    r"|^\s*특허청구(의)?\s*범위\s*$"     # 줄 단독: 특허청구범위 / 특허청구의 범위
-    r"|\[청구의\s*범위\]"                # [청구의 범위]
-    r"|\[특허청구(의)?\s*범위\]",        # [특허청구범위]
+    r"【\s*(?:특허)?청구(?:의)?\s*범위\s*】"   # 【청구범위】/【청구의 범위】/【특허청구(의) 범위】
+    r"|^\s*(?:특허)?청구(?:의)?\s*범위\s*$"    # 줄 단독: 청구범위 / 청구의 범위 / 특허청구범위
+    r"|\[\s*(?:특허)?청구(?:의)?\s*범위\s*\]",  # [청구범위] / [특허청구범위]
     re.MULTILINE,
 )
 _KR_CLAIM_ITEM = re.compile(r"청구항\s*(\d+)")
@@ -57,6 +60,7 @@ _SECTION_HEADINGS = [
     "발명의 실시를 위한 형태",
     "실시예",
     "청구의 범위",
+    "청구범위",
     "특허청구범위",
     "CLAIMS",
     "BACKGROUND",
@@ -70,11 +74,93 @@ _GROUP_BOUNDARY_RE = re.compile(
     r"도면의\s*간단한\s*설명|발명을\s*실시하기\s*위한\s*구체적인\s*내용)",
     re.IGNORECASE,
 )
-_CLAIM_SECTION_RE = re.compile(r"청구의\s*범위|특허청구(?:의)?\s*범위|^CLAIMS$", re.IGNORECASE)
+_CLAIM_SECTION_RE = re.compile(r"(?:특허)?청구(?:의)?\s*범위|^CLAIMS$", re.IGNORECASE)
+# 공개번호 인식은 KR/US 뿐 아니라 WO(PCT)·EP·JP·CN 공보까지 포함한다.
+# 하나라도 빠지면 해당 문헌의 공개번호가 파일명으로 대체되어 인용 이력이 깨진다.
 _PUBLICATION_RE = re.compile(
-    r"(KR\s*\d{2}-?\d{4}-?\d{7}|KR\s*10-?\d{4}-?\d{7}|US\s*\d{4}/\d{7}|US\s*\d{7,})",
+    r"\b("
+    r"WO\s*\d{4}\s*/\s*\d{4,6}(?:\s*A\d?)?"           # WO 2023/123456 A1
+    r"|WO\s*\d{10,11}(?:\s*A\d?)?"                    # WO2023123456A1
+    r"|PCT/[A-Z]{2}\s*\d{4}/\d{4,8}"                  # PCT/KR2022/012345
+    r"|EP\s*\d\s?\d{3}\s?\d{3}(?:\s*[AB]\d?)?"        # EP 3 456 789 A1
+    r"|KR\s*\d{2}-?\d{4}-?\d{7}"                      # KR 10-2020-0123456
+    r"|(?:10|20|30)-\d{4}-\d{7}"                      # 10-2020-0123456 (KIPO 공개/출원)
+    r"|(?:10|20|30)-\d{7}"                            # 10-2345678 (KIPO 등록)
+    r"|US\s*\d{4}/\d{7}"                              # US 2024/0394445
+    r"|US\s*\d{1,2},\d{3},\d{3}"                      # US 11,123,456
+    r"|US\s*\d{7,}"                                   # US20240394445
+    r"|(?:特開|特表|特願|特許)\s*\d{4}-\d{6}"          # 特開2023-123456
+    r"|JP\s*\d{4}-?\d{6}"                             # JP2023-123456
+    r"|CN\s*\d{9,12}\s*[A-Z]\b"                       # CN 115123456 A
+    r")",
     re.IGNORECASE,
 )
+# 논문 섹션 표제 패턴.
+#
+# 표제로 인정하는 형태는 (1) 로마숫자/아라비아숫자 번호 + 대문자 표제어,
+# (2) 번호 없는 정형 표제어 두 가지뿐이다. 예전 패턴은 `[I|V|X]+\.\s+[^\n]+`
+# 처럼 문자클래스 안에 `|`가 들어가 있어 참고문헌의 저자 이니셜
+# ("X. Xu, K. Willis...", "V. Khalidov, ...")까지 섹션 표제로 잡았고,
+# 그 결과 참고문헌 목록이 본문으로 취급되는 반면 진짜 본문은 앞 섹션(초록)에
+# 흡수되어 통째로 제외되는 문제가 있었다. 표제어를 열거형으로 고정해 막는다.
+_NON_PATENT_SECTION_WORDS = (
+    r"INTRODUCTION|RELATED\s+WORKS?|METHODS?|METHODOLOGY|APPROACH|PRELIMINARIES"
+    r"|MATERIALS?(?:\s+AND\s+METHODS?)?|MODEL|ARCHITECTURE|IMPLEMENTATION(?:\s+DETAILS?)?"
+    r"|DATASETS?|EXPERIMENTS?(?:\s+AND\s+RESULTS?)?|EVALUATION|ABLATION(?:\s+STUD(?:Y|IES))?"
+    r"|RESULTS?|ANALYSIS|DISCUSSION|LIMITATIONS?|FUTURE\s+WORK|CONCLUSIONS?"
+    r"|BACKGROUND(?:\s+OF\s+THE\s+INVENTION)?|APPENDI(?:X|CES)|SUPPLEMENTARY(?:\s+MATERIALS?)?"
+)
+# 영문 표제어는 번호가 붙은 경우에만 대소문자를 무시한다("3.1 Model Architecture").
+# 번호가 없으면 대문자 표기일 때만 표제로 본다. 그렇지 않으면 본문 중간의
+# "model ...", "methods ..." 같은 줄이 매번 새 섹션 경계로 잡혀 섹션이 산산조각 난다.
+_NON_PATENT_HEADING_RE = re.compile(
+    r"^[ \t]*(?:\(\s*\d+\s*\)\s*)?("
+    # 번호가 붙은 표제: "I. INTRODUCTION", "3.1 Experiments", "IV EVALUATION"
+    r"(?:[IVXL]{1,5}|\d+(?:\.\d+)*)\.?[ \t]+(?i:" + _NON_PATENT_SECTION_WORDS + r")"
+    # 번호 없는 표제: 대문자로 시작하면서 그 줄에 단독으로 놓인 경우만 인정한다.
+    # 소문자로 시작하면 본문 문장("model is trained ..."), 뒤에 다른 글자가
+    # 이어지면 참고문헌 항목("MODEL CARD.md")이므로 표제가 아니다.
+    r"|(?=[A-Z])(?i:" + _NON_PATENT_SECTION_WORDS + r"|ABSTRACT|SUMMARY|CLAIMS"
+    r"|REFERENCES|BIBLIOGRAPHY|ACKNOWLEDG(?:E)?MENTS?"
+    r"|FIELD(?:\s+OF\s+THE\s+INVENTION)?"
+    r")(?=[ \t]*[:.]?[ \t]*$)"
+    r"|(?i:\d*\s*DETAILED\s+DESCRIPTION(?:\s+OF\s+[^\n]+)?)"
+    r"|초록|요약|서론|관련\s*연구|제안\s*방법|실험|결과|고찰|결론|참고문헌|감사의?\s*글|사사"
+    r"|도면의\s*간단한\s*설명|발명의\s*상세한\s*설명|발명의\s*목적"
+    r"|발명이\s*속하는\s*기술\s*및\s*그\s*분야의\s*종래기술"
+    r"|발명이\s*이루고자\s*하는\s*기술적\s*과제|발명의\s*구성\s*및\s*작용"
+    r"|(?:특허)?청구(?:의)?\s*범위"
+    r")\b",
+    re.MULTILINE,
+)
+_LEGACY_PATENT_RE = re.compile(
+    r"(?:대한민국\s*특허청|\(\s*12\s*\)\s*공개특허공보|공개특허\s*10-\d{4}-\d{7}|"
+    r"발명의\s*상세한\s*설명|청구의\s*범위)",
+    re.IGNORECASE,
+)
+_INTERNATIONAL_PATENT_RE = re.compile(
+    r"(?:"
+    # WO / PCT (국제공개공보)
+    r"\bWO\s*\d{4}\s*/\s*\d{4,6}\s*[A-Z]\d?\b|"
+    r"\bWO\s*\d{10,11}\s*[A-Z]\d?\b|"
+    r"\bPCT/[A-Z]{2}\s*\d{4}/\d{4,8}\b|"
+    r"\bWIPO\s+PCT\b|"
+    r"\bWorld\s+Intellectual\s+Property\s+Organization\b|"
+    r"INTERNATIONAL\s+(?:APPLICATION|PUBLICATION)\s+(?:PUBLISHED\s+UNDER\s+THE\s+PATENT\s+COOPERATION\s+TREATY|NUMBER)|"
+    # EP (유럽특허공보)
+    r"\bEUROPEAN\s+PATENT\s+(?:APPLICATION|SPECIFICATION|BULLETIN)\b|"
+    r"\bEuropean\s+Patent\s+Office\b|"
+    # US (공개/등록공보)
+    r"\bUnited\s+States\s+Patent(?:\s+Application\s+Publication)?\b|"
+    r"\bPatent\s+Application\s+Publication\b|"
+    # JP (일본공보)
+    r"(?:公開特許公報|特許公報|公表特許公報|特開\s*\d{4}-\d{6})|"
+    # CN (중국공보)
+    r"(?:发明专利申请|发明专利说明书|申请公布号|授权公告号)"
+    r")",
+    re.IGNORECASE,
+)
+
 
 
 def extract(pdf_path: str, doc_index: int = 0) -> ExtractedDocument:
@@ -89,6 +175,20 @@ def extract(pdf_path: str, doc_index: int = 0) -> ExtractedDocument:
         return doc
     raise RuntimeError(
         f"{filename}: PyMuPDF와 OpenDataLoader-pdf 모두 PDF 텍스트 추출에 실패했습니다."
+    )
+
+
+def _looks_like_patent(raw_text: str) -> bool:
+    """공보 서지사항으로 특허문헌 여부를 판정한다.
+
+    KR/US/WO/EP/JP/CN 공보는 모두 첫 페이지(서지면)에 발행국·공개번호 표시가
+    있으므로 국제 공보 표지는 앞부분에서만 찾는다. 논문 본문이 특허를 인용하며
+    공개번호를 언급하는 경우를 특허문헌으로 오인하지 않기 위한 제한이다.
+    """
+    text = raw_text or ""
+    return bool(
+        _LEGACY_PATENT_RE.search(text)
+        or _INTERNATIONAL_PATENT_RE.search(text[:_BIBLIOGRAPHIC_HEAD_CHARS])
     )
 
 
@@ -175,8 +275,8 @@ def _parse_odl_json(data: dict | list, doc_index: int, filename: str, pdf_path: 
 
     raw_text = "\n".join(raw_lines)
     paragraphs = _extract_paragraphs(raw_text)
-    doc_type = "patent" if paragraphs else "non_patent"
-    claims = _extract_claims(raw_text, doc_type)
+    claims = _extract_claims(raw_text, "patent")
+    doc_type = "patent" if paragraphs or claims or _looks_like_patent(raw_text) else "non_patent"
 
     enriched = _build_enriched_document(
         paragraphs=paragraphs,
@@ -227,8 +327,8 @@ def _extract_pymupdf(pdf_path: str, doc_index: int, filename: str) -> ExtractedD
 
     raw_text = "\n".join(raw_lines)
     paragraphs = _extract_paragraphs(raw_text)
-    doc_type = "patent" if paragraphs else "non_patent"
-    claims = _extract_claims(raw_text, doc_type)
+    claims = _extract_claims(raw_text, "patent")
+    doc_type = "patent" if paragraphs or claims or _looks_like_patent(raw_text) else "non_patent"
 
     return _build_enriched_document(
         paragraphs=paragraphs,
@@ -311,6 +411,19 @@ def _extract_paragraphs(text: str) -> Dict[str, str]:
         # 숫자 데이터 줄을 단락번호로 오인하지 않도록 충분히 많을 때만 채택
         if len(bare) >= 5:
             paragraphs = bare
+
+    # 텍스트 커버리지 검증:
+    # 파싱된 단락의 전체 길이에 비해 원문 텍스트가 매우 큰 경우(예: 논문 하단 참고문헌만 오인 추출)
+    # 단락 파싱을 무효화하고 비특허(non_patent) 문헌 전용 파이프라인으로 넘긴다.
+    if paragraphs:
+        total_para_len = sum(len(v) for v in paragraphs.values())
+        if len(text) >= 5000 and (total_para_len / len(text)) < 0.35:
+            logger.warning(
+                f"단락 파싱 커버리지 부족 ({total_para_len}/{len(text)} = {total_para_len/len(text):.1%}). "
+                "특허 단락 오인으로 판단하여 비특허(non_patent) 문헌 파이프라인으로 전환합니다."
+            )
+            paragraphs = {}
+
     return paragraphs
 
 
@@ -445,7 +558,7 @@ def _clean_para_no(key: str) -> str:
 
 
 def _extract_publication_no(text: str, filename: str) -> str:
-    for source in (text[:5000], filename):
+    for source in (text[:_BIBLIOGRAPHIC_HEAD_CHARS], filename):
         m = _PUBLICATION_RE.search(source or "")
         if m:
             return re.sub(r"\s+", "", m.group(1)).upper()
@@ -465,6 +578,53 @@ def _extract_title(text: str, filename: str) -> str:
             if 2 <= len(title) <= 160:
                 return title
     return Path(filename).stem
+
+
+# 1페이지 상단 상용구(저널 머리글·공개번호·발행일)는 제목 후보에서 제외한다.
+_TITLE_BOILERPLATE_RE = re.compile(
+    r"JOURNAL\s+OF|PROCEEDINGS|TRANSACTIONS\s+ON|CONFERENCE\s+ON|VOL\.\s*\d"
+    r"|^\s*(?:arXiv|doi|DOI|https?://)|PREPRINT|SUBMITTED\s+TO"
+    r"|^\s*(?:[A-Z]{2}\s*)?\d{4}/\d{7}|^\s*\(\s*\d{2}\s*\)"
+    r"|^\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s*\d{1,2},\s*\d{4}\s*$",
+    re.IGNORECASE,
+)
+
+
+def _extract_title_from_layout(page_layouts: Optional[List[PageLayout]], fallback: str) -> str:
+    """1페이지 최대 글꼴 줄에서 비특허문헌 제목을 추출한다.
+
+    논문에는 특허의 `발명의 명칭`에 해당하는 표제가 없어 예전에는 파일명이
+    그대로 제목이 되었다. 논문 제목은 본문보다 뚜렷하게 큰 글꼴로 조판되므로,
+    저널 머리글·arXiv 식별자 같은 상용구를 걸러내고 최대 글꼴 줄만 이어 붙인다.
+    공보는 제목과 본문의 글꼴 크기 차이가 거의 없어 이 방법을 쓰지 않고,
+    `_extract_publication_no`가 뽑는 공개번호를 식별자로 사용한다.
+    """
+    if not page_layouts:
+        return fallback
+    first = page_layouts[0]
+    sized: List[tuple[float, str]] = []
+    for block in first.blocks or []:
+        for line in block.lines or []:
+            spans = [span for span in (line.spans or []) if (span.text or "").strip()]
+            if not spans:
+                continue
+            size = max(float(span.size or 0) for span in spans)
+            line_text = "".join(span.text or "" for span in spans).strip()
+            if line_text:
+                sized.append((size, line_text))
+    if not sized:
+        return fallback
+
+    candidates = [
+        (size, line) for size, line in sized
+        if len(line) >= 4 and not _TITLE_BOILERPLATE_RE.search(line)
+    ]
+    if not candidates:
+        return fallback
+    max_size = max(size for size, _ in candidates)
+    title_lines = [line for size, line in candidates if size >= max_size - 0.5]
+    title = re.sub(r"\s+", " ", " ".join(title_lines)).strip()
+    return title if 8 <= len(title) <= 200 else fallback
 
 
 def _find_page_no(pages: Dict[str, str], para_no: str, para_text: str) -> Optional[int]:
@@ -661,6 +821,217 @@ def _group_chunks(records: List[ParagraphRecord]) -> List[PatentChunk]:
     return chunks
 
 
+def _is_references_section(section_name: str) -> bool:
+    return bool(re.search(r"REFERENCES|BIBLIOGRAPHY|참고문헌", section_name or "", re.IGNORECASE))
+
+
+def _is_non_patent_summary_section(section_name: str) -> bool:
+    return bool(re.search(r"^\s*(?:ABSTRACT|SUMMARY|초록|요약)\b", section_name or "", re.IGNORECASE))
+
+
+def _is_non_patent_back_matter_section(section_name: str) -> bool:
+    return bool(
+        re.search(
+            r"^\s*(?:ACKNOWLEDG(?:E)?MENTS?|감사의?\s*글|사사)\b",
+            section_name or "",
+            re.IGNORECASE,
+        )
+    )
+
+
+def _dense_non_patent_blocks(
+    section_text: str,
+    *,
+    target_chars: int = 2_000,
+    overlap_chars: int = 400,
+) -> List[str]:
+    """Build paragraph-aware non-patent chunks with a small trailing overlap."""
+    paragraphs = [
+        block.strip()
+        for block in re.split(r"\n\s*\n", section_text or "")
+        if block.strip()
+    ]
+    if not paragraphs:
+        return []
+
+    blocks: List[str] = []
+    buffer: List[str] = []
+    buffer_len = 0
+    for paragraph in paragraphs:
+        if buffer and buffer_len + len(paragraph) + 2 > target_chars:
+            blocks.append("\n\n".join(buffer))
+            overlap: List[str] = []
+            overlap_len = 0
+            for previous in reversed(buffer):
+                overlap.insert(0, previous)
+                overlap_len += len(previous) + 2
+                if overlap_len >= overlap_chars:
+                    break
+            buffer = overlap
+            buffer_len = sum(len(item) + 2 for item in buffer)
+
+        # 긴 단일 문단은 문장 경계를 우선해 조밀한 고정 길이 블록으로 나눈다.
+        if len(paragraph) > target_chars and not buffer:
+            sentences = re.split(r"(?<=[.!?。！？])\s+", paragraph)
+            for sentence in sentences:
+                if buffer and buffer_len + len(sentence) + 1 > target_chars:
+                    blocks.append(" ".join(buffer))
+                    tail = blocks[-1][-overlap_chars:].strip()
+                    buffer = [tail] if tail else []
+                    buffer_len = len(tail)
+                buffer.append(sentence)
+                buffer_len += len(sentence) + 1
+            continue
+
+        buffer.append(paragraph)
+        buffer_len += len(paragraph) + 2
+
+    if buffer:
+        candidate = "\n\n".join(buffer).strip()
+        if candidate and (not blocks or candidate != blocks[-1]):
+            blocks.append(candidate)
+    return blocks
+
+
+def _build_non_patent_records_and_chunks(
+    raw_text: str,
+    pages: Dict[str, str],
+    filename: str,
+    doc_index: int,
+    publication_no: str,
+    title: str,
+) -> tuple[List[ParagraphRecord], List[PatentChunk], List[PatentChunk]]:
+    doc_id = f"D{doc_index + 1}"
+    records: List[ParagraphRecord] = []
+    para_chunks: List[PatentChunk] = []
+    group_chunks: List[PatentChunk] = []
+
+    matches = list(_NON_PATENT_HEADING_RE.finditer(raw_text or ""))
+    sections: List[tuple[str, str]] = []
+
+    if matches:
+        if matches[0].start() > 0:
+            preamble = raw_text[:matches[0].start()].strip()
+            if preamble:
+                sections.append(("ABSTRACT", preamble))
+        for idx, match in enumerate(matches):
+            sec_name = match.group(1).strip().replace("\n", " ")
+            start = match.start()
+            end = matches[idx + 1].start() if idx + 1 < len(matches) else len(raw_text)
+            sec_text = raw_text[start:end].strip()
+            if sec_text:
+                sections.append((sec_name, sec_text))
+    else:
+        blocks = [b.strip() for b in (raw_text or "").split("\n\n") if b.strip()]
+        curr_buf: List[str] = []
+        curr_len = 0
+        sec_idx = 1
+        for block in blocks:
+            curr_buf.append(block)
+            curr_len += len(block)
+            if curr_len >= 1000:
+                sections.append((f"SECTION-{sec_idx:02d}", "\n\n".join(curr_buf)))
+                curr_buf = []
+                curr_len = 0
+                sec_idx += 1
+        if curr_buf:
+            sections.append((f"SECTION-{sec_idx:02d}", "\n\n".join(curr_buf)))
+
+    para_idx = 1
+    group_idx = 1
+
+    for sec_name, sec_text in sections:
+        is_ref = _is_references_section(sec_name)
+        is_summary = _is_non_patent_summary_section(sec_name)
+        is_back_matter = _is_non_patent_back_matter_section(sec_name)
+        is_claim = bool(_CLAIM_SECTION_RE.search(sec_name or ""))
+        sub_blocks = _dense_non_patent_blocks(sec_text)
+        summary_chars = 0
+
+        for sub in sub_blocks:
+            sub = sub.strip()
+            if not sub:
+                continue
+            # 초록/요약은 앞부분만 제외한다. 섹션 검출이 실패해 본문 전체가
+            # 초록 하나로 묶이면 예전에는 문헌이 통째로 비교 대상에서
+            # 빠졌으므로, 상한을 넘어선 분량은 본문으로 되돌린다.
+            summary_excluded = is_summary and summary_chars < _NON_PATENT_ABSTRACT_MAX_CHARS
+            if is_summary:
+                summary_chars += len(sub)
+            is_excluded = is_ref or summary_excluded or is_back_matter or is_claim
+            para_no = f"P{para_idx:03d}"
+            page_no = _find_page_no(pages, para_no, sub)
+
+            rec = ParagraphRecord(
+                doc_id=doc_id,
+                publication_no=publication_no,
+                title=title,
+                page_no=page_no,
+                section=sec_name,
+                paragraph_no=para_no,
+                claim_no=None,
+                figure_no=_figure_no(sub),
+                reference_signs=_reference_signs(sub),
+                original_text=sub,
+                normalized_text=_normalize_text(sub),
+                text_hash=_hash_text(sub),
+                chunk_excluded=is_excluded,
+                exclusion_reason=(
+                    "references"
+                    if is_ref
+                    else "summary"
+                    if summary_excluded
+                    else "back_matter"
+                    if is_back_matter
+                    else "prior_claim"
+                    if is_claim
+                    else ""
+                ),
+            )
+            records.append(rec)
+
+            if not is_excluded:
+                p_chunk = PatentChunk(
+                    chunk_type="paragraph",
+                    chunk_id=f"{doc_id}-P-{para_no}",
+                    doc_id=doc_id,
+                    publication_no=publication_no,
+                    title=title,
+                    section=sec_name,
+                    paragraph_no=para_no,
+                    paragraph_range=[para_no],
+                    page_no=page_no,
+                    page_range=[page_no] if page_no is not None else [],
+                    original_text=sub,
+                    normalized_text=_normalize_text(sub),
+                    text_hash=_hash_text(sub),
+                    source="description",
+                )
+                para_chunks.append(p_chunk)
+
+                g_label = _group_label(sec_name, sub)
+                g_chunk = PatentChunk(
+                    chunk_type="group",
+                    chunk_id=f"{doc_id}-{g_label}-{group_idx:03d}",
+                    doc_id=doc_id,
+                    publication_no=publication_no,
+                    title=title,
+                    section=sec_name,
+                    paragraph_range=[para_no],
+                    page_range=[page_no] if page_no is not None else [],
+                    original_text=sub,
+                    normalized_text=_normalize_text(sub),
+                    text_hash=_hash_text(sub),
+                    source="description",
+                )
+                group_chunks.append(g_chunk)
+                group_idx += 1
+
+            para_idx += 1
+
+    return records, para_chunks, group_chunks
+
+
 def _build_enriched_document(
     paragraphs: Dict[str, str],
     pages: Dict[str, str],
@@ -674,16 +1045,27 @@ def _build_enriched_document(
 ) -> ExtractedDocument:
     publication_no = _extract_publication_no(raw_text, filename)
     title = _extract_title(raw_text, filename)
-    records = _build_paragraph_records(
-        paragraphs, pages, raw_text, filename, doc_index, publication_no, title
-    )
+    if doc_type == "non_patent" and title == Path(filename).stem:
+        title = _extract_title_from_layout(page_layouts, title)
+
+    if doc_type == "non_patent" or not paragraphs:
+        records, para_chunks, group_chunks = _build_non_patent_records_and_chunks(
+            raw_text, pages, filename, doc_index, publication_no, title
+        )
+    else:
+        records = _build_paragraph_records(
+            paragraphs, pages, raw_text, filename, doc_index, publication_no, title
+        )
+        para_chunks = _paragraph_chunks(records)
+        group_chunks = _group_chunks(records)
+
     return ExtractedDocument(
         document_type=doc_type,
         pdf_path=str(Path(pdf_path).resolve()),
         paragraphs=paragraphs,
         paragraph_records=records,
-        paragraph_chunks=_paragraph_chunks(records),
-        group_chunks=_group_chunks(records),
+        paragraph_chunks=para_chunks,
+        group_chunks=group_chunks,
         pages=pages,
         page_layouts=page_layouts or [],
         claims=claims,
@@ -694,6 +1076,7 @@ def _build_enriched_document(
         publication_no=publication_no,
         title=title,
         metadata={
+            "extractor_schema_version": str(PDF_EXTRACTOR_SCHEMA_VERSION),
             "publication_no": publication_no,
             "title": title,
             "source_filename": filename,

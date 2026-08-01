@@ -1,56 +1,24 @@
 ﻿"""
 SQLite reference store.
 
-Stores original paragraphs, metadata, chunks, FTS5 lexical index, and report
-reference entries per case. JSON cache files remain for compatibility, while
-SQLite becomes the retrieval/verification database.
+사건별 원문 단락·메타데이터·청크·보고서 인용 항목을 보관한다. 판단 근거를
+사후에 원문과 대조·재현하기 위한 감사용 저장소이며, 비교 시점의 문헌 선별은
+`citation_extractor`가 메모리 상의 청크로 수행한다(검색 인덱스를 두지 않는다).
 """
 from __future__ import annotations
 
 from contextlib import contextmanager
 import json
 import logging
-import re
 import sqlite3
 from pathlib import Path
-from typing import List, Optional, Protocol
+from typing import List
 
 from backend.models.schemas import ExtractedDocument
 
 logger = logging.getLogger(__name__)
 
 DB_NAME = "reference.sqlite"
-
-
-class ReferenceRepository(Protocol):
-    """Repository boundary for original text/metadata/reference storage.
-
-    SQLite is the MVP implementation. A PostgreSQL implementation can keep the
-    same method contract and map JSON text columns to JSONB later.
-    """
-
-    def save_case_artifacts(self, docs: List[ExtractedDocument], manifest: list[dict]) -> None:
-        ...
-
-    def save_reference_entries(self, entries: list[dict]) -> None:
-        ...
-
-    def search_paragraphs(self, doc_id: str, query: str, limit: int = 20) -> Optional[list[dict]]:
-        ...
-
-
-class SQLiteReferenceRepository:
-    def __init__(self, case_dir: Path):
-        self.case_dir = case_dir
-
-    def save_case_artifacts(self, docs: List[ExtractedDocument], manifest: list[dict]) -> None:
-        save_case_artifacts_sqlite(self.case_dir, docs, manifest)
-
-    def save_reference_entries(self, entries: list[dict]) -> None:
-        save_reference_entries_sqlite(self.case_dir, entries)
-
-    def search_paragraphs(self, doc_id: str, query: str, limit: int = 20) -> Optional[list[dict]]:
-        return search_paragraphs_fts5(self.case_dir, doc_id, query, limit)
 
 
 def db_path_for_case(case_dir: Path) -> Path:
@@ -148,20 +116,6 @@ def init_db(db_path: Path) -> None:
             );
             """
         )
-        try:
-            conn.execute(
-                """
-                CREATE VIRTUAL TABLE IF NOT EXISTS paragraph_fts USING fts5(
-                    doc_id UNINDEXED,
-                    paragraph_no UNINDEXED,
-                    original_text,
-                    normalized_text,
-                    tokenize='unicode61'
-                )
-                """
-            )
-        except sqlite3.Error as exc:
-            logger.warning(f"SQLite FTS5 unavailable; lexical search disabled: {exc}")
 
 
 def save_case_artifacts_sqlite(
@@ -175,10 +129,6 @@ def save_case_artifacts_sqlite(
         conn.execute("DELETE FROM chunks")
         conn.execute("DELETE FROM paragraphs")
         conn.execute("DELETE FROM documents")
-        try:
-            conn.execute("DELETE FROM paragraph_fts")
-        except sqlite3.Error:
-            pass
 
         for doc in docs:
             resolved_doc_id = doc.doc_id or f"D{doc.doc_index + 1}"
@@ -208,7 +158,7 @@ def save_case_artifacts_sqlite(
             )
 
             for rec in doc.paragraph_records or []:
-                cur = conn.execute(
+                conn.execute(
                     """
                     INSERT OR REPLACE INTO paragraphs (
                         doc_id, publication_no, title, page_no, section,
@@ -234,25 +184,6 @@ def save_case_artifacts_sqlite(
                         rec.exclusion_reason,
                     ),
                 )
-                row_id = cur.lastrowid
-                if not rec.chunk_excluded:
-                    try:
-                        conn.execute(
-                            """
-                            INSERT INTO paragraph_fts(
-                                rowid, doc_id, paragraph_no, original_text, normalized_text
-                            ) VALUES (?, ?, ?, ?, ?)
-                            """,
-                            (
-                                row_id,
-                                resolved_doc_id,
-                                rec.paragraph_no,
-                                rec.original_text,
-                                rec.normalized_text,
-                            ),
-                        )
-                    except sqlite3.Error:
-                        pass
 
             for chunk in (doc.paragraph_chunks or []) + (doc.group_chunks or []):
                 conn.execute(
@@ -319,54 +250,3 @@ def save_reference_entries_sqlite(case_dir: Path, entries: list[dict]) -> None:
                     json.dumps(item.get("report_excerpt", []), ensure_ascii=False),
                 ),
             )
-
-
-def _fts_query_terms(text: str, max_terms: int = 24) -> str:
-    tokens = re.findall(r"[A-Za-z0-9가-힣]{2,}", (text or "").lower())
-    seen: set[str] = set()
-    parts: list[str] = []
-    for token in tokens:
-        if token in seen:
-            continue
-        seen.add(token)
-        safe = token.replace('"', '""')
-        parts.append(f'"{safe}"')
-        if len(parts) >= max_terms:
-            break
-    return " OR ".join(parts)
-
-
-def search_paragraphs_fts5(
-    case_dir: Path,
-    doc_id: str,
-    query: str,
-    limit: int = 20,
-) -> Optional[list[dict]]:
-    db_path = db_path_for_case(case_dir)
-    if not db_path.exists():
-        return None
-    match_query = _fts_query_terms(query)
-    if not match_query:
-        return []
-    try:
-        with _connect(db_path) as conn:
-            rows = conn.execute(
-                """
-                SELECT
-                    p.doc_id,
-                    p.paragraph_no,
-                    p.original_text,
-                    bm25(paragraph_fts) AS bm25_score
-                FROM paragraph_fts
-                JOIN paragraphs p ON p.id = paragraph_fts.rowid
-                WHERE paragraph_fts MATCH ? AND p.doc_id = ?
-                ORDER BY bm25_score ASC
-                LIMIT ?
-                """,
-                (match_query, doc_id, limit),
-            ).fetchall()
-        return [dict(row) for row in rows]
-    except sqlite3.Error as exc:
-        logger.debug(f"SQLite FTS5 search skipped: {exc}")
-        return None
-

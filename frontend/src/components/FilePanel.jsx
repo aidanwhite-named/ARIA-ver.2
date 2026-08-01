@@ -5,24 +5,24 @@ export default function FilePanel({ priorFiles, onPriorFiles, onStart, loading, 
   const canStart = priorFiles.length > 0 && priorFiles.length <= 7 && !loading
 
   return (
-    <div className="bg-white rounded-xl border border-gray-200 shadow-sm flex flex-col gap-3 p-4 w-full">
+    <section className="rail-section flex flex-col gap-3 px-5 pt-5 pb-5 w-full">
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-gray-800">인용발명 PDF</h2>
+        <h2 className="section-eyebrow">01 · 인용발명</h2>
         <span className="text-xs text-gray-400">{priorFiles.length} / 7</span>
       </div>
 
       {/* 드롭존 */}
       <div
-        className="border-2 border-dashed border-gray-200 rounded-lg bg-gray-50 cursor-pointer hover:border-blue-400 hover:bg-blue-50 transition min-h-[120px] p-3 flex flex-col justify-start"
+        className="file-drop cursor-pointer transition min-h-[104px] p-3 flex flex-col justify-start"
         onClick={() => {
           if (!loading) priorRef.current.click()
         }}
       >
         {priorFiles.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full gap-2 py-6 text-center">
-            <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-gray-400 text-lg">+</div>
-            <span className="text-xs text-gray-400">클릭하여 PDF 선택</span>
-            <span className="text-[10px] text-gray-300">최대 7개</span>
+            <div className="upload-plus">+</div>
+            <span className="text-xs font-medium text-slate-500">PDF를 추가하세요</span>
+            <span className="text-[10px] text-slate-300">최대 7개 · 클릭하여 선택</span>
           </div>
         ) : (
           <ul className="space-y-1.5 w-full">
@@ -64,10 +64,6 @@ export default function FilePanel({ priorFiles, onPriorFiles, onStart, loading, 
         }}
       />
 
-      {priorFiles.length > 7 && (
-        <p className="text-xs text-red-500">최대 7개까지 가능합니다.</p>
-      )}
-
       {loading && uploadProgress < 100 && (
         <div>
           <div className="flex justify-between text-xs text-gray-400 mb-1">
@@ -84,7 +80,7 @@ export default function FilePanel({ priorFiles, onPriorFiles, onStart, loading, 
       )}
 
       <button
-        className="w-full py-2.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition"
+        className="primary-button w-full disabled:opacity-40 disabled:cursor-not-allowed"
         disabled={!canStart}
         onClick={onStart}
       >
@@ -94,6 +90,6 @@ export default function FilePanel({ priorFiles, onPriorFiles, onStart, loading, 
             : '인용발명 읽는 중…'
           : '인용발명 준비'}
       </button>
-    </div>
+    </section>
   )
 }

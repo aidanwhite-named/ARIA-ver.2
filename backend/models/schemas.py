@@ -97,9 +97,17 @@ class ClaimElement(BaseModel):
 
 class EvidenceSpan(BaseModel):
     limitation: str = ""
+    subject: str = ""
+    input: str = ""
+    process: str = ""
+    output: str = ""
+    condition: str = ""
+    relationship: str = ""
     quote: str = ""
     quote_translation: str = ""
     chunk_id: str = ""
+    page: Optional[int] = None
+    section: str = ""
 
 
 class ParsedClaim(BaseModel):
@@ -142,6 +150,9 @@ class ElementMatch(BaseModel):
     evidence: List[EvidenceSpan] = Field(default_factory=list)
     directness: str = "absent"
     missing_limitations: List[str] = Field(default_factory=list)
+    technical_judgment: str = ""
+    evidence_status: str = "absent"
+    unverified_quote: str = ""
     motivation_quote: str = ""
     combination_risk: str = "uncertain"
     combination_risk_reason: str = ""
@@ -184,7 +195,7 @@ class Settings(BaseModel):
     # 작업별 모델 선택(비어 있으면 엔진 기본 모델 사용)
     model_parser: str = ""    # 청구항 분석 및 보정
     model_compare: str = ""   # 구성요소 대비
-    model_report: str = ""    # Phase 1 보고서 생성
+    model_report: str = ""    # 이전 설정 파일 호환용(보고서는 시스템 템플릿으로 생성)
     dependent_candidate_doc_limit: int = 3  # Dependent claims: docs to compare before batch reporting.
     pdf_primary_parser: str = "pymupdf"
     pdf_fallback_parser: str = "opendataloader_pdf"
@@ -202,19 +213,12 @@ class ModelListResponse(BaseModel):
         "gpt-5.4-mini",
     ]
     gemini: List[str] = [
-        "Gemini 3.5 Flash (Medium)",
-        "Gemini 3.5 Flash (High)",
-        "Gemini 3.5 Flash (Low)",
-        "Gemini 3.1 Pro (Low)",
-        "Gemini 3.1 Pro (High)",
+        "Gemini 3.6 Flash (Low)",
+        "Gemini 3.6 Flash (Medium)",
+        "Gemini 3.6 Flash (High)",
     ]
     agy: List[str] = [
-        "Gemini 3.5 Flash (Medium)",
-        "Gemini 3.5 Flash (High)",
-        "Gemini 3.5 Flash (Low)",
-        "Gemini 3.1 Pro (Low)",
-        "Gemini 3.1 Pro (High)",
-        "Claude Sonnet 4.6 (Thinking)",
-        "Claude Opus 4.6 (Thinking)",
-        "GPT-OSS 120B (Medium)",
+        "Gemini 3.6 Flash (Low)",
+        "Gemini 3.6 Flash (Medium)",
+        "Gemini 3.6 Flash (High)",
     ]

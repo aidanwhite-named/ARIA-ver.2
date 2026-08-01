@@ -63,7 +63,6 @@ from backend.services.report_generator import (
     _strip_agent_tool_calls,
     detect_category_same_claims,
     enforce_phase1_judgment_headers,
-    ensure_phase1_summary_difference_citations,
     enhance_claim_parsing_with_llm,
     enhance_purpose_effects_with_llm,
     find_unselected_reference_mentions,
@@ -268,7 +267,7 @@ def _case_dir(job_id: str) -> Path:
 
 def _ensure_case_dirs(job_id: str) -> Path:
     case_dir = _case_dir(job_id)
-    for name in ("pdfs", "parsed", "chunks", "vector_db", "reports"):
+    for name in ("pdfs", "parsed", "chunks", "reports"):
         (case_dir / name).mkdir(parents=True, exist_ok=True)
     return case_dir
 
@@ -308,6 +307,32 @@ def _load_json(path: Path, default):
 def _write_json(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _write_report_debug(
+    job_dir: Path,
+    claim_number: int,
+    stage: str,
+    raw: str,
+    processed: str,
+) -> None:
+    """Persist report-model output before and after local post-processing."""
+    debug_dir = job_dir / "report_debug"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    prefix = f"claim_{claim_number}_{stage}"
+    raw_path = debug_dir / f"{prefix}_raw.md"
+    processed_path = debug_dir / f"{prefix}_processed.md"
+    raw_path.write_text(raw or "", encoding="utf-8")
+    processed_path.write_text(processed or "", encoding="utf-8")
+    logger.info(
+        "Report debug saved [%s/%s/%s] raw=%s chars, processed=%s chars: %s",
+        job_dir.name,
+        claim_number,
+        stage,
+        len(raw or ""),
+        len(processed or ""),
+        debug_dir,
+    )
 
 
 def _ordered_pdf_paths(job_dir: Path) -> list[Path]:
@@ -609,6 +634,12 @@ def _save_report(job_id: str, claim_number: int, md: str) -> None:
     path.write_text(md, encoding="utf-8")
     case_report = _ensure_case_dirs(job_id) / "reports" / f"claim{claim_number}.md"
     case_report.write_text(md, encoding="utf-8")
+    try:
+        from backend.services.judgment_audit_logger import generate_judgment_audit_log
+        generate_judgment_audit_log(job_id, claim_number)
+    except Exception as exc:
+        logger.warning("Failed to generate judgment audit log for %s claim %s: %s", job_id, claim_number, exc)
+
 
 
 def _save_reference_db(
@@ -812,8 +843,13 @@ async def prepare(job_id: str):
                 yield _ev("extract_prior", f"{pdf_path.name} 텍스트 추출 중..")
                 sha = _file_sha256(pdf_path)
                 cache_path = _doc_cache_path(sha)
-                if cache_path.exists():
-                    doc = ExtractedDocument(**_load_json(cache_path, {}))
+                cached_doc_data = _load_json(cache_path, {}) if cache_path.exists() else {}
+                cache_is_current = (
+                    str((cached_doc_data.get("metadata") or {}).get("extractor_schema_version", ""))
+                    == str(pdf_extractor.PDF_EXTRACTOR_SCHEMA_VERSION)
+                )
+                if cache_is_current:
+                    doc = ExtractedDocument(**cached_doc_data)
                     resolved_doc_id = f"D{idx + 1}"
                     doc = doc.model_copy(update={
                         "doc_index": idx,
@@ -970,12 +1006,7 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                     matches,
                 )
                 cached_chain_info = get_claim_chain_info(cached_chain, claim_number)
-                cached_report = ensure_phase1_summary_difference_citations(
-                    cached_report,
-                    matches,
-                    prior_docs,
-                    cached_chain_info,
-                )
+                cached_report = polish_phase1_summary_text(cached_report)
                 cached_scope_violations = find_unselected_reference_mentions(
                     cached_report, cached_chain_info
                 )
@@ -983,16 +1014,28 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                     _save_context_entry(job_id, claim_number, claim.text, cached_report)
                     if claim.claim_type == "independent":
                         _lock_claim_chain(job_id, claim_number)
+                    related_inventions_md = _build_related_inventions_tab(
+                        claim,
+                        prior_docs,
+                        cached_chain_info,
+                        job_dir,
+                    )
                     async for event in _yield_timing("cached report return", total_start):
                         yield event
                     yield _ev("done", {
                         "report_md": cached_report,
+                        "related_inventions_md": related_inventions_md,
                         "claim_number": claim_number,
                         "used_inventions": _used_inventions_for(
                             cached_chain_info, prior_docs, matches=matches
                         ),
                     })
                     return
+                if not cached_components_complete:
+                    yield _ev(
+                        "log",
+                        "[cache] 기존 보고서의 구성요소 대비가 일부 누락되어 재작성합니다.",
+                    )
                 yield _ev(
                     "log",
                     "[cache] 최종 인용 체인과 다른 기존 보고서를 무효화하고 재작성합니다: "
@@ -1129,10 +1172,11 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                     secondary_matches=secondary_matches,
                 ):
                     clean_chunk = sanitize_report_status_icons(chunk)
-                    phase1_chunks.append(clean_chunk)
+                    phase1_chunks.append(chunk)
                     yield _ev("stream_chunk", clean_chunk)
+                phase1_raw = "".join(phase1_chunks)
                 phase1_md = polish_phase1_summary_text(
-                    sanitize_report_status_icons(_dedupe_phase1_sections(_strip_agent_tool_calls("".join(phase1_chunks))))
+                    sanitize_report_status_icons(_dedupe_phase1_sections(_strip_agent_tool_calls(phase1_raw)))
                 )
                 phase1_md = enforce_phase1_judgment_headers(phase1_md, report_matches)
             else:
@@ -1152,13 +1196,17 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                 )
                 for event in nonlocal_yield_events:
                     yield event
-                raw = sanitize_report_status_icons(_strip_agent_tool_calls(raw))
-                split = _find_legacy_final_boundary(raw)
-                phase1_body = raw[:split].strip() if split >= 0 else raw
+                phase1_raw = raw
+                cleaned_raw = sanitize_report_status_icons(_strip_agent_tool_calls(raw))
+                split = _find_legacy_final_boundary(cleaned_raw)
+                phase1_body = cleaned_raw[:split].strip() if split >= 0 else cleaned_raw
                 phase1_md = polish_phase1_summary_text(
                     sanitize_report_status_icons(_dedupe_phase1_sections(phase1_body))
                 )
                 phase1_md = enforce_phase1_judgment_headers(phase1_md, report_matches)
+            _write_report_debug(
+                job_dir, claim_number, "initial", phase1_raw, phase1_md
+            )
 
             scope_violations = find_unselected_reference_mentions(phase1_md, chain_info)
             if scope_violations and claim.claim_type == "independent":
@@ -1175,26 +1223,28 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
                     prev_context=prev_context,
                     secondary_matches=secondary_matches,
                 ):
-                    retry_chunks.append(sanitize_report_status_icons(chunk))
+                    retry_chunks.append(chunk)
+                scope_retry_raw = "".join(retry_chunks)
                 phase1_md = polish_phase1_summary_text(
                     sanitize_report_status_icons(
-                        _dedupe_phase1_sections(_strip_agent_tool_calls("".join(retry_chunks)))
+                        _dedupe_phase1_sections(_strip_agent_tool_calls(scope_retry_raw))
                     )
                 )
                 phase1_md = enforce_phase1_judgment_headers(phase1_md, report_matches)
+                _write_report_debug(
+                    job_dir,
+                    claim_number,
+                    "scope_retry",
+                    scope_retry_raw,
+                    phase1_md,
+                )
                 scope_violations = find_unselected_reference_mentions(phase1_md, chain_info)
             if scope_violations:
                 raise CompareFailed(
                     "보고서가 최종 인용 체인에 포함되지 않은 문헌을 사용했습니다: "
                     + ", ".join(scope_violations)
                 )
-            phase1_md = ensure_phase1_summary_difference_citations(
-                phase1_md,
-                report_matches,
-                prior_docs,
-                chain_info,
-                secondary_matches,
-            )
+            phase1_md = polish_phase1_summary_text(phase1_md)
             phase1_md = f"### claim {claim_number}\n\n{phase1_md}"
             async for event in _yield_timing("phase1", phase1_start):
                 yield event
@@ -1289,6 +1339,7 @@ def _assemble_dependent_report(
     phase1 = body[:split].strip() if split >= 0 else body.strip()
     phase1 = _dedupe_phase1_sections(phase1)
     phase1 = enforce_phase1_judgment_headers(phase1, list(matches or []))
+    phase1 = polish_phase1_summary_text(phase1)
     return f"### 청구항 {claim.claim_number}\n\n{phase1}"
 
 
@@ -1598,8 +1649,8 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
                 job_id,
                 state="running",
                 claim_numbers=claim_numbers,
-                stage="waiting_for_batch_llm",
-                message=f"종속항 {len(batch_items)}개에 대해 LLM 배치 보고서를 생성하고 있습니다.",
+                stage="rendering_batch_reports",
+                message=f"종속항 {len(batch_items)}개 보고서를 시스템 템플릿으로 생성하고 있습니다.",
                 started_at=started_at,
                 reports_ready=len(results),
             )
@@ -1613,9 +1664,9 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
                 job_id=job_id,
                 claim_numbers=claim_numbers,
                 started_at=started_at,
-                stage="waiting_for_batch_llm",
+                stage="rendering_batch_reports",
                 message_builder=lambda elapsed: (
-                    f"종속항 {len(batch_items)}개에 대한 LLM 배치 보고서를 생성 중입니다. ({elapsed})"
+                    f"종속항 {len(batch_items)}개 보고서를 생성 중입니다. ({elapsed})"
                 ),
                 reports_ready_getter=lambda: len(results),
             )

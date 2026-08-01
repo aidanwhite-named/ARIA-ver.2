@@ -33,10 +33,21 @@ def _items(cache: Optional[Dict], claim_number: int) -> Dict[str, Dict]:
 
 
 def _evidence_factor(item: Dict) -> float:
+    # 4대 정량 요소: 0.40*개시충족도 + 0.25*문헌근거성 + 0.25*결합관계충족도 + 0.10*구현구체성 - 추론감점
+    directness = str(item.get("directness") or "").strip().lower()
     quote = bool(str(item.get("quote") or "").strip())
     location = bool(str(item.get("chunk_id") or item.get("paragraph_no") or "").strip())
     reason = bool(str(item.get("판단_이유") or item.get("similarity_reason") or "").strip())
-    return 0.55 + 0.25 * quote + 0.10 * location + 0.10 * reason
+    has_missing = bool(item.get("missing_limitations"))
+    
+    disclosure = 1.0 if directness == "direct" else 0.7 if directness == "inferred" else 0.2
+    evidence = (0.5 * quote + 0.5 * location) if (quote or location) else 0.2
+    relational = 0.9 if (not has_missing and directness == "direct") else 0.5 if not has_missing else 0.3
+    concreteness = 1.0 if (reason and quote) else 0.6 if reason else 0.3
+    inference_penalty = 0.25 if directness == "inferred" else 0.0
+
+    raw_score = 0.40 * disclosure + 0.25 * evidence + 0.25 * relational + 0.10 * concreteness
+    return max(0.0, min(1.0, raw_score - inference_penalty))
 
 
 def assess_claim(
@@ -106,6 +117,18 @@ def assess_claim(
         "evidence_review_required" if reliability < 0.70 else
         "coverage_supported"
     )
+
+    gap_coverage_by_doc = {}
+    for idx in selected:
+        doc_gap_covered = []
+        for element in claim.elements:
+            if element.label in uncovered or element.label in critical:
+                doc_item = per_doc[idx].get(_label(element.label), {})
+                doc_sim = max(0.0, min(1.0, float(values.get(doc_item.get("judgment"), 0.0))))
+                if doc_sim >= coverage_threshold:
+                    doc_gap_covered.append(element.label)
+        gap_coverage_by_doc[idx] = doc_gap_covered
+
     return {
         "method_version": "generic-evidence-score-v1",
         "claim_number": claim.claim_number,
@@ -120,6 +143,7 @@ def assess_claim(
         "status": status,
         "uncovered_labels": uncovered,
         "critical_uncovered_labels": critical,
+        "gap_coverage_by_doc": gap_coverage_by_doc,
         "elements": rows,
         "interpretation": {
             "score_role": "분석 우선순위와 근거 충실도를 점검하는 보조 지표",

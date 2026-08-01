@@ -31,6 +31,7 @@ from backend.services.citation_extractor import (
     _build_hybrid_docs_block,
     _claim_keywords,
     _comparison_safe_elements,
+    _apply_non_patent_evidence_quality,
     _is_batchable_generic_element,
     _parse_json_array,
     _partition_core_first_elements,
@@ -73,7 +74,7 @@ class RejectionBasisHeaderTests(unittest.TestCase):
             "인용발명 1",
             is_novelty=False,
         )
-        self.assertEqual(header, "[인용발명 1 단독(진보성 검토)]")
+        self.assertEqual(header, "[인용발명 1 단독]")
 
     def test_single_reference_with_all_identical_elements_is_labeled_novelty(self):
         header = format_rejection_basis_header(
@@ -129,7 +130,7 @@ class RejectionBasisHeaderTests(unittest.TestCase):
 
         header = analyze_router._rejection_basis_header(chain_info, matches)
 
-        self.assertEqual(header, "[인용발명 1 단독(진보성 검토)]")
+        self.assertEqual(header, "[인용발명 1 단독]")
 
 
 def _varint(value: int) -> bytes:
@@ -286,6 +287,69 @@ class ComparisonParsingTests(unittest.TestCase):
 
         self.assertEqual([match.judgment for match in matches], ["실질적 동일", "대응 없음"])
         self.assertEqual(matches[0].similarity_reason, "구조와 기능이 대응한다.")
+
+    def test_scored_judgment_labels_are_normalized_for_backward_compatibility(self):
+        elements = [
+            ClaimElement(label="A", text="sensor"),
+            ClaimElement(label="B", text="controller"),
+        ]
+        response = json.dumps(
+            [
+                {
+                    "label": "A",
+                    "found": True,
+                    "quote": "A sensor is disclosed.",
+                    "chunk_id": "[0001]",
+                    "judgment": "동일 95~100",
+                    "판단_이유": "구조와 기능이 동일하다.",
+                },
+                {
+                    "label": "B",
+                    "found": True,
+                    "quote": "A different controller is disclosed.",
+                    "chunk_id": "[0002]",
+                    "judgment": "차이 1~79",
+                    "판단_이유": "구체적인 제어 방식에 차이가 있다.",
+                },
+            ],
+            ensure_ascii=False,
+        )
+
+        parsed = _parse_json_array(response, elements)
+
+        self.assertEqual([item["judgment"] for item in parsed], ["동일", "차이"])
+        self.assertEqual([item["llm_judgment"] for item in parsed], ["동일", "차이"])
+
+    def test_full_element_text_returned_as_label_is_recovered(self):
+        elements = [
+            ClaimElement(
+                label="A",
+                text="상기 음향 수집부로부터 수집된 음향 신호를 처리하는 처리부",
+            ),
+            ClaimElement(
+                label="B",
+                text="팬 및 틸트 구동이 가능한 카메라를 포함하는 영상감지시스템",
+            ),
+        ]
+        response = json.dumps(
+            [
+                {
+                    "label": element.text,
+                    "doc_index": 0,
+                    "found": False,
+                    "quote": "",
+                    "chunk_id": "",
+                    "judgment": "대응 없음",
+                    "판단_이유": "대응 기재가 없다.",
+                }
+                for element in elements
+            ],
+            ensure_ascii=False,
+        )
+
+        parsed = _parse_json_array(response, elements, expected_doc_indices=[0])
+
+        self.assertEqual([item["label"] for item in parsed], ["A", "B"])
 
     def test_preamble_label_variants_are_normalized(self):
         self.assertEqual(normalize_label("P"), "P")
@@ -847,7 +911,7 @@ class IntegratedComparisonTests(unittest.IsolatedAsyncioTestCase):
             skipped_cache = json.loads(
                 (Path(temp_dir) / "comparisons_2.json").read_text(encoding="utf-8")
             )
-            self.assertEqual(candidate_cache["_meta"]["schema_version"], 18)
+            self.assertEqual(candidate_cache["_meta"]["schema_version"], 26)
             self.assertTrue(all(not item.get("not_evaluated") for item in candidate_cache["1"]))
             skipped_by_label = {item["label"]: item for item in skipped_cache["1"]}
             self.assertFalse(skipped_by_label["A"]["not_evaluated"])
@@ -870,6 +934,7 @@ class IntegratedComparisonTests(unittest.IsolatedAsyncioTestCase):
                     "doc_index": 0,
                     "found": True,
                     "quote": "first sensor passage",
+                    "quote_translation": "첫 번째 센서 구절",
                     "chunk_id": "[T1]",
                     "judgment": "실질적 동일",
                     "판단_이유": "첫 번째 문헌의 센서가 대응한다.",
@@ -881,6 +946,7 @@ class IntegratedComparisonTests(unittest.IsolatedAsyncioTestCase):
                     "doc_index": 1,
                     "found": True,
                     "quote": "second sensor passage",
+                    "quote_translation": "두 번째 센서 구절",
                     "chunk_id": "[T1]",
                     "judgment": "일부 유사",
                     "판단_이유": "두 번째 문헌에도 관련 센서가 있다.",
@@ -923,6 +989,104 @@ class IntegratedComparisonTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(cache["1"][0]["directness"], "direct")
                 self.assertEqual(cache["1"][0]["missing_limitations"], [])
 
+    async def test_non_patent_document_is_compared_in_integrated_call(self):
+        elements = [ClaimElement(label="A", text="구조화된 CAD 명령어를 생성")]
+        paper_body = (
+            "The multimodal encoder processes image and point cloud inputs and "
+            "generates a structured CAD command sequence. "
+        ) * 80
+        paper = ExtractedDocument(
+            filename="paper.pdf",
+            document_type="non_patent",
+            paragraph_chunks=[
+                PatentChunk(
+                    chunk_id="D1-P-P001",
+                    section="METHOD",
+                    original_text=paper_body,
+                )
+            ],
+        )
+        patent = ExtractedDocument(
+            filename="patent.pdf",
+            raw_text="[T1] The controller receives an input.",
+        )
+        paper_quote = (
+            "The multimodal encoder processes image and point cloud inputs and "
+            "generates a structured CAD command sequence."
+        )
+        paper_response = json.dumps([{
+            "doc_index": 0,
+            "label": "A",
+            "found": True,
+            "quote": paper_quote,
+            "quote_translation": "멀티모달 인코더가 이미지와 점군 입력을 처리하여 구조화된 CAD 명령 시퀀스를 생성한다.",
+            "chunk_id": "D1-P-P001",
+            "judgment": "실질적 동일",
+            "판단_이유": "입력·처리·출력 관계가 직접 기재되어 있다.",
+            "directness": "direct",
+            "missing_limitations": [],
+            "evidence": [{
+                "limitation": "구조화된 CAD 명령 생성",
+                "subject": "multimodal encoder",
+                "input": "image and point cloud inputs",
+                "process": "processes",
+                "output": "structured CAD command sequence",
+                "condition": "",
+                "relationship": "processes the inputs and generates the output",
+                "quote": paper_quote,
+                "quote_translation": "멀티모달 인코더가 이미지와 점군 입력을 처리하여 구조화된 CAD 명령 시퀀스를 생성한다.",
+                "chunk_id": "D1-P-P001",
+                "page": 3,
+                "section": "METHOD",
+            }],
+        }, {
+            "doc_index": 1,
+            "label": "A",
+            "found": False,
+            "quote": "",
+            "quote_translation": "",
+            "chunk_id": "",
+            "judgment": "대응 없음",
+            "판단_이유": "구조화된 CAD 명령 생성이 없다.",
+            "directness": "absent",
+            "missing_limitations": [],
+            "evidence": [],
+        }], ensure_ascii=False)
+
+        with patch(
+            "backend.services.citation_extractor.call_ai",
+            new=AsyncMock(return_value=paper_response),
+        ) as mocked_call:
+            matches = await analyze_claim_elements_hybrid(
+                elements,
+                [paper, patent],
+                Settings(engine="claude", comparison_mode="mixed"),
+            )
+
+        self.assertEqual(mocked_call.await_count, 1)
+        paper_prompt = mocked_call.await_args.args[0]
+        self.assertIn("[doc_index=0] paper.pdf", paper_prompt)
+        self.assertIn("[doc_index=1] patent.pdf", paper_prompt)
+        self.assertEqual(paper_prompt.count(paper_quote), 80)
+        self.assertEqual(matches[0].judgment, "실질적 동일")
+        self.assertEqual(matches[0].evidence[0].output, "structured CAD command sequence")
+
+    def test_paper_title_or_noun_list_is_marked_for_review(self):
+        paper = ExtractedDocument(filename="paper.pdf", document_type="non_patent")
+        results = [{
+            "label": "B",
+            "found": True,
+            "quote": "Point Cloud Multi-view Images",
+            "judgment": "일부 차이",
+            "evidence": [],
+        }]
+
+        checked = _apply_non_patent_evidence_quality(results, paper)
+
+        self.assertEqual(checked[0]["evidence_quality"], "needs_review")
+        self.assertIn("non_patent_quote_too_short", checked[0]["quality_issues"])
+        self.assertIn("non_patent_quote_lacks_action", checked[0]["quality_issues"])
+
     async def test_invalid_hybrid_schema_falls_back_to_per_document(self):
         elements = [ClaimElement(label="A", text="sensor")]
         docs = [
@@ -937,6 +1101,7 @@ class IntegratedComparisonTests(unittest.IsolatedAsyncioTestCase):
                         "label": "A",
                         "found": True,
                         "quote": "first sensor passage",
+                        "quote_translation": "첫 번째 센서 구절",
                         "chunk_id": "[T1]",
                         "judgment": "\uc2e4\uc9c8\uc801 \ub3d9\uc77c",
                         "similarity_reason": "first document discloses the sensor.",
@@ -1126,7 +1291,7 @@ class DependentParentCacheRestorationTests(unittest.IsolatedAsyncioTestCase):
                 )
                 (job_dir / f"comparisons_{doc_idx}.json").write_text(
                     json.dumps({
-                        "_meta": {"schema_version": 18, "comparison_mode": "per_doc"},
+                        "_meta": {"schema_version": 26, "comparison_mode": "per_doc"},
                         "2": [child_item],
                     }, ensure_ascii=False),
                     encoding="utf-8",
@@ -1197,13 +1362,46 @@ class DependentReportValidationTests(unittest.TestCase):
             "- 청구항 추가 구성: 압력 센서를 포함하는 구성\n"
             "- 판단 이유: 인용발명의 압력 센서와 대응됩니다.\n\n"
             "[종합분석요약]\n"
-            "- 결론: 추가 구성은 인용발명에 의해 확인됩니다."
+            "- 차이점: 추가 구성의 차이점이 없습니다."
         )
 
         result = _dedupe_phase1_sections(report)
 
         self.assertIn("실질적동일 85%", result)
         self.assertIn("[종합분석요약]", result)
+
+    def test_dedupe_keeps_repeated_generic_headers_when_component_labels_differ(self):
+        report = "\n\n---\n\n".join(
+            (
+                "### [구성요소]\n\n"
+                f"- 청구항 구성: ({label}) 구성 {label}\n"
+                "- 유사도 평가: 95% 이상: 동일 🔵"
+            )
+            for label in ("P", "A", "B", "C", "D")
+        )
+
+        result = _dedupe_phase1_sections(report)
+
+        for label in ("P", "A", "B", "C", "D"):
+            self.assertIn(f"- 청구항 구성: ({label})", result)
+        self.assertEqual(result.count("### [구성요소]"), 5)
+
+    def test_dedupe_supports_component_labels_through_z(self):
+        labels = tuple("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+        report = "\n\n".join(
+            (
+                "### [구성요소]\n"
+                f"- 청구항 구성: ({label}) 구성 {label}\n"
+                "- 유사도 평가: 95% 이상: 동일 🔵"
+            )
+            for label in labels
+        )
+
+        result = _dedupe_phase1_sections(report)
+
+        self.assertEqual(result.count("### [구성요소]"), len(labels))
+        for label in labels:
+            self.assertIn(f"- 청구항 구성: ({label})", result)
 
     def test_header_only_dependent_report_is_not_substantive(self):
         report = "[인용발명 1 단독(신규성)]\n\n[구성대비]\n\n### 청구항 3"
@@ -1278,7 +1476,7 @@ class DependentReportGenerationTests(unittest.IsolatedAsyncioTestCase):
 
         with patch(
             "backend.services.report_generator.call_ai",
-            new=AsyncMock(return_value="ok"),
+            new=AsyncMock(side_effect=AssertionError("report LLM must not be called")),
         ) as mocked_call:
             result = await generate_dependent_report(
                 claim,
@@ -1288,10 +1486,10 @@ class DependentReportGenerationTests(unittest.IsolatedAsyncioTestCase):
                 Settings(),
             )
 
-        self.assertEqual(result, "ok")
-        prompt = mocked_call.await_args.args[0]
-        self.assertIn("단일 추가 문헌 커버 상태: 일부 추가 구성 미대응", prompt)
-        self.assertIn("`청구항 추가 구성:`에는 종속항 원문의 `제~항에 있어서,` 문구를 포함", prompt)
+        mocked_call.assert_not_awaited()
+        self.assertIn("- 청구항 구성: (A) 압력 센서를 더 포함하는 구성", result)
+        self.assertNotIn("[종합 분석 요약]", result)
+        self.assertNotIn("- 진보성 검토:", result)
 
 
 class ConventionalSupportPolicyTests(unittest.TestCase):
@@ -1474,9 +1672,11 @@ class ConventionalSupportPolicyTests(unittest.TestCase):
         self.assertIn("인용발명 1에서 확인되지 않는 하위 제한", prompt)
         self.assertIn("보강 후 실질적인 차이가 남는 경우", prompt)
         self.assertIn("외국어 문헌의 괄호 안 따옴표 원문은 반드시 해당 외국어 원문 그대로", prompt)
-        self.assertIn("같은 구성요소의 `보완 검토`에 인용발명 2의 직접 발췌", prompt)
-        self.assertIn("결합 동기·기술적 양립성의 최종 판단은 종합 분석 요약", prompt)
-        self.assertIn("`[종합분석요약]`의 `차이점`에는 차이가 있는 구성마다 제공된 대표 발췌", prompt)
+        self.assertIn(
+            "같은 구성요소의 `보완 검토`에 인용발명 2의 번역문·위치·원문을 한 줄로 표시",
+            prompt,
+        )
+        self.assertNotIn("`[종합분석요약]`", prompt)
 
     def test_summary_difference_gets_verified_support_excerpt_and_location(self):
         report = (
@@ -1484,7 +1684,6 @@ class ConventionalSupportPolicyTests(unittest.TestCase):
             "- 청구항 구성: (B) SPL을 유지하도록 주파수를 조정하는 단계\n"
             "- 차이점: 주 인용발명에 주파수 조정 구성이 없음.\n\n"
             "[종합분석요약]\n\n"
-            "- 결론: 결합 검토가 필요함.\n"
             "- 차이점: 주 인용발명은 SPL 유지를 위한 주파수 조정을 개시하지 않음.\n"
             "- 결합 검토: 보조문헌 적용 가능성을 검토함."
         )
@@ -1545,7 +1744,6 @@ class ConventionalSupportPolicyTests(unittest.TestCase):
     def test_summary_difference_uses_page_after_excerpt_for_non_patent_document(self):
         report = (
             "[종합분석요약]\n\n"
-            "- 결론: 추가 근거 검토가 필요함.\n"
             "- 차이점: 제어 조건의 차이가 있음.\n"
             "- 잔여 차이 및 방어 포인트: 세부 조건이 남음."
         )
@@ -1738,12 +1936,12 @@ class ConventionalSupportPolicyTests(unittest.TestCase):
                 )
             result = build_citation_chain_from_comparisons(temp_dir, [claim], docs)
 
-        self.assertEqual(result["chains"]["1"]["total"], [0, 1])
-        self.assertEqual(result["secondary_reason"], "support")
+        self.assertEqual(result["chains"]["1"]["total"], [1, 0])
+        self.assertEqual(result["secondary_reason"], "hard")
         matrix = result["gap_evidence_matrix"]["1"]["elements"]
-        self.assertEqual(matrix[0]["label"], "A")
-        self.assertEqual(matrix[0]["candidate_evidence"][0]["doc_idx"], 1)
-        self.assertIn("layout of keywords", matrix[0]["candidate_evidence"][0]["quote"])
+        b_row = next(row for row in matrix if row["label"] == "B")
+        self.assertEqual(b_row["candidate_evidence"][0]["doc_idx"], 0)
+        self.assertIn("OCR mismatch", b_row["candidate_evidence"][0]["quote"])
 
     def test_secondary_selection_prefers_broader_consistent_gap_coverage_over_single_strong_point(self):
         claim = ParsedClaim(

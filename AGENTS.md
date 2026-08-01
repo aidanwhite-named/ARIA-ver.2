@@ -1,8 +1,8 @@
-# Codex 지시사항 - ARIA ver.2
+# Codex 지시사항 - ARIA
 
 ## 프로젝트 개요
 
-ARIA ver.2는 특허 청구항과 인용발명 PDF를 비교하여 신규성/진보성 판단 보고서를 생성하는 로컬 AI 보조 프로그램입니다.
+ARIA는 특허 청구항과 인용발명 PDF를 비교하여 신규성/진보성 판단 보고서를 생성하는 로컬 AI 보조 프로그램입니다.
 
 ## 현재 구현 상태
 
@@ -17,7 +17,7 @@ ARIA ver.2는 특허 청구항과 인용발명 PDF를 비교하여 신규성/진
 ## 프로젝트 구조
 
 ```text
-new-patentsearching/
+ARIA2/
 ├── AGENTS.md
 ├── README.md
 ├── start.ps1

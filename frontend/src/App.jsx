@@ -14,64 +14,28 @@ import ChatPanel from './components/ChatPanel'
 
 function AriaEmblem() {
   return (
-    <svg width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <svg className="aria-emblem" width="42" height="42" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
       <defs>
-        {/* Soft Dreamy Background */}
-        <linearGradient id="dream-bg" x1="0" y1="0" x2="48" y2="48" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#fdf4ff" />
-          <stop offset="100%" stopColor="#eff6ff" />
+        <linearGradient id="aria-bg" x1="5" y1="3" x2="43" y2="46" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#27235f" />
+          <stop offset="0.55" stopColor="#6557e8" />
+          <stop offset="1" stopColor="#42b8e8" />
         </linearGradient>
-        
-        {/* Ethereal Glows */}
-        <radialGradient id="glow-cyan" cx="0.3" cy="0.3" r="0.6">
-          <stop offset="0%" stopColor="#22d3ee" stopOpacity="0.8" />
-          <stop offset="100%" stopColor="#22d3ee" stopOpacity="0" />
-        </radialGradient>
-        <radialGradient id="glow-magenta" cx="0.7" cy="0.7" r="0.6">
-          <stop offset="0%" stopColor="#d946ef" stopOpacity="0.8" />
-          <stop offset="100%" stopColor="#d946ef" stopOpacity="0" />
-        </radialGradient>
-        <radialGradient id="glow-violet" cx="0.5" cy="0.8" r="0.7">
-          <stop offset="0%" stopColor="#8b5cf6" stopOpacity="0.7" />
-          <stop offset="100%" stopColor="#8b5cf6" stopOpacity="0" />
-        </radialGradient>
-
-        <filter id="dream-blur" x="-50%" y="-50%" width="200%" height="200%">
-          <feGaussianBlur stdDeviation="6" />
-        </filter>
-        
-        <filter id="glass-shadow" x="-20%" y="-20%" width="140%" height="140%">
-          <feDropShadow dx="0" dy="4" stdDeviation="6" floodColor="#8b5cf6" floodOpacity="0.25" />
-        </filter>
+        <linearGradient id="aria-letter" x1="14" y1="38" x2="34" y2="10" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#d9f6ff" />
+          <stop offset="1" stopColor="#ffffff" />
+        </linearGradient>
       </defs>
-
-      <rect width="48" height="48" rx="14" fill="url(#dream-bg)" />
-      
-      <g filter="url(#dream-blur)">
-        <circle cx="16" cy="16" r="14" fill="url(#glow-cyan)" />
-        <circle cx="34" cy="32" r="16" fill="url(#glow-magenta)" />
-        <circle cx="24" cy="40" r="18" fill="url(#glow-violet)" />
-      </g>
-      
-      <rect x="0.5" y="0.5" width="47" height="47" rx="13.5" fill="rgba(255, 255, 255, 0.4)" stroke="rgba(255,255,255,0.8)" strokeWidth="1" />
-      
-      <g filter="url(#glass-shadow)">
-        <path d="M24 10L12 36H16.5L24 18L31.5 36H36L24 10Z" fill="#ffffff" />
-        <path d="M24 23L25.5 27.5L30 29L25.5 30.5L24 35L22.5 30.5L18 29L22.5 27.5L24 23Z" fill="#ffffff" />
-      </g>
+      <rect x="1" y="1" width="46" height="46" rx="15" fill="url(#aria-bg)" />
+      <rect x="1.5" y="1.5" width="45" height="45" rx="14.5" stroke="white" strokeOpacity="0.18" />
+      <path d="M13.5 36 21.5 14.8c.9-2.5 4.5-2.5 5.4 0L35 36" stroke="url(#aria-letter)" strokeWidth="5.5" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M17.5 29h13.2" stroke="#dfff93" strokeWidth="4" strokeLinecap="round" />
+      <path d="M37 8.5v7M33.5 12h7" stroke="#ffd1ec" strokeWidth="2.2" strokeLinecap="round" />
+      <circle cx="40.5" cy="7.5" r="1.4" fill="#dfff93" />
     </svg>
   )
 }
 
-
-// ── 판정 라벨 색상 ────────────────────────────────────────────────────────────
-const JUDGMENT_COLORS = {
-  '동일':       'text-green-700 border-green-500 bg-green-50',
-  '실질적동일': 'text-blue-700 border-blue-400 bg-blue-50',
-  '일부차이':   'text-orange-700 border-orange-400 bg-orange-50',
-  '일부유사':   'text-amber-700 border-amber-400 bg-amber-50',
-  '차이':       'text-gray-500 border-gray-300 bg-gray-50',
-}
 
 // ── Phase 1 유사도 배지 스타일 ───────────────────────────────────────────────
 const SIMILARITY_STYLES = {
@@ -83,13 +47,29 @@ const SIMILARITY_STYLES = {
 }
 
 const SIMILARITY_PRESENTATION_BY_JUDGMENT = {
-  '동일':       { symbol: '🔵', row: 'bg-blue-50 border-l-4 border-blue-500' },
-  '실질적동일': { symbol: '🟢', row: 'bg-green-50 border-l-4 border-green-500' },
-  '일부차이':   { symbol: '🟠', row: 'bg-orange-50 border-l-4 border-orange-500' },
-  '일부유사':   { symbol: '🟡', row: 'bg-amber-50 border-l-4 border-amber-400' },
-  '차이':       { symbol: '⚪', row: 'bg-white border-l-4 border-gray-300' },
-  '대응없음':   { symbol: '⚪', row: 'bg-white border-l-4 border-gray-300' },
-  '대응안됨':   { symbol: '⚪', row: 'bg-white border-l-4 border-gray-300' },
+  '동일':       { symbol: '●', row: 'phase-status phase-status-match' },
+  '실질적동일': { symbol: '●', row: 'phase-status phase-status-close' },
+  '일부차이':   { symbol: '●', row: 'phase-status phase-status-partial' },
+  '일부유사':   { symbol: '●', row: 'phase-status phase-status-related' },
+  '차이':       { symbol: '●', row: 'phase-status phase-status-diff' },
+  '대응없음':   { symbol: '●', row: 'phase-status phase-status-diff' },
+  '대응안됨':   { symbol: '●', row: 'phase-status phase-status-diff' },
+}
+
+const SIMILARITY_RANGE_BY_JUDGMENT = {
+  '동일':       '95~100%',
+  '실질적동일': '90~94%',
+  '일부차이':   '85~89%',
+  '일부유사':   '80~84%',
+  '차이':       '1~79%',
+  '대응없음':   '0%',
+  '대응안됨':   '0%',
+}
+
+function similarityRange(pct, judgment = '') {
+  if (pct) return String(pct).replace(/\s+/g, '')
+  const normalizedJudgment = String(judgment || '').replace(/\s+/g, '')
+  return SIMILARITY_RANGE_BY_JUDGMENT[normalizedJudgment] || ''
 }
 
 function similarityPresentation(pct, judgment = '') {
@@ -98,26 +78,77 @@ function similarityPresentation(pct, judgment = '') {
     return SIMILARITY_PRESENTATION_BY_JUDGMENT[normalizedJudgment]
   }
   const value = Number.parseInt(String(pct || '').replace('%', ''), 10)
-  if (value >= 95) return { symbol: '🔵', row: 'bg-blue-50 border-l-4 border-blue-500' }
-  if (value >= 90) return { symbol: '🟢', row: 'bg-green-50 border-l-4 border-green-500' }
-  if (value >= 85) return { symbol: '🟠', row: 'bg-orange-50 border-l-4 border-orange-500' }
-  if (value >= 80) return { symbol: '🟡', row: 'bg-amber-50 border-l-4 border-amber-400' }
-  return { symbol: '⚪', row: 'bg-white border-l-4 border-gray-300' }
-}
-
-function normalizeReportStatusIcons(text) {
-  return String(text || '')
-    .replace(/[\uFFFD�]+/g, '')
-    .replace(/(^|\r?\n)\s*[�\uFFFD]+\s*(?=최종 보고서)/g, '$1')
-    .replace(/[ \t]{2,}/g, ' ')
-    .replace(/[ \t]+(\r?\n)/g, '$1')
-    .replace(/\uFFFD/g, '')
+  if (value >= 95) return { symbol: '●', row: 'phase-status phase-status-match' }
+  if (value >= 90) return { symbol: '●', row: 'phase-status phase-status-close' }
+  if (value >= 85) return { symbol: '●', row: 'phase-status phase-status-partial' }
+  if (value >= 80) return { symbol: '●', row: 'phase-status phase-status-related' }
+  return { symbol: '●', row: 'phase-status phase-status-diff' }
 }
 
 function sanitizeReportText(text) {
   return String(text || '')
     // 과거 생성 프롬프트의 단계 안내 문구는 현재 보고서에 표시하지 않는다.
     .replace(/^\s*청구항\s*\d+에\s*대한\s*특허\s*분석\s*Phase\s*1\s*보고서입니다\.?\s*\r?\n?/gim, '')
+    // 기존 캐시 보고서도 번역·발췌 라벨 없이 자연스러운 한 줄로 표시한다.
+    .replace(/^(\s*인용발명\s*\d+\s*-\s*)번역(?:\s+\d+)?:\s*/gm, '$1')
+    .replace(/^(\s*인용발명\s*\d+\s*-\s*)발췌(?:\s+\d+)?:\s*/gm, '$1')
+    .replace(/^(\s*인용발명\s*\d+\s*-\s*.*?)\s+발췌(?:\s+\d+)?:\s*/gm, '$1 ')
+}
+
+function normalizeCitationQuoteBlocks(text) {
+  const fieldBoundary = String.raw`(?=\n-\s*(?:\*\*)?(?:개시 상태|청구항 구성|청구항 추가 구성|기술적 의미|유사도 평가|인용발명 대응 및 판단|판단 이유|판단 근거|차이점|보완 검토|미대응 구성|미대응 구성 및 검색어)(?:\*\*)?\s*:|\n#{1,6}\s|\n---|(?![\s\S]))`
+  const blockRe = new RegExp(
+    String.raw`(^-\s*(?:\*\*)?\s*인용발명\s*대응\s*원문\s*:\s*(?:\*\*)?\s*\n)([\s\S]*?)${fieldBoundary}`,
+    'gm'
+  )
+
+  return String(text || '').replace(blockRe, (_, header, rawBody) => {
+    const body = rawBody.replace(/^\s*\*\*\s*$/gm, '')
+    const sentences = []
+    const translationRe = /^\s*-\s*번역\((인용발명\s*\d+)\)\s*:\s*(.+?)\s*$/gm
+    let match
+    while ((match = translationRe.exec(body)) !== null) {
+      const sentence = match[2].trim().replace(/\*+$/g, '').trim()
+      const docName = match[1]
+      const escapedDocName = docName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const excerptRe = new RegExp(
+        String.raw`^\s*-\s*발췌\(${escapedDocName}\)\s*:\s*"(.+?)"\s*\((단락|본문)\s+(.+?)\)\s*$`,
+        'm'
+      )
+      const excerpt = body.match(excerptRe)
+      const translated = /[.!?]$/.test(sentence) ? sentence : `${sentence}.`
+      sentences.push(
+        excerpt
+          ? `${docName}에는 ${translated} ${excerpt[2]} ${excerpt[3]} "${excerpt[1]}"`
+          : `${docName}에는 ${translated}`
+      )
+    }
+    if (sentences.length === 0) {
+      const directRe = /^\s*-\s*(인용발명\s*\d+)\s*:\s*"?(.+?)"?(?:\s+\((?:단락|본문).*)?\s*$/gm
+      while ((match = directRe.exec(body)) !== null) {
+        const sentence = match[2].trim().replace(/\*+$/g, '').trim()
+        sentences.push(`${match[1]}에는 ${/[.!?]$/.test(sentence) ? sentence : `${sentence}.`}`)
+      }
+    }
+    if (sentences.length === 0) {
+      return header.replace(/\*\*/g, '') + body.trim()
+    }
+    return `${header.replace(/\*\*/g, '')}  ${sentences.join(' ')}`
+  })
+}
+
+function normalizeSupplementReviewBlocks(text) {
+  const supplementRe = /(^-\s*(?:\*\*)?보완 검토(?:\*\*)?\s*:\s*\n)([\s\S]*?)(?=\n-\s*(?:\*\*)?(?:개시 상태|청구항 구성|청구항 추가 구성|기술적 의미|유사도 평가|인용발명 대응 원문|인용발명 대응 및 판단|판단 이유|판단 근거|차이점|미대응 구성|미대응 구성 및 검색어)(?:\*\*)?\s*:|\n#{1,6}\s|\n---|(?![\s\S]))/gm
+  return String(text || '').replace(supplementRe, (_, header, rawBody) => {
+    const normalizedLines = rawBody.split('\n').map(line => {
+      const legacy = line.match(
+        /^\s*-\s*(인용발명\s*\d+)\s*:\s*"(.+?)"\s*\((단락|본문)\s+(.+?)\)\s*;\s*판정\s*[^;]+;\s*잔여 제한\s*:\s*.+$/
+      )
+      if (!legacy) return line.replace(/^\s*\*\*\s*$/, '')
+      return `  ${legacy[1]}에는 ${legacy[3]} ${legacy[4]} "${legacy[2]}"`
+    })
+    return header.replace(/\*\*/g, '') + normalizedLines.join('\n').trimEnd()
+  })
 }
 
 const RELATED_A_TAB_KEY = '__relatedA'
@@ -180,18 +211,13 @@ function reportTabKeys(allReports) {
 // ── Phase 1 필드 라벨 스타일 ─────────────────────────────────────────────────
 const FIELD_LABEL_STYLES = [
   { re: /^(청구항\s*(?:추가\s*)?구성)\s*:/,      cls: 'border-indigo-300 bg-indigo-50/50 text-indigo-950', labelCls: 'text-indigo-700' },
-  { re: /^(인용발명\s*대응 원문)\s*:/,     cls: 'border-teal-400 bg-teal-50/50 text-teal-950', labelCls: 'text-teal-700' },
+  { re: /^(인용발명\s*대응(?:\s*원문|\s*및\s*판단))\s*:/, cls: 'border-teal-400 bg-teal-50/50 text-teal-950', labelCls: 'text-teal-700' },
   { re: /^(유사도 평가)\s*:/,              cls: 'border-amber-300 bg-amber-50/70 text-amber-950', labelCls: 'text-amber-700' },
   { re: /^(판단 이유)\s*:/,               cls: 'border-violet-300 bg-violet-50/50 text-violet-950', labelCls: 'text-violet-700' },
   { re: /^(판단 근거)\s*:/,               cls: 'border-violet-400 bg-violet-50/50 text-violet-950', labelCls: 'text-violet-700' },
   { re: /^(차이점)\s*:/,                  cls: 'border-rose-300 bg-rose-50/50 text-rose-950', labelCls: 'text-rose-700' },
   { re: /^(보완 검토)\s*:/,               cls: 'border-cyan-300 bg-cyan-50/50 text-cyan-950', labelCls: 'text-cyan-700' },
   { re: /^(유사점 요약)\s*:/,             cls: 'border-green-300 bg-green-50/50 text-green-950', labelCls: 'text-green-700' },
-  { re: /^(신규성\s*검토)\s*:/,           cls: 'border-blue-300 bg-blue-50/50 text-blue-950', labelCls: 'text-blue-700' },
-  { re: /^(주\s*인용발명\s*선정\s*이유)\s*:/, cls: 'border-slate-300 bg-slate-50/50 text-slate-950', labelCls: 'text-slate-700' },
-  { re: /^(결합\s*검토)\s*:/,             cls: 'border-purple-300 bg-purple-50/50 text-purple-950', labelCls: 'text-purple-700' },
-  { re: /^(잔여\s*차이\s*및\s*방어\s*포인트)\s*:/, cls: 'border-emerald-300 bg-emerald-50/50 text-emerald-950', labelCls: 'text-emerald-700' },
-  { re: /^(\[?신규\s*검색\s*제안\]?)\s*:/, cls: 'border-orange-300 bg-orange-50/50 text-orange-950', labelCls: 'text-orange-700' },
 ]
 
 function extractText(children) {
@@ -199,15 +225,6 @@ function extractText(children) {
   if (Array.isArray(children)) return children.map(c => extractText(c)).join('')
   if (children?.props?.children) return extractText(children.props.children)
   return ''
-}
-
-// ── 유사도 단계별 행 색상 (배경 + 왼쪽 테두리) ──────────────────────────────
-const SIMILARITY_ROW_COLORS = {
-  '동일':           'bg-green-50  border-l-4 border-green-500',
-  '실질적동일':     'bg-orange-50 border-l-4 border-orange-500',
-  '일부차이':       'bg-amber-50  border-l-4 border-amber-400',
-  '일부유사':       'bg-green-50  border-l-4 border-green-500',
-  '차이':           'bg-red-50    border-l-4 border-red-400',
 }
 
 // ── Phase 1 커스텀 렌더러 ────────────────────────────────────────────────────
@@ -226,13 +243,13 @@ function Phase1H3({ children }) {
   // 종합 분석 요약 섹션
   if (/종합\s*분석\s*요약|종합분석요약/.test(text)) {
     return (
-      <h3 className="flex items-center gap-2 mt-8 mb-3 px-4 py-3 bg-slate-100 border border-slate-200 rounded-lg text-lg font-bold text-slate-800">
+      <h3 className="report-major-heading">
         {children}
       </h3>
     )
   }
 
-  const m = text.match(/^\[(구성요소|추가\s*구성|전제부)(?:\s*\(\s*([A-JP](?:-\d+)?)\s*\))?\]$/)
+  const m = text.match(/^\[(구성요소|추가\s*구성|전제부)(?:\s*\(\s*([A-Z](?:-\d+)?)\s*\))?\]$/)
   if (m) {
     return (
       <h3 className="phase1-component-heading mt-7 mb-3 text-xl font-extrabold text-slate-900">
@@ -249,7 +266,7 @@ function Phase1ListItem({ children }) {
 
   // 유사도 라인 감지 — 이모지·기존 바탕색 지시 잔재도 흡수
   const newSimMatch = text.match(
-    /^(?:유사도\s*:\s*)?\(([A-JP](?:-\d+)?)\)\s*(동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음|대응안됨|대응 안됨)?(?:\s*(?:\(\s*)?(\d{1,3}(?:\s*~\s*\d{1,3})?%)(?:\s*\))?)?/
+    /^(?:유사도\s*:\s*)?\(([A-Z](?:-\d+)?)\)\s*(동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음|대응안됨|대응 안됨)?(?:\s*(?:\(\s*)?(\d{1,3}(?:\s*~\s*\d{1,3})?%)(?:\s*\))?)?/
   )
   const oldSimMatch = text.match(
     /^유사도\s*:\s*(동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음|대응안됨|대응 안됨)?(?:\s*(?:\(\s*)?(\d{1,3}(?:\s*~\s*\d{1,3})?%)(?:\s*\))?)?/
@@ -258,7 +275,10 @@ function Phase1ListItem({ children }) {
     const elementLabel = newSimMatch ? newSimMatch[1] : ''
     const labelText = newSimMatch ? (newSimMatch[2] || '') : (oldSimMatch?.[1] || '')
     const normalizedLabel = labelText.replace(/\s+/g, '') === '대응없음' ? '차이' : labelText.replace(/\s+/g, '')
-    const pct = (newSimMatch ? (newSimMatch[3] || '') : (oldSimMatch?.[2] || '')).replace(/\s+/g, '')
+    const pct = similarityRange(
+      newSimMatch ? (newSimMatch[3] || '') : (oldSimMatch?.[2] || ''),
+      normalizedLabel,
+    )
     const style = SIMILARITY_STYLES[normalizedLabel] || SIMILARITY_STYLES['차이']
     const presentation = similarityPresentation(pct, normalizedLabel)
     return (
@@ -311,7 +331,7 @@ function escapeHtml(value) {
 function renderJudgmentInline(text) {
   const normalizedText = text.replace(/^\(전제부\s+P\)/, '(P)')
   const match = normalizedText.match(
-    /^(\([A-JP](?:-\d+)?\)(?:\s*(?:및|,)\s*\([A-JP](?:-\d+)?\))*)\s+(동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음|대응안됨|대응 안됨)(?:\s+(?:\(\s*)?(\d{1,3}(?:\s*~\s*\d{1,3})?%)(?:\s*\))?)?\s*$/
+    /^(\([A-Z](?:-\d+)?\)(?:\s*(?:및|,)\s*\([A-Z](?:-\d+)?\))*)\s+(동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음|대응안됨|대응 안됨)(?:\s+(?:\(\s*)?(\d{1,3}(?:\s*~\s*\d{1,3})?%)(?:\s*\))?)?\s*$/
   )
   const fallbackMatch = !match && normalizedText.match(
     /^(?:\(\s*)?(동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음|대응안됨|대응 안됨)(?:\s+(\d{1,3}(?:\s*~\s*\d{1,3})?%))?(?:\s*\))?\s*$/
@@ -319,41 +339,37 @@ function renderJudgmentInline(text) {
   if (!match && !fallbackMatch) return null
   const label = match ? match[1] : ''
   const rawJudgment = match ? match[2] : fallbackMatch[1]
-  const pct = (match ? (match[3] || '') : (fallbackMatch[2] || '')).replace(/\s+/g, '')
   const judgment = rawJudgment.replace(/\s+/g, '')
+  const pct = similarityRange(match ? (match[3] || '') : (fallbackMatch[2] || ''), judgment)
   return { label, judgment, pct }
 }
 
 function ReportParagraph({ children }) {
   const text = extractText(children)
   const trimmed = text.trim()
-  if (/^\[(구성요소|추가\s*구성|전제부)(?:\s*\(\s*[A-JP](?:-\d+)?\s*\))?\]$/.test(trimmed)) {
+  if (/^\[(구성요소|추가\s*구성|전제부)(?:\s*\(\s*[A-Z](?:-\d+)?\s*\))?\]$/.test(trimmed)) {
     return <p className="phase1-component-heading">{children}</p>
   }
   if (/^\[(인용발명\s*\d+\s*단독\(신규성\)|인용발명\s*\d+\s*\+\s*주지관용\(진보성\)|인용발명\s*\d+\s*과\s*인용발명\s*\d+\s*의\s*결합(?:\s*및\s*주지관용)?\(진보성\))\]$/.test(trimmed)) {
     return <p className="mt-2 mb-5 text-xl font-bold tracking-tight text-slate-950">{children}</p>
   }
-  if (/^\[(구성대비|종합분석요약|구성요소|종합 판단|유사점|차이점|결론|신규성 검토|주 인용발명 선정 이유|결합 검토|잔여 차이 및 방어 포인트|신규 검색 제안)\]$/.test(trimmed)) {
+  if (/^\[(구성대비|종합분석요약|구성요소|종합 판단|유사점|차이점|신규성 검토|결합 검토)\]$/.test(trimmed)) {
     const isMajor = /^\[(구성대비|종합분석요약|종합 판단)\]$/.test(trimmed)
     const isDiff = trimmed === '[차이점]'
     const isSimilar = trimmed === '[유사점]'
-    const isConclusion = trimmed === '[결론]'
-    const isSubSummary = /^\[(신규성 검토|주 인용발명 선정 이유|결합 검토|잔여 차이 및 방어 포인트|신규 검색 제안)\]$/.test(trimmed)
+    const isLegalReview = /^\[(신규성 검토|결합 검토)\]$/.test(trimmed)
     return (
       <p className={
         isMajor
-          ? 'mt-8 mb-4 px-4 py-3 rounded-xl bg-slate-800 text-white text-lg font-extrabold shadow-sm flex items-center gap-2'
+          ? 'report-major-heading'
           : isDiff
-            ? 'mt-5 mb-2 px-3 py-2 rounded-lg bg-rose-50 border border-rose-200 text-sm font-bold text-rose-800'
+            ? 'report-minor-heading report-minor-diff'
             : isSimilar
-              ? 'mt-5 mb-2 px-3 py-2 rounded-lg bg-emerald-50 border border-emerald-200 text-sm font-bold text-emerald-800'
-              : isConclusion
-                ? 'mt-6 mb-3 px-4 py-3 rounded-lg bg-amber-50 border border-amber-200 text-xl font-extrabold text-amber-900'
-                : isSubSummary
-                  ? 'mt-4 mb-2 px-3 py-1.5 rounded-md bg-slate-100 border border-slate-200 text-sm font-bold text-slate-800'
-                  : 'mt-4 mb-1 text-sm font-semibold text-slate-700'
+              ? 'report-minor-heading report-minor-similar'
+              : isLegalReview
+                  ? 'report-minor-heading report-minor-legal'
+                : 'mt-4 mb-1 text-sm font-semibold text-slate-700'
       }>
-        {isMajor && <span className="inline-block w-2 h-5 bg-blue-500 rounded-full mr-1"></span>}
         {children}
       </p>
     )
@@ -378,10 +394,12 @@ function ReportParagraph({ children }) {
 
 function preprocessReport(md) {
   md = sanitizeReportText(md)
+  md = normalizeCitationQuoteBlocks(md)
+  md = normalizeSupplementReviewBlocks(md)
 
   function fieldClass(label) {
     if (label === '청구항 구성' || label === '청구항 추가 구성' || label === '추가 구성' || label.startsWith('청구항')) return 'phase1-field phase1-field-claim'
-    if (label === '인용발명 대응 원문') return 'phase1-field phase1-field-quote'
+    if (label === '인용발명 대응 원문' || label === '인용발명 대응 및 판단') return 'phase1-field phase1-field-quote'
     if (label === '유사도 평가') return 'phase1-field phase1-field-similarity'
     if (label === '판단 이유' || label === '판단 근거') return 'phase1-field phase1-field-reason'
     if (label === '차이점') return 'phase1-field phase1-field-diff'
@@ -395,9 +413,10 @@ function preprocessReport(md) {
   }
 
   function normalizePhase1Fields(text) {
-    const fieldRe = /^\s*(?:-\s*)?(?:\*\*)?(청구항\s*(?:추가\s*)?구성|추가\s*구성|인용발명\s*대응 원문|인용발명 대응 부분 요약|유사도 평가|판단 이유|판단 근거|차이점|보완 검토|유사점 요약)(?:\*\*)?\s*:\s*(.*)$/
+    const fieldRe = /^\s*(?:-\s*)?(?:\*\*)?(청구항\s*(?:추가\s*)?구성|추가\s*구성|기술적\s*의미|인용발명\s*대응(?:\s*원문|\s*및\s*판단)|인용발명 대응 부분 요약|유사도 평가|판단 이유|판단 근거|차이점|보완 검토|미대응\s*구성(?:\s*및\s*검색어)?|유사점 요약)(?:\*\*)?\s*:\s*(.*)$/
     const sectionHeaderRe = /^#{1,6}\s*\[\s*(?:구성요소|추가\s*구성|추가구성|전제부|종속항|청구항\s*\d*(?:\s*추가\s*구성)?)(?:\s*[:\-]?\s*(?:\([^)]*\)|[A-Za-z0-9-]+))?\s*\]\s*$/i
     const componentHeaderRe = /^\s*(?:#{1,6}\s*)?\[\s*(?:구성요소|추가\s*구성|추가구성|전제부|종속항|청구항\s*\d*(?:\s*추가\s*구성)?)(?:\s*[:\-]?\s*(?:\([^)]*\)|[A-Za-z0-9-]+))?\s*\]\s*$/i
+    const summaryHeaderRe = /^\s*(?:#{1,6}\s*)?\[\s*(?:종합\s*분석\s*요약|종합\s*판단|유사점|차이점|신규성\s*검토|결합\s*검토|진보성\s*검토)\s*\]\s*$/i
     const lines = text.split('\n')
     const result = []
     let i = 0
@@ -429,8 +448,13 @@ function preprocessReport(md) {
             }
           }
 
-          if (fieldsDict['인용발명 대응 원문']) {
-            blockCards.push(fieldsDict['인용발명 대응 원문'])
+          if (fieldsDict['기술적 의미']) {
+            blockCards.push(fieldsDict['기술적 의미'])
+          }
+
+          const evidenceCard = fieldsDict['인용발명 대응 및 판단'] || fieldsDict['인용발명 대응 원문']
+          if (evidenceCard) {
+            blockCards.push(evidenceCard)
           }
 
           const reasonCard = fieldsDict['판단 이유'] || fieldsDict['판단 근거']
@@ -450,11 +474,17 @@ function preprocessReport(md) {
             blockCards.push(fieldsDict['보완 검토'])
           }
 
+          const missingCard = fieldsDict['미대응 구성 및 검색어'] || fieldsDict['미대응 구성']
+          if (missingCard) {
+            blockCards.push(missingCard)
+          }
+
           for (const [k, v] of Object.entries(fieldsDict)) {
-            if (!['청구항 구성', '청구항 추가 구성', '추가 구성', '유사도 평가', '인용발명 대응 원문', '판단 이유', '판단 근거', '차이점', '보완 검토', '인용발명 대응 부분 요약'].includes(k)) {
+            if (!['청구항 구성', '청구항 추가 구성', '추가 구성', '기술적 의미', '유사도 평가', '인용발명 대응 및 판단', '인용발명 대응 원문', '판단 이유', '판단 근거', '차이점', '보완 검토', '미대응 구성 및 검색어', '미대응 구성', '인용발명 대응 부분 요약'].includes(k)) {
               blockCards.push(v)
             }
           }
+
 
           if (blockCards.length > 0) {
             result.push(`<div class="phase1-component-block">\n${blockCards.join('\n')}\n</div>`)
@@ -464,7 +494,7 @@ function preprocessReport(md) {
         while (i < lines.length) {
           const current = lines[i]
           const trimmed = current.trim()
-          if (componentHeaderRe.test(trimmed) || /^\[(종합분석요약|종합 판단|유사점|차이점|결론)\]/.test(trimmed) || /^#{1,6}\s/.test(trimmed)) {
+          if (componentHeaderRe.test(trimmed) || summaryHeaderRe.test(trimmed) || /^#{1,6}\s/.test(trimmed)) {
             break
           }
 
@@ -505,11 +535,13 @@ function preprocessReport(md) {
                 break
               }
               if (
+                curTrimmed === '---' ||
                 fieldRe.test(cur) ||
                 /^#{1,6}\s/.test(curTrimmed) ||
                 componentHeaderRe.test(curTrimmed) ||
-                (label !== '차이점' && /^\([A-JP](?:-\d+)?\)\s/.test(curTrimmed)) ||
-                /^\s*-?\s*(유사점 요약|차이점|결론)\s*:/.test(curTrimmed)
+                summaryHeaderRe.test(curTrimmed) ||
+                (label !== '차이점' && /^\([A-Z](?:-\d+)?\)\s/.test(curTrimmed)) ||
+                /^\s*-?\s*(유사점 요약|차이점)\s*:/.test(curTrimmed)
               ) {
                 break
               }
@@ -570,11 +602,13 @@ function preprocessReport(md) {
           break
         }
         if (
+          trimmed === '---' ||
           fieldRe.test(current) ||
           /^#{1,6}\s/.test(trimmed) ||
           sectionHeaderRe.test(trimmed) ||
-          (label !== '차이점' && /^\([A-JP](?:-\d+)?\)\s/.test(trimmed)) ||
-          /^\s*-?\s*(유사점 요약|차이점|결론)\s*:/.test(trimmed)
+          summaryHeaderRe.test(trimmed) ||
+          (label !== '차이점' && /^\([A-Z](?:-\d+)?\)\s/.test(trimmed)) ||
+          /^\s*-?\s*(유사점 요약|차이점)\s*:/.test(trimmed)
         ) {
           break
         }
@@ -598,7 +632,7 @@ function preprocessReport(md) {
 
     while (i < lines.length) {
       const line = lines[i]
-      if (!/^\([A-JP](?:-\d+)?\)\s/.test(line.trim())) {
+      if (!/^\([A-Z](?:-\d+)?\)\s/.test(line.trim())) {
         result.push(line)
         i += 1
         continue
@@ -614,9 +648,8 @@ function preprocessReport(md) {
           break
         }
         if (
-          /^\([A-JP](?:-\d+)?\)\s/.test(trimmed) ||
-          /^\[결론\]$/.test(trimmed) ||
-          /^-?\s*(유사점 요약|차이점|결론)\s*:/.test(trimmed)
+          /^\([A-Z](?:-\d+)?\)\s/.test(trimmed) ||
+          /^-?\s*(유사점 요약|차이점)\s*:/.test(trimmed)
         ) {
           break
         }
@@ -649,7 +682,7 @@ function preprocessReport(md) {
   }
 
   function mergeClaimIntoJudgmentCards(text) {
-    const judgmentRe = String.raw`((?:\([A-JP](?:-\d+)?\)\s*)?(?:동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음|대응안됨|대응 안됨)(?:\s+\d+%)?)`
+    const judgmentRe = String.raw`((?:\([A-Z](?:-\d+)?\)\s*)?(?:동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음|대응안됨|대응 안됨)(?:\s+\d+%)?)`
     const claimRe = String.raw`<div class="phase1-field phase1-field-claim"><div class="phase1-field-label">청구항 구성<\/div>(?:<div class="phase1-field-body">([\s\S]*?)<\/div>)?<\/div>`
     return text.replace(
       new RegExp(`^${judgmentRe}\\s*\\n+${claimRe}`, 'gm'),
@@ -668,7 +701,7 @@ function preprocessReport(md) {
   }
 
   function normalizeSummaryItems(text) {
-    const summaryRegex = /^-\s*(결론|신규성\s*검토|주\s*인용발명\s*선정\s*이유|유사점\s*요약|차이점|결합\s*검토|잔여\s*차이\s*및\s*방어\s*포인트|\[?신규\s*검색\s*제안\]?)\s*:\s*(.*)$/
+    const summaryRegex = /^-\s*(유사점\s*요약|차이점|신규성\s*검토|결합\s*검토|진보성\s*검토)\s*:\s*(.*)$/
     const lines = text.split('\n')
     const result = []
     let i = 0
@@ -701,7 +734,7 @@ function preprocessReport(md) {
         if (
           summaryRegex.test(trimmed) ||
           /^-\s*(?:[^\n:]+)\s*:/.test(trimmed) ||
-          /^\[(유사점|차이점|결론|종합분석요약|신규성 검토|주 인용발명 선정 이유|결합 검토|잔여 차이 및 방어 포인트|신규 검색 제안)\]$/.test(trimmed) ||
+          /^\[(유사점|차이점|종합분석요약|신규성 검토|결합 검토)\]$/.test(trimmed) ||
           /^#{1,6}\s/.test(trimmed)
         ) {
           break
@@ -715,87 +748,24 @@ function preprocessReport(md) {
           ? '[유사점]'
           : rawLabel === '차이점'
             ? '[차이점]'
-            : rawLabel === '결론'
-              ? '[결론]'
-              : `[${rawLabel}]`
+            : `[${rawLabel}]`
       result.push(`${heading}\n\n${bodyLines.join('\n').trim()}`)
     }
 
     return result.join('\n')
   }
 
-  function moveSimilarDiffBelowConclusion(text) {
-    const lines = text.split('\n')
-    const out = []
-    let i = 0
 
-    function normalizeHeading(line) {
-      const trimmed = line.trim()
-      if (/^\[(유사점|유사점\s*요약)\]$/.test(trimmed)) return '[유사점]'
-      if (/^\[(차이점)\]$/.test(trimmed)) return '[차이점]'
-      if (/^\[(결론)\]$/.test(trimmed)) return '[결론]'
-      if (/^\[(신규성\s*검토)\]$/.test(trimmed)) return '[신규성 검토]'
-      if (/^\[(주\s*인용발명\s*선정\s*이유)\]$/.test(trimmed)) return '[주 인용발명 선정 이유]'
-      if (/^\[(결합\s*검토)\]$/.test(trimmed)) return '[결합 검토]'
-      if (/^\[(잔여\s*차이\s*및\s*방어\s*포인트)\]$/.test(trimmed)) return '[잔여 차이 및 방어 포인트]'
-      if (/^\[(신규\s*검색\s*제안)\]$/.test(trimmed)) return '[신규 검색 제안]'
-      return null
-    }
-
-    function readBlock(start) {
-      const heading = normalizeHeading(lines[start])
-      const body = []
-      let j = start + 1
-      while (j < lines.length && !normalizeHeading(lines[j])) {
-        body.push(lines[j])
-        j += 1
-      }
-      return { heading, body, next: j }
-    }
-
-    while (i < lines.length) {
-      const firstHeading = normalizeHeading(lines[i])
-      if (!firstHeading) {
-        out.push(lines[i])
-        i += 1
-        continue
-      }
-
-      const blocks = {}
-      let cursor = i
-      while (cursor < lines.length) {
-        const heading = normalizeHeading(lines[cursor])
-        if (!heading) break
-        const block = readBlock(cursor)
-        blocks[heading] = block
-        cursor = block.next
-      }
-
-      if (!blocks['[결론]'] || (!blocks['[유사점]'] && !blocks['[차이점]'])) {
-        out.push(lines[i])
-        i += 1
-        continue
-      }
-
-      for (const key of ['[결론]', '[신규성 검토]', '[주 인용발명 선정 이유]', '[유사점]', '[차이점]', '[결합 검토]', '[잔여 차이 및 방어 포인트]', '[신규 검색 제안]']) {
-        if (blocks[key]) out.push(blocks[key].heading, ...blocks[key].body)
-      }
-      i = cursor
-    }
-
-    return out.join('\n')
-  }
-
-  const judgmentPrefix = String.raw`\([A-JP](?:-\d+)?\)(?:\s*(?:및|,)\s*\([A-JP](?:-\d+)?\))*\s+(?:동일|실질적동일|실질적\s+동일|일부차이|일부\s+차이|일부유사|일부\s+유사|차이|대응\s+없음|대응안됨|대응\s+안됨)(?:\s+\d+%)?`
+  const judgmentPrefix = String.raw`\([A-Z](?:-\d+)?\)(?:\s*(?:및|,)\s*\([A-Z](?:-\d+)?\))*\s+(?:동일|실질적동일|실질적\s+동일|일부차이|일부\s+차이|일부유사|일부\s+유사|차이|대응\s+없음|대응안됨|대응\s+안됨)(?:\s+\d+%)?`
   // CLI 에이전트가 새어 보낸 도구 호출 줄(update_topic(...) 등) 제거 — 캐시·히스토리 구보고서까지 정리
   md = md.replace(/^[ \t]*[a-z][a-z0-9_]*\([a-z_]+\s*=\s*['"].*\)[ \t]*-*[ \t]*$/gm, '')
   md = md.replace(
-    /([^\n])\s*(#{3,6}\s*\[(?:구성요소|추가\s*구성|전제부)(?:\s*\([A-JP](?:-\d+)?\))?\])/g,
+    /([^\n])\s*(#{3,6}\s*\[(?:구성요소|추가\s*구성|전제부)(?:\s*\([A-Z](?:-\d+)?\))?\])/g,
     '$1\n\n$2'
   )
   md = md.replace(/^(#{3,6})(?=\[(?:구성요소|추가\s*구성))/gm, '$1 ')
   md = md.replace(
-    /^#{1,6}\s*(\[(?:구성요소|추가\s*구성|전제부)(?:\s*\([A-JP](?:-\d+)?\))?\])\s*$/gm,
+    /^#{1,6}\s*(\[(?:구성요소|추가\s*구성|전제부)(?:\s*\([A-Z](?:-\d+)?\))?\])\s*$/gm,
     '$1'
   )
   md = keepFirstComponentHeader(md)
@@ -803,23 +773,21 @@ function preprocessReport(md) {
   md = mergeClaimIntoJudgmentCards(md)
   md = normalizeSummaryItems(md)
   md = md.replace(
-    /([^\n])\s+(-\s*(유사점 요약|차이점|결론)\s*:)/g,
+    /([^\n])\s+(-\s*(유사점 요약|차이점)\s*:)/g,
     '$1\n\n$2'
   )
   md = md.replace(
-    /^-\s*(유사점 요약|차이점|결론)\s*:\s*(.+)$/gm,
+    /^-\s*(유사점 요약|차이점)\s*:\s*(.+)$/gm,
     (_, label, body) => {
       const heading =
         label === '유사점 요약'
           ? '[유사점]'
-          : label === '차이점'
-            ? '[차이점]'
-            : '[결론]'
+          : '[차이점]'
       return `${heading}\n\n${body.trim()}`
     }
   )
   md = md.replace(
-    /([^\n])\n(-\s*(유사점 요약|차이점|결론)\s*:)/g,
+    /([^\n])\n(-\s*(유사점 요약|차이점)\s*:)/g,
     '$1\n\n$2'
   )
   md = md.replace(
@@ -827,11 +795,11 @@ function preprocessReport(md) {
     '$1\n\n$2'
   )
   md = md.replace(
-    /([^\n])\n(\([A-JP](?:-\d+)?\))/g,
+    /([^\n])\n(\([A-Z](?:-\d+)?\))/g,
     '$1\n\n$2'
   )
   md = md.replace(
-    /^(\([A-JP](?:-\d+)?\)(?:\s*(?:및|,)\s*\([A-JP](?:-\d+)?\))*\s+(?:동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음|대응안됨|대응 안됨)(?:\s+\d+%)?)\s+(\S.*)$/gm,
+    /^(\([A-Z](?:-\d+)?\)(?:\s*(?:및|,)\s*\([A-Z](?:-\d+)?\))*\s+(?:동일|실질적동일|실질적 동일|일부차이|일부 차이|일부유사|일부 유사|차이|대응 없음|대응안됨|대응 안됨)(?:\s+\d+%)?)\s+(\S.*)$/gm,
     (_, judgment, body) => `${judgment}\n\n${body}`
   )
   md = normalizeDifferenceEntries(md)
@@ -839,12 +807,11 @@ function preprocessReport(md) {
     /\s+((?:다만|따라서)\s+)/g,
     '\n\n$1'
   )
-  md = moveSimilarDiffBelowConclusion(md)
   const lines = md.split('\n')
   const result = []
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
-    const isJudgment = /^\([A-JP](?:-\d+)?\)\s/.test(line)
+    const isJudgment = /^\([A-Z](?:-\d+)?\)\s/.test(line)
     if (isJudgment && result.length > 0 && result[result.length - 1] !== '') result.push('')
     result.push(line)
     if (isJudgment && i < lines.length - 1 && lines[i + 1] !== '') result.push('')
@@ -858,7 +825,7 @@ function preprocessPhase1Report(md) {
     const sectionHeaderRe = /^\s*#{1,6}\s*\[/
     const similarityRe = /^\s*(?:-\s*)?(?:\*\*)?유사도\s*평가(?:\*\*)?\s*:/
     const claimRe = /^\s*(?:-\s*)?(?:\*\*)?(?:청구항\s*(?:추가\s*)?구성|추가\s*구성)(?:\s*\([^)]*\))?(?:\*\*)?\s*:/
-    const legacyClaimRe = /^\s*#{1,6}\s*(?:청구항\s*구성|추가\s*구성)\s*\([A-JP](?:-\d+)?\)/
+    const legacyClaimRe = /^\s*#{1,6}\s*(?:청구항\s*구성|추가\s*구성)\s*\([A-Z](?:-\d+)?\)/
     const lines = String(text || '').split('\n')
     const output = []
     let component = null
@@ -894,7 +861,8 @@ function preprocessPhase1Report(md) {
   }
 
   return preprocessReport(
-    moveSimilarityBeforeClaim(String(md || ''))
+    String(md || '')
+      .replace(/\r\n?/g, '\n')
       .replace(/^###\s+claim\s+(\d+)\s*$/gim, '### 청구항 $1')
       .replace(/^\s*(?:#{1,6}\s*)?\[?\s*종합\s*분석\s*요약\s*\]?\s*$/gim, '[종합분석요약]')
   )
@@ -1786,16 +1754,15 @@ export default function App() {
   const activeClaimForActions = typeof activeClaimNumView === 'number' ? activeClaimNumView : claimNumber
 
   return (
-    <div className="min-h-screen flex flex-col bg-gray-100">
+    <div className="app-shell min-h-screen flex flex-col">
 
       {/* 헤더 */}
-      <header className="flex items-center justify-between px-6 py-3 bg-white border-b shadow-sm shrink-0">
+      <header className="app-header flex items-center justify-between px-7 py-4 shrink-0">
         <div className="flex items-center gap-3">
           <AriaEmblem />
           <div className="flex flex-col justify-center ml-1">
             <div className="flex items-baseline gap-1.5">
-              <span className="font-extrabold text-[1.4rem] text-slate-800 tracking-tight leading-none">ARIA</span>
-              <span className="font-semibold text-[0.85rem] text-slate-500 tracking-wide">ver.2</span>
+              <span className="aria-wordmark">ARIA</span>
             </div>
             <span className="aria-sub">
               <span className="text-sky-500 font-bold text-[0.65rem]">A</span>I{' '}
@@ -1811,7 +1778,7 @@ export default function App() {
         <div className="flex items-center gap-2">
           {jobId && (
             <button
-              className="text-sm text-red-500 hover:text-red-700 border border-red-200 rounded-lg px-3 py-1.5 hover:bg-red-50 transition disabled:opacity-40 disabled:cursor-not-allowed"
+              className="ghost-button danger"
               onClick={handleDeleteCurrentJob}
               disabled={generating || loading}
               title="현재 작업의 uploads, reports, cases 저장 데이터를 서버에서 삭제합니다."
@@ -1820,10 +1787,9 @@ export default function App() {
             </button>
           )}
           <button
-            className="text-sm text-gray-500 hover:text-gray-800 border rounded-lg px-3 py-1.5 hover:bg-gray-50 transition flex items-center gap-1.5"
+            className="ghost-button flex items-center gap-1.5"
             onClick={() => setShowHistory(true)}
           >
-            <span>🕘</span>
             <span>히스토리</span>
             {history.length > 0 && (
               <span className="bg-blue-100 text-blue-600 text-xs font-semibold rounded-full px-1.5 py-0.5 leading-none">
@@ -1832,7 +1798,7 @@ export default function App() {
             )}
           </button>
           <button
-            className="text-sm text-gray-500 hover:text-gray-800 border rounded-lg px-3 py-1.5 hover:bg-gray-50 transition"
+            className="ghost-button"
             onClick={() => setShowSettings(true)}
           >
             설정
@@ -1841,10 +1807,10 @@ export default function App() {
       </header>
 
       {/* 본문 */}
-      <div className="flex flex-1 overflow-hidden p-4 gap-4">
+      <div className="workspace flex flex-1 overflow-hidden px-5 pb-5 gap-5">
 
         {/* 좌측 패널 */}
-        <div className="shrink-0 w-[500px] flex flex-col gap-4 overflow-y-auto">
+        <aside className="work-rail shrink-0 w-[390px] flex flex-col overflow-y-auto">
           <FilePanel
             priorFiles={priorFiles}
             onPriorFiles={handlePriorFilesChange}
@@ -1855,13 +1821,13 @@ export default function App() {
           <ProgressPanel logs={logs} generating={generating} />
 
           {/* 청구항 입력 */}
-          <div className="bg-white rounded-xl border border-gray-200 shadow-sm flex flex-col">
-            <div className="px-4 py-3 border-b flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-gray-800">청구항 입력</h2>
+          <section className="rail-section flex flex-col">
+            <div className="px-5 pt-5 pb-3 flex items-center justify-between">
+              <h2 className="section-eyebrow">02 · 청구항</h2>
               <div className="flex items-center gap-2">
                 {claims.length > 0 && (
                   <button
-                    className="text-xs bg-indigo-50 text-indigo-600 border border-indigo-200 rounded-lg px-3 py-1 hover:bg-indigo-100 transition font-medium"
+                    className="text-xs text-violet-600 hover:text-violet-800 transition font-semibold"
                     onClick={() => setShowClaimAnalysis(true)}
                   >
                     청구항 분석 보기
@@ -1875,7 +1841,7 @@ export default function App() {
 
             {/* 컨텍스트 상태 바 */}
             {priorReady && (
-              <div className={`px-4 py-2 flex items-center justify-between text-xs border-b
+              <div className={`mx-5 mb-1 px-3 py-2 flex items-center justify-between text-xs rounded-xl
                 ${contextClaims.length > 0 && useCtx
                   ? 'bg-blue-50 border-blue-100'
                   : 'bg-gray-50 border-gray-100'}`}
@@ -1902,7 +1868,7 @@ export default function App() {
                 </div>
                 {contextClaims.length > 0 && (
                   <button
-                    className="text-xs text-red-400 hover:text-red-600 border border-red-200 hover:border-red-400 rounded px-2 py-0.5 hover:bg-red-50 transition"
+                    className="text-[11px] text-red-400 hover:text-red-600 transition"
                     title="이전 분석 컨텍스트를 초기화합니다. 다음 생성부터 이전 청구항 맥락 없이 독립 분석됩니다."
                     onClick={async () => {
                       if (!jobId) return
@@ -1922,20 +1888,20 @@ export default function App() {
               </div>
             )}
 
-            <div className="p-4 flex flex-col gap-3">
+            <div className="px-5 pb-5 flex flex-col gap-3">
               <div className="flex items-center gap-3">
                 <label className="text-xs text-gray-500 shrink-0">청구항 번호</label>
                 <input
                   type="number"
                   min="1"
-                  className="border rounded-lg px-3 py-2 text-sm w-24 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="soft-input px-3 py-2 text-sm w-24"
                   value={claimNumber}
                   onChange={e => setClaimNumber(e.target.value)}
                 />
               </div>
 
               <textarea
-                className="border rounded-lg p-3 text-sm leading-relaxed resize-none h-48 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="soft-input p-3 text-sm leading-relaxed resize-none h-40"
                 placeholder="청구항 전문을 붙여넣으세요."
                 value={claimText}
                 onChange={e => setClaimText(e.target.value)}
@@ -1944,13 +1910,13 @@ export default function App() {
               {generating ? (
                 <div className="flex gap-2">
                   <button
-                    className="flex-1 py-2.5 bg-blue-600 text-white text-sm font-medium rounded-lg opacity-60 cursor-not-allowed"
+                    className="primary-button flex-1 opacity-60 cursor-not-allowed"
                     disabled
                   >
                     보고서 작성 중…
                   </button>
                   <button
-                    className="px-4 py-2.5 bg-red-600 text-white text-sm font-medium rounded-lg hover:bg-red-700 transition"
+                    className="danger-button px-4"
                     onClick={handleCancelGenerate}
                   >
                     취소
@@ -1958,7 +1924,7 @@ export default function App() {
                 </div>
               ) : (
                 <button
-                  className="w-full py-2.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition"
+                  className="primary-button w-full disabled:opacity-40 disabled:cursor-not-allowed"
                   disabled={!priorReady || !claimText.trim()}
                   onClick={handleGenerate}
                 >
@@ -1972,15 +1938,15 @@ export default function App() {
                 </div>
               )}
             </div>
-          </div>
-        </div>
+          </section>
+        </aside>
 
         {/* 우측: 보고서 */}
         <main className="flex-1 overflow-hidden">
-          <div className="bg-white rounded-xl border border-gray-200 shadow-sm flex flex-col h-full">
+          <div className="report-canvas flex flex-col h-full">
             {/* 청구항 전환 탭 — 복수 청구항 생성 시만 표시 */}
             {tabKeys.length > 1 && (
-              <div className="px-5 py-2 flex items-center gap-2 border-b bg-slate-50">
+              <div className="px-7 pt-5 flex items-center gap-2">
                 <span className="text-xs text-slate-500 font-medium shrink-0">청구항</span>
                 {tabKeys.map(num => (
                   <button
@@ -1993,10 +1959,10 @@ export default function App() {
                       if (num === RELATED_A_TAB_KEY) setShowMissingPriorArt(false)
                     }}
                     className={[
-                      'text-xs px-3 py-1 rounded-full border transition-colors font-medium',
+                      'text-xs px-3 py-1.5 rounded-full transition-colors font-semibold',
                       activeClaimNumView === (num === RELATED_A_TAB_KEY ? RELATED_A_TAB_KEY : Number(num))
-                        ? 'bg-blue-600 text-white border-blue-600'
-                        : 'text-slate-600 border-slate-300 hover:bg-slate-100',
+                        ? 'bg-slate-950 text-white'
+                        : 'text-slate-500 hover:bg-slate-100',
                     ].join(' ')}
                   >
                     {num === RELATED_A_TAB_KEY ? RELATED_A_TAB_LABEL : `청구항 ${num}`}
@@ -2004,32 +1970,42 @@ export default function App() {
                 ))}
               </div>
             )}
-            <div className="flex-1 overflow-y-auto px-6 py-4 relative">
+            <div className="report-scroll flex-1 overflow-y-auto relative">
               {generating && !report ? (
                 <div className="flex items-center gap-3 text-blue-500 text-sm">
                   <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
                   인용발명과 청구항을 순차 대비하고 있습니다.
                 </div>
-              ) : !isRelatedATabActive && showMissingPriorArt && missingPriorArt ? (
+              ) : !isRelatedATabActive
+                && showMissingPriorArt
+                && missingPriorArt
+                && Number(missingPriorArt.claim_number) === Number(activeClaimForActions) ? (
                 <MissingPriorArtResultPage
                   result={missingPriorArt}
                   onBack={() => setShowMissingPriorArt(false)}
                 />
               ) : report ? (
-                <>
+                <article className="report-document">
+                  <header className="report-document-header">
+                    <div>
+                      <span className="report-overline">COMPARISON REPORT</span>
+                      <h1>{isRelatedATabActive ? RELATED_A_TAB_LABEL : `청구항 ${activeClaimForActions}`}</h1>
+                    </div>
+                    <span className="report-edition">ARIA</span>
+                  </header>
                   {!isRelatedATabActive && usedInventions.length > 0 && (
-                    <section className="mb-4 flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                      <p className="text-sm font-bold tracking-tight text-slate-900 shrink-0">인용발명</p>
+                    <section className="report-citations">
+                      <p className="report-citations-label">인용발명</p>
                       <div className="flex min-w-0 flex-1 flex-wrap gap-1.5">
                         {citationBasisLabel && (
-                          <span className="inline-flex items-center rounded-md border border-blue-200 bg-blue-50 px-2 py-1 text-xs font-extrabold text-blue-900">
+                          <span className="citation-basis">
                             {citationBasisLabel}
                           </span>
                         )}
                         {usedInventions.map((inv, i) => (
                           <span
                             key={i}
-                            className="inline-flex min-w-0 items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs"
+                            className="citation-item"
                           >
                             <span className="font-bold text-slate-800 shrink-0">{inv.name}</span>
                             <span className="text-slate-300">:</span>
@@ -2064,10 +2040,12 @@ export default function App() {
                       </ReactMarkdown>
                     </div>
                   )}
-                </>
+                </article>
               ) : (
-                <div className="h-full flex items-center justify-center text-gray-400 text-sm">
-                  청구항을 입력하고 보고서를 생성하세요.
+                <div className="empty-report h-full flex flex-col justify-end">
+                  <span className="empty-kicker">Patent intelligence, distilled.</span>
+                  <h2>복잡한 대비를<br />명료한 판단으로.</h2>
+                  <p>인용발명과 청구항을 준비하면<br />분석 결과가 이곳에 정리됩니다.</p>
                 </div>
               )}
             </div>
@@ -2076,8 +2054,8 @@ export default function App() {
 
       </div>
 
-      <footer className="shrink-0 border-t bg-white px-6 py-2 flex justify-end">
-        <span className="text-xs text-gray-400">All rights reserved AIdan</span>
+      <footer className="shrink-0 px-7 pb-3 flex justify-end">
+        <span className="text-[9px] tracking-[0.12em] text-slate-300">All rights reserved by AIdan.</span>
       </footer>
 
       {/* 모달/패널 */}

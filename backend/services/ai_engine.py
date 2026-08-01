@@ -18,8 +18,6 @@ import time
 from typing import AsyncGenerator
 
 from backend.models.schemas import Settings
-from backend.paths import UPLOADS_DIR
-
 logger = logging.getLogger(__name__)
 
 _active_procs: set[subprocess.Popen] = set()
@@ -29,14 +27,17 @@ _CLI_TIMEOUT_SECONDS = 3600
 _DEFAULT_MODEL = {
     "claude": "claude-haiku-4-5-20251001",
     "openai": "gpt-5.4-mini",
-    "agy": "Gemini 3.5 Flash (Medium)",
-    "gemini": "Gemini 3.5 Flash (Medium)",
+    "agy": "Gemini 3.6 Flash (High)",
+    "gemini": "Gemini 3.6 Flash (High)",
 }
 
 _AGY_MODEL_ALIASES = {
-    "gemini-3.5-flash": "Gemini 3.5 Flash (Medium)",
-    "gemini-3.1-flash-lite": "Gemini 3.5 Flash (Low)",
-    "gemini-3.1-pro-preview": "Gemini 3.1 Pro (Low)",
+    "gemini-3.6-flash-high": "Gemini 3.6 Flash (High)",
+    "gemini-3.6-flash-medium": "Gemini 3.6 Flash (Medium)",
+    "gemini-3.6-flash-low": "Gemini 3.6 Flash (Low)",
+    "gemini-3.6-flash": "Gemini 3.6 Flash (High)",
+    "gemini-3.5-flash": "Gemini 3.6 Flash (High)",
+    "gemini-3.1-flash-lite": "Gemini 3.6 Flash (Low)",
 }
 
 _BENIGN_STDERR_PATTERNS = (
@@ -47,7 +48,7 @@ _BENIGN_STDERR_PATTERNS = (
 )
 
 _AGY_ARG_PROMPT_LIMIT = 12_000
-_AGY_PROMPT_DIR = UPLOADS_DIR / "_agy_prompts"
+_AGY_PROMPT_DIR = Path(tempfile.gettempdir()) / "aria2_agy_prompts"
 _AGY_TRANSCRIPT_MAX_AGE_SECONDS = 180
 _AGY_TRANSCRIPT_FLUSH_WAIT_SECONDS = 2.0
 _AGY_TRUNCATED_RE = re.compile(r"<truncated\s+\d+\s+bytes>")
@@ -98,8 +99,6 @@ def _resolve_model(settings: Settings, agent: str) -> str:
             selected.lower().startswith("claude") or selected.lower().startswith("gemini")
         ):
             return _DEFAULT_MODEL["openai"]
-        if engine == "agy" and selected.lower().startswith("claude"):
-            return _DEFAULT_MODEL["agy"]
         if engine == "agy":
             return _AGY_MODEL_ALIASES.get(selected.lower(), selected)
         return selected
@@ -1325,13 +1324,14 @@ def get_engine_status(settings: Settings) -> dict:
     account_email = find_cli_account_email(engine) if cli_available else ""
 
     if cli_available:
-        probe = _probe_cli_ready(engine, _resolve_model(settings, "parser"))
         return {
-            **probe,
+            "status": "cli_ready",
+            "label": "CLI 호출 가능",
             "installed": True,
             "account_email": account_email,
-            "account_label": account_email or "연결 계정 확인 불가",
+            "account_label": account_email or "연결 계정 확인 가능",
             "checked_model": _resolve_model(settings, "parser"),
+            "detail": "",
         }
 
     return {

@@ -5,7 +5,7 @@ function parseErrorMessage(text, fallback) {
   try {
     const data = JSON.parse(text)
     return data.detail || data.message || text
-  } catch (_) {
+  } catch {
     return text
   }
 }

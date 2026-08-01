@@ -16,6 +16,7 @@
 - v8: 조건 기반 선택식 구성은 상위개념·복수대안·선택구조 중심으로 검색/주인용 선정
 - v9: 범용 골격의 넓은 커버리지보다 차별적 핵심 구성·효과의 직접 개시를
       주인용 선정의 우선 기준으로 사용하고, 잔여 핵심 제한만 보조문헌으로 보완
+- v10: 보고서 문헌명 재매핑·중복 발췌·복수 문헌의 단일문헌 신규성 오판을 수정
 """
 from __future__ import annotations
 import json
@@ -33,7 +34,7 @@ logger = logging.getLogger(__name__)
 MAX_INDEPENDENT_REFS = 2   # 독립항에 사용할 최대 인용발명 수
 MAX_INDEPENDENT_REFS_WITH_CONVENTIONAL_SUPPORT = 3
 MAX_DEPTH_INCREMENT = 1    # 종속항 1단계당 추가 허용 인용발명 수
-CITATION_CHAIN_POLICY_VERSION = 21
+CITATION_CHAIN_POLICY_VERSION = 27
 
 # 패밀리별 주인용발명 선정에서 종속항 커버리지는 독립항 적합도를 뒤집는
 # 주점수가 아니라, 독립항 점수가 근접한 후보들 사이의 타이브레이커로만 쓴다.
@@ -213,6 +214,7 @@ _CONVENTIONAL_COMPONENT_RE = re.compile(
     r"\bstorage\b|\binterface\b|\btransceiver\b|\bdisplay\b|\bbattery\b|"
     r"\bwheel\b|\bmotor\b|\bsensor\b|\bhousing\b|\bframe\b|\bserver\b|"
     r"중앙\s*처리\s*장치|프로세서|마이크로프로세서|마이크로컨트롤러|제어부|제어기|"
+    r"제어\s*유닛|볼륨\s*제어\s*유닛|"
     r"컨트롤러|메모리|저장부|통신부|송수신부|인터페이스|입력부|출력부|표시부|"
     r"디스플레이|전원부|배터리|바퀴|휠|모터|센서|하우징|프레임|서버|단말"
     r")",
@@ -224,6 +226,16 @@ _SPECIALIZED_CONSTRAINT_RE = re.compile(
     r"상호\s*작용|연동|based\s+on|in\s+response\s+to|feedback|global|local|"
     r"adaptive|threshold|synchron|encrypt|decrypt|calibrat|\bharmonic\b|\bdistortion\b|"
     r"non[- ]?linear|\btransistor\b|\bload\b|\brelative\b|\bratio\b|\benergy\b)",
+    re.IGNORECASE,
+)
+_TECHNICAL_RELATION_RE = re.compile(
+    r"(?:동작\s*주파수|작동\s*주파수|운용\s*주파수|주파수.*(?:조정|조절|변경)|"
+    r"(?:조정|조절|변경).*주파수|파라미터.*(?:되도록|하도록)|"
+    r"(?:통해|따라|기초하여|기반하여|대응하여).*(?:조정|조절|변경|생성|제어)|"
+    r"(?:조정|조절|변경|생성|제어).*(?:통해|따라|기초하여|기반하여|대응하여)|"
+    r"operat(?:ing|ion)\s+frequency|frequency.*(?:adjust|vary|control)|"
+    r"(?:adjust|vary|control).*(?:frequency|parameter)|"
+    r"(?:based\s+on|according\s+to|in\s+response\s+to).*(?:adjust|vary|control))",
     re.IGNORECASE,
 )
 _GENERIC_INTERFACE_RE = re.compile(
@@ -282,7 +294,22 @@ def _is_distinctive_technical_element(element) -> bool:
     return bool(
         len(text) > 100
         or _SPECIALIZED_CONSTRAINT_RE.search(text)
+        or _TECHNICAL_RELATION_RE.search(text)
         or _is_conditioned_selection_element(text)
+    )
+
+
+def _is_simple_conventional_component(element) -> bool:
+    """Cap a bare component recital even when positional parsing assigned 5."""
+    text = " ".join((element.text or "").split())
+    return bool(
+        text
+        and len(text) <= 80
+        and _CONVENTIONAL_COMPONENT_RE.search(text)
+        and not _SPECIALIZED_CONSTRAINT_RE.search(text)
+        and not _TECHNICAL_RELATION_RE.search(text)
+        and len(_FUNCTIONAL_VERB_RE.findall(text)) <= 1
+        and not bool(element.is_sub)
     )
 
 
@@ -492,6 +519,21 @@ def _score_prior_cache(
     critical_gap_weight = sum(
         r["importance"] for r in distinctive_rows if r["similarity"] < 0.35
     ) / distinctive_weight
+    direct_disclosure_breadth = (
+        sum(1 for r in rows if _direct_evidence_similarity(r) >= 0.55) / len(rows)
+    )
+    # 기술분야 적합성은 별도 LLM 호출 없이, 핵심 관계를 둘러싼 나머지 구성의
+    # 직접 개시율을 대용 지표로 사용한다. 핵심 점수가 모두 낮을 때 B/C와 같은
+    # 기반 구성을 많이 직접 개시한 문헌이 주 문헌 동률을 우선 해소한다.
+    contextual_rows = [r for r in rows if r not in distinctive_rows] or rows
+    contextual_direct_count = sum(
+        1 for r in contextual_rows if _direct_evidence_similarity(r) >= 0.55
+    )
+    field_alignment_coverage = (
+        sum(_direct_evidence_similarity(r) for r in contextual_rows) / len(contextual_rows)
+        if contextual_direct_count >= 2
+        else 0.0
+    )
     main_score = max(
         0.0,
         0.40 * distinctive_direct_coverage
@@ -512,6 +554,8 @@ def _score_prior_cache(
         "raw_core_coverage": round(raw_core_coverage, 4),
         "distinctive_direct_coverage": round(distinctive_direct_coverage, 4),
         "distinctive_strong_breadth": round(distinctive_strong_breadth, 4),
+        "direct_disclosure_breadth": round(direct_disclosure_breadth, 4),
+        "field_alignment_coverage": round(field_alignment_coverage, 4),
         "distinctive_core_labels": [r["label"] for r in distinctive_rows],
         "generic_breadth_is_tiebreak_only": True,
         "formula": (
@@ -1280,14 +1324,13 @@ def _claim_similarity(
     가중치는 구성요소 importance(5/3/2)를 사용해 핵심 구성이 점수를 지배하게 한다.
     결합 유사도는 구성요소별 max(주, 보조) 퍼센트로 집계한다.
     """
+    selected_caches = [primary_cache, secondary_cache, *(additional_caches or [])]
     p_pcts = _element_percents(primary_cache, claim)
-    supporting_percent_maps = [_element_percents(secondary_cache, claim)]
-    supporting_percent_maps.extend(
-        _element_percents(cache, claim) for cache in (additional_caches or [])
-    )
+    supporting_percent_maps = [_element_percents(cache, claim) for cache in selected_caches[1:]]
 
     p_num = c_num = den = 0.0
     uncovered: List[str] = []
+    residual: List[str] = []
     for e in claim.elements:
         imp = int(e.importance) if str(e.importance).isdigit() else 3
         label = normalize_label(e.label)
@@ -1296,15 +1339,38 @@ def _claim_similarity(
         p_num += imp * p
         c_num += imp * c
         den += imp * 100
+        # 유사도 점수는 문헌쌍의 순위를 정하는 보조값일 뿐, 청구항 한정의
+        # 완전 보완 여부를 대신할 수 없다. 특히 `일부 차이`는 발췌가 있어도
+        # missing_limitations가 남아 있는 판정이므로 결합 후 잔여 구성으로
+        # 보존한다. 선택 문헌 중 하나가 해당 구성을 `실질적 동일` 이상으로
+        # 직접·완전하게 개시한 경우에만 보완 완료로 본다.
+        fully_covered = False
+        for cache in selected_caches:
+            item = _cache_item(cache, str(claim.claim_number), label)
+            if not item:
+                continue
+            judgment_rank = _JUDGMENT_SCORE.get(item.get("judgment", "대응 없음"), 0)
+            missing = [value for value in (item.get("missing_limitations") or []) if str(value).strip()]
+            if judgment_rank >= _SECONDARY_IMPROVE_THRESHOLD and not missing:
+                fully_covered = True
+                break
+        if not fully_covered:
+            residual.append(e.label)
         if c <= UNCOVERED_PERCENT_THRESHOLD:
             uncovered.append(e.label)
 
     if den == 0:
-        return {"primary_similarity": 0.0, "combined_similarity": 0.0, "uncovered_labels": uncovered}
+        return {
+            "primary_similarity": 0.0,
+            "combined_similarity": 0.0,
+            "uncovered_labels": uncovered,
+            "residual_labels": residual,
+        }
     return {
         "primary_similarity": round(p_num / den * 100, 1),
         "combined_similarity": round(c_num / den * 100, 1),
         "uncovered_labels": uncovered,
+        "residual_labels": residual,
     }
 
 
@@ -1556,10 +1622,14 @@ def _select_family_reference_pair(
             original_importance = _importance_value(element.importance)
 
             is_generic_interface = _is_generic_interface_element(element)
+            is_simple_component = _is_simple_conventional_component(element)
             is_distinctive = _is_distinctive_technical_element(element)
             if is_generic_interface:
                 adjusted = min(2.0, max(1.0, original_importance * 0.5))
                 weight_reason = "short_generic_interface_cap"
+            elif is_simple_component:
+                adjusted = min(2.0, max(1.0, original_importance * 0.4))
+                weight_reason = "bare_conventional_component_cap"
             elif is_distinctive:
                 adjusted = max(4.0, float(original_importance))
                 if match_count > 0 and match_ratio <= 0.50:
@@ -1604,6 +1674,7 @@ def _select_family_reference_pair(
             for (claim_key, label), frequency in disclosure_frequency.items()
             if claim_key == root_key
         }
+        detail["match_count"] = _count
         primary_scores[doc_idx] = score
         primary_details[doc_idx] = detail
         reuse_scores[doc_idx] = _dependent_reuse_score(caches.get(doc_idx), dependent_claims)
@@ -1645,15 +1716,10 @@ def _select_family_reference_pair(
         ),
         default=0.0,
     )
-    near_primary_pool = [
-        doc_idx for doc_idx, score in primary_scores.items()
-        if score >= best_primary_score - PRIMARY_NEAR_TIE_MARGIN
-        or (
-            best_distinctive_direct > 0
-            and float(primary_details.get(doc_idx, {}).get("distinctive_direct_coverage", 0.0))
-            >= best_distinctive_direct - DISTINCTIVE_CORE_NEAR_TIE_MARGIN
-        )
-    ] or ([0] if num_docs else [])
+    # 후보 수와 무관하게 모든 문헌을 주문헌 출발점으로 평가한다. 공개일은
+    # 법적 적격성 판단이나 후보 제외에 사용하지 않으며, 각 ordered pair의
+    # 원문 발췌·위치·누락 제한에 따른 커버리지와 추론 부담만 비교한다.
+    near_primary_pool = list(range(num_docs))
 
     pair_candidates: List[Dict] = []
     for primary_idx in near_primary_pool:
@@ -1718,6 +1784,7 @@ def _select_family_reference_pair(
         secondary_cache = caches.get(best_secondary) if best_secondary is not None else None
         similarity = _claim_similarity(primary_cache, secondary_cache, root)
         uncovered = set(similarity.get("uncovered_labels") or [])
+        residual = set(similarity.get("residual_labels") or uncovered)
         distinctive_weight_by_label = {
             label: weight
             for (claim_key, label), weight in dynamic_weights.items()
@@ -1727,28 +1794,48 @@ def _select_family_reference_pair(
             label for label in uncovered
             if distinctive_weight_by_label.get(normalize_label(label), 3) >= _CORE_IMPORTANCE_THRESHOLD
         }
+        critical_residual = {
+            label for label in residual
+            if distinctive_weight_by_label.get(normalize_label(label), 3) >= _CORE_IMPORTANCE_THRESHOLD
+        }
         primary_reuse_tiebreak = min(
             DEPENDENT_REUSE_TIEBREAK_MAX,
             reuse_scores.get(primary_idx, 0.0) * DEPENDENT_REUSE_TIEBREAK_MAX,
         )
         primary_detail = primary_details.get(primary_idx, {})
+        has_substantive_secondary = 1 if (
+            best_secondary is not None
+            and (
+                best_secondary_detail.get("hard_fill_count", 0) > 0
+                or best_secondary_detail.get("secondary_reason") == "hard"
+            )
+        ) else 0
         pair_rank = (
             -len(critical_uncovered),
+            -len(uncovered),
+            (
+                float(primary_detail.get("field_alignment_coverage", 0.0))
+                if best_distinctive_direct < 0.35
+                else 0.0
+            ),
+            float(similarity.get("combined_similarity", 0.0)),
             float(primary_detail.get("distinctive_direct_coverage", 0.0)),
             float(primary_detail.get("core_coverage", 0.0)),
+            has_substantive_secondary,
             float(primary_detail.get("distinctive_strong_breadth", 0.0)),
             float(primary_detail.get("element_coverage", 0.0)),
-            -len(uncovered),
-            float(similarity.get("combined_similarity", 0.0)),
+            # 핵심 지표가 비슷한 경우에만 전체 기술 흐름·직접 개시 폭으로
+            # 동률을 해소한다. 이 지표가 명확한 핵심 직접개시를 앞설 수는 없다.
+            float(primary_detail.get("direct_disclosure_breadth", 0.0)),
             primary_scores.get(primary_idx, 0.0) + primary_reuse_tiebreak,
             best_secondary_score,
             -primary_idx,
         )
         secondary_reason = best_secondary_detail.get("secondary_reason") if best_secondary is not None else None
         combination_validity = {
-            "coverage_complete": not uncovered,
-            "critical_uncovered_labels": sorted(critical_uncovered),
-            "remaining_uncovered_labels": sorted(uncovered),
+            "coverage_complete": not residual,
+            "critical_uncovered_labels": sorted(critical_residual),
+            "remaining_uncovered_labels": sorted(residual),
             "explicit_contrary_teaching": bool(rejected_pair_risks),
             "rejected_pair_risks": rejected_pair_risks,
             "motivation_and_compatibility_status": (
@@ -2109,6 +2196,13 @@ def build_citation_chain_from_comparisons(
                 root_claim,
                 additional_caches=locked_supporting[1:],
             )
+            locked_residual = locked_similarity.get("residual_labels", [])
+            locked_critical = [
+                element.label
+                for element in root_claim.elements
+                if element.label in locked_residual
+                and _importance_value(element.importance) >= _CORE_IMPORTANCE_THRESHOLD
+            ]
             selection.update({
                 "primary_idx": family_primary,
                 "secondary_idx": family_secondary,
@@ -2119,9 +2213,9 @@ def build_citation_chain_from_comparisons(
                 ),
                 "proposed_recalculation": proposed,
                 "combination_validity": {
-                    "coverage_complete": not locked_similarity.get("uncovered_labels"),
-                    "critical_uncovered_labels": [],
-                    "remaining_uncovered_labels": locked_similarity.get("uncovered_labels", []),
+                    "coverage_complete": not locked_residual,
+                    "critical_uncovered_labels": locked_critical,
+                    "remaining_uncovered_labels": locked_residual,
                     "motivation_and_compatibility_status": "locked_report_chain",
                     "rule": "확정된 독립항 문헌 체인과 번호를 종속항에서 변경하지 않음",
                 },

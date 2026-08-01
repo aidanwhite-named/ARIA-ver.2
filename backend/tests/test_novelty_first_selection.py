@@ -6,7 +6,14 @@ from pathlib import Path
 import tempfile
 from unittest.mock import AsyncMock, patch
 
-from backend.models.schemas import ClaimElement, ElementMatch, ExtractedDocument, ParsedClaim, Settings
+from backend.models.schemas import (
+    ClaimElement,
+    ElementMatch,
+    ExtractedDocument,
+    ParsedClaim,
+    PatentChunk,
+    Settings,
+)
 from backend.routers.analyze import _used_inventions_for
 from backend.services.citation_chain import (
     _claim_similarity,
@@ -19,6 +26,7 @@ from backend.services.citation_extractor import (
 )
 from backend.services.report_generator import (
     _build_system,
+    _deterministic_match_block,
     _generate_rejection_impossible_report,
     _make_phase1_prompt,
     enforce_phase1_judgment_headers,
@@ -194,6 +202,96 @@ def test_distinctive_core_direct_disclosure_selects_primary_before_generic_bread
     assert detail["generic_breadth_is_tiebreak_only"] is True
 
 
+def test_frequency_to_volume_relation_becomes_core_and_bare_unit_is_capped() -> None:
+    claim = ParsedClaim(
+        claim_number=17,
+        claim_type="independent",
+        text="동작 주파수 조절로 볼륨을 조절하는 공기 펄스 제어기",
+        elements=[
+            ClaimElement(label="A", text="볼륨 제어 유닛을 포함", importance="5"),
+            ClaimElement(label="B", text="사운드 생성 모듈은 공기 펄스 생성 디바이스를 포함", importance="3"),
+            ClaimElement(label="C", text="초음파 펄스 레이트로 복수의 공기 펄스를 생성하여 사운드를 생성", importance="3"),
+            ClaimElement(label="D", text="동작 주파수가 조절되도록 파라미터를 조절", importance="2"),
+            ClaimElement(label="E", text="동작 주파수를 조절하는 것을 통해 사운드 볼륨을 조절", importance="2"),
+        ],
+    )
+    caches = [
+        {"17": [
+            _item("A", "대응 없음", "", directness="absent"),
+            _item("B", "대응 없음", "", directness="absent"),
+            _item("C", "일부 유사", "ultrasonic locating pulses", directness="inferred"),
+            _item("D", "대응 없음", "", directness="absent"),
+            _item("E", "대응 없음", "", directness="absent"),
+        ]},
+        {"17": [
+            _item("A", "일부 유사", "volume is controlled by signal amplitude", directness="inferred"),
+            _item("B", "동일", "air-pulse sound producing device"),
+            _item("C", "동일", "air pulses above the audible frequency"),
+            _item("D", "차이", "amplitude parameter controls volume", directness="inferred"),
+            _item("E", "차이", "sound volume changes with amplitude", directness="inferred"),
+        ]},
+    ]
+    docs = [ExtractedDocument(filename="vehicle-location.pdf"), ExtractedDocument(filename="air-pulse-audio.pdf")]
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        for idx, cache in enumerate(caches):
+            (Path(temp_dir) / f"comparisons_{idx}.json").write_text(
+                json.dumps(cache, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        result = build_citation_chain_from_comparisons(temp_dir, [claim], docs)
+
+    family = result["families"]["17"]
+    assert family["primary_idx"] == 1
+    detail = family["primary_score_details"]["1"]
+    assert detail["dynamic_weight_by_label"]["A"] == 2.0
+    assert detail["dynamic_weight_reason_by_label"]["A"] == "bare_conventional_component_cap"
+    assert set(detail["distinctive_core_labels"]) == {"D", "E"}
+    assert detail["field_alignment_coverage"] > 0
+
+
+def test_deterministic_report_prints_separated_evidence_as_multiple_one_line_quotes() -> None:
+    claim = ParsedClaim(
+        claim_number=1,
+        claim_type="independent",
+        text="분산 근거를 갖는 구성",
+        elements=[ClaimElement(label="A", text="입력과 출력의 관계")],
+    )
+    match = ElementMatch(
+        label="A",
+        found=True,
+        quote="first passage",
+        quote_translation="첫 번째 문장",
+        chunk_id="D1-P-0010",
+        judgment="일부 차이",
+        evidence=[
+            {"limitation": "입력", "quote": "first passage", "quote_translation": "첫 번째 문장", "chunk_id": "D1-P-0010"},
+            {"limitation": "출력", "quote": "second separated passage", "quote_translation": "떨어진 두 번째 문장", "chunk_id": "D1-P-0020"},
+        ],
+    )
+
+    report = _deterministic_match_block(
+        claim,
+        match,
+        [ExtractedDocument(filename="doc.pdf")],
+        {"doc_name_mapping": {"0": "인용발명 1"}},
+    )
+
+    assert (
+        '인용발명 1 (doc.pdf)에는 "첫 번째 문장" (단락 [0010])'
+        '("first passage")는 구성이 '
+        "기재되어 있으며"
+    ) in report
+    assert (
+        '추가 근거: 인용발명 1 (doc.pdf)에는 "떨어진 두 번째 문장" '
+        '(단락 [0020])("second separated passage")는 구성이 기재되어 있으며, '
+        "구조화된 구성대비 판정에 따름."
+    ) in report
+    assert "번역:" not in report
+    assert "발췌:" not in report
+    assert "단락 [0020]" in report
+
+
 def test_compound_harmonic_claim_prefers_pass_h2_over_generic_interface_matches() -> None:
     claim = ParsedClaim(
         claim_number=14,
@@ -291,6 +389,112 @@ def test_compound_text_overlap_triggers_single_document_precision_review() -> No
     assert candidates == [(0, [elements[1], elements[2]])]
 
 
+def test_consecutive_coordinate_paragraphs_retry_a_weak_existing_match() -> None:
+    element = ClaimElement(
+        label="B",
+        text=(
+            "음향 위치 정보를 카메라의 구동 제어를 위한 제어 좌표 정보로 "
+            "변환하면서 설치 환경에 따른 오차를 보정하는 좌표 보정부"
+        ),
+        importance="5",
+    )
+    doc = ExtractedDocument(
+        filename="US20240098406A1.pdf",
+        paragraph_chunks=[
+            PatentChunk(
+                chunk_id="D1-P-0044",
+                original_text=(
+                    "The computing device establishes the coordinate axis "
+                    "transformation relationship between the microphone array and the camera."
+                ),
+            ),
+            PatentChunk(
+                chunk_id="D1-P-0045",
+                original_text=(
+                    "The computing device converts the sound source coordinate to the "
+                    "coordinate system of the camera to obtain the target coordinate."
+                ),
+            ),
+            PatentChunk(
+                chunk_id="D1-P-0046",
+                original_text=(
+                    "The computing device adds the compensation control parameter to "
+                    "obtain the required pan angle for the camera."
+                ),
+            ),
+        ],
+    )
+    weak_result = _item(
+        "B",
+        "차이",
+        "calculating required control parameters according to the target coordinate",
+        directness="inferred",
+    )
+    weak_result["missing_limitations"] = ["설치 환경에 따른 오차를 보정하는 좌표 보정부"]
+
+    candidates = _false_negative_review_candidates(
+        [element],
+        [doc],
+        [[weak_result]],
+    )
+
+    assert candidates == [(0, [element])]
+
+
+def test_3d_cad_function_chain_triggers_precision_review() -> None:
+    elements = [
+        ClaimElement(
+            label="B",
+            text=(
+                "사용자 입력에서 3D 정보 획득이 필요한 경우 이미지 모듈을 통해 "
+                "사용자 입력에 대한 3D 정보를 추출"
+            ),
+            importance="3",
+        ),
+        ClaimElement(
+            label="C",
+            text=(
+                "사용자 입력 및 3D 정보를 종합하여 3D 모델 생성을 위한 "
+                "구조화된 명령어를 생성"
+            ),
+            importance="3",
+        ),
+    ]
+    doc = ExtractedDocument(
+        filename="US20240394445A1.pdf",
+        paragraph_chunks=[
+            PatentChunk(
+                chunk_id="D1-P-0123",
+                original_text=(
+                    "Textual inputs, image inputs and 3D CAD data inputs are each "
+                    "processed and converted into a respective vector."
+                ),
+            ),
+            PatentChunk(
+                chunk_id="D1-P-0124",
+                original_text=(
+                    "The input module can fuse the separate vectors into a single fused vector."
+                ),
+            ),
+            PatentChunk(
+                chunk_id="D1-P-0125",
+                original_text=(
+                    "The fused input is converted into a specification representing a "
+                    "working plan including technical instructions."
+                ),
+            ),
+        ],
+    )
+    no_matches = [[
+        _item("B", "대응 없음", "", directness="absent"),
+        _item("C", "대응 없음", "", directness="absent"),
+    ]]
+
+    candidates = _false_negative_review_candidates(elements, [doc], no_matches)
+
+    assert candidates == [(0, elements)]
+
+
 def test_not_evaluated_generic_rows_do_not_create_false_rarity_weight() -> None:
     claim = ParsedClaim(
         claim_number=1,
@@ -356,6 +560,44 @@ def test_partial_similarity_boundary_is_not_complete_combination_coverage() -> N
 
     assert result["uncovered_labels"] == ["B"]
     assert result["combined_similarity"] <= 35.0
+
+
+def test_partial_difference_remains_a_residual_even_when_similarity_score_is_covered() -> None:
+    claim = ParsedClaim(
+        claim_number=1,
+        claim_type="independent",
+        text="목표값에 따라 두 진폭을 결정하는 제어기",
+        elements=[
+            ClaimElement(
+                label="A",
+                text="목표값에 따라 제1 진폭 및 제2 진폭을 결정",
+                importance="5",
+            )
+        ],
+    )
+    primary = {
+        "1": [_item(
+            "A",
+            "일부 차이",
+            "the output is controlled by a first amplitude",
+            directness="inferred",
+            missing=["목표값에 따른 제2 진폭 결정"],
+        )]
+    }
+    secondary = {
+        "1": [_item(
+            "A",
+            "일부 차이",
+            "first and second driving amplitudes are applied",
+            directness="inferred",
+            missing=["목표값과 두 진폭의 결정 관계"],
+        )]
+    }
+
+    result = _claim_similarity(primary, secondary, claim)
+
+    assert result["uncovered_labels"] == []
+    assert result["residual_labels"] == ["A"]
 
 
 def test_supporting_evidence_pair_cannot_conflict_with_complete_coverage() -> None:
@@ -488,8 +730,8 @@ def test_rejection_impossible_prompt_uses_locked_global_reference_name() -> None
 
     with patch(
         "backend.services.report_generator.call_ai",
-        new=AsyncMock(return_value="ok"),
-    ) as mocked_call:
+        side_effect=AssertionError("report LLM must not be called"),
+    ):
         result = asyncio.run(
             _generate_rejection_impossible_report(
                 claim,
@@ -500,13 +742,11 @@ def test_rejection_impossible_prompt_uses_locked_global_reference_name() -> None
             )
         )
 
-    prompt, system = mocked_call.await_args.args[:2]
-    assert result == "ok"
-    assert "허용 문헌: 인용발명 2" in prompt
-    assert "(인용발명 2)" in prompt
-    assert "인용발명 1" not in prompt
-    assert "인용발명 1" not in system
-    assert find_unselected_reference_mentions(prompt, chain) == []
+    assert "[종합 분석 요약]" in result
+    assert "인용발명 1" not in result
+    assert "인용발명 2" in result
+    assert "신규성 부정 근거를 구성하기 어려움" in result
+    assert find_unselected_reference_mentions(result, chain) == []
 
 
 def test_used_invention_card_contains_canonical_combination_basis() -> None:

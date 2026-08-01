@@ -37,7 +37,7 @@ export default function ProgressPanel({ logs, generating }) {
   if (logs.length === 0) return null
 
   return (
-    <div ref={logRef} className="w-full shrink-0 border border-gray-200 rounded bg-gray-900 text-gray-100 text-xs font-mono p-3 overflow-y-auto max-h-44 relative">
+    <div ref={logRef} className="progress-console w-full shrink-0 text-gray-100 text-xs font-mono px-5 py-3 overflow-y-auto max-h-36 relative">
       <div className="flex items-center justify-between mb-2 select-none">
         <p className="text-gray-500">진행 로그</p>
         {(generating || elapsed > 0) && (

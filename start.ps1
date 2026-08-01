@@ -1,4 +1,4 @@
-# ARIA ver.2 - Start Backend + Frontend
+# ARIA - Start Backend + Frontend
 # Usage: .\start.ps1
 
 $ErrorActionPreference = "Stop"
@@ -13,7 +13,7 @@ $env:PYTHONIOENCODING = "utf-8"
 
 Set-Location $root
 
-Write-Host "=== ARIA ver.2 Patent Report Generator ===" -ForegroundColor Cyan
+Write-Host "=== ARIA Patent Report Generator ===" -ForegroundColor Cyan
 Write-Host "  ARIA ports : backend $backendPort / frontend $frontendPort" -ForegroundColor DarkGray
 
 # Kill any process already using the required ports
@@ -36,7 +36,7 @@ python -m pip install -r backend/requirements.txt --quiet
 
 Write-Host "[2/3] Starting FastAPI backend (port $backendPort)..." -ForegroundColor Yellow
 $backend = Start-Process -FilePath "python" `
-    -ArgumentList "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "$backendPort", "--reload" `
+    -ArgumentList "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "$backendPort", "--reload", "--reload-dir", "backend" `
     -WorkingDirectory $root `
     -PassThru -WindowStyle Minimized
 Write-Host "  Backend PID: $($backend.Id)" -ForegroundColor Green
