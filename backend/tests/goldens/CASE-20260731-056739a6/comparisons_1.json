@@ -1,0 +1,158 @@
+{
+  "1": [
+    {
+      "label": "A",
+      "found": true,
+      "quote": "insert an input 110 to the system 100. The input 110 can be received by the system 100",
+      "quote_translation": "시스템 100에 입력 110을 삽입한다. 입력 110은 시스템 100에 의해 수신될 수 있다",
+      "chunk_id": "D2-P-0097",
+      "judgment": "일부 차이",
+      "판단_이유": "인용발명 1은 사용자가 새로운 디자인을 위한 요구사항을 포함하는 입력(110)을 수신/획득하는 구성을 직접 명시하고 있으며, 텍스트 설명, 스케치, 2D 이미지, CAD 데이터 등 적어도 하나의 사용자 입력을 획득한다는 구성 (A)와 기술 내용 및 목적이 동일하다.",
+      "purpose_effect_similarity": "동일",
+      "directness": "direct",
+      "missing_limitations": [
+        "없음"
+      ],
+      "evidence": [
+        {
+          "limitation": "사용자 입력 수신 및 획득",
+          "quote": "insert an input 110 to the system 100. The input 110 can be received by the system 100",
+          "quote_translation": "시스템 100에 입력 110을 삽입한다. 입력 110은 시스템 100에 의해 수신될 수 있다",
+          "chunk_id": "D2-P-0097"
+        },
+        {
+          "limitation": "다양한 입력 모달리티 획득",
+          "quote": "Various input modalities can be received, such as textual description, for example free text inserted by a user",
+          "quote_translation": "사용자에 의해 삽입된 자유 텍스트와 같은 텍스트 설명을 포함하여 다양한 입력 모달리티가 수신될 수 있다",
+          "chunk_id": "D2-P-0097"
+        }
+      ],
+      "motivation_quote": "",
+      "combination_risk": "none_explicit",
+      "combination_risk_reason": "특별한 저해사유 없음",
+      "technical_judgment": "동일",
+      "llm_judgment": "동일",
+      "judgment_adjusted": true,
+      "judgment_adjustment_reason": "missing_or_undisclosed_limitation",
+      "evidence_status": "verified",
+      "unverified_quote": "",
+      "not_evaluated": false,
+      "evaluation_status": "evaluated"
+    },
+    {
+      "label": "B",
+      "found": true,
+      "quote": "The vision engine 130 can process the spec 122, analyse existing images",
+      "quote_translation": "비전 엔진 130은 사양 122를 처리하고, 기존 이미지를 분석할 수 있다",
+      "chunk_id": "D2-P-0103",
+      "judgment": "일부 차이",
+      "판단_이유": "인용발명 1은 비전 엔진(130)을 통해 3D 메시(132, 3D 정보)를 생성하는 구성이 개시되어 있으나, 청구항의 '사용자 입력에서 3D 정보 획득이 필요한 경우'라는 조건 판단 및 분기 구성이 부재하며, 비전 엔진(130)이 사용자 입력 자체가 아닌 LLM에서 생성된 spec 122를 수신하여 DB 및 웹의 기존 이미지를 분석하여 3D 메시를 형성하므로 정보 추출 대상과 조건적 연결관계에 차이가 존재한다.",
+      "purpose_effect_similarity": "유사",
+      "directness": "inferred",
+      "missing_limitations": [
+        "사용자 입력에서 3D 정보 획득 필요성을 판단하는 조건적 제어, 사용자 입력 자체로부터 이미지 모듈이 직접 3D 정보를 추출하는 수단 및 연결관계"
+      ],
+      "evidence": [
+        {
+          "limitation": "비전 엔진을 통한 3D 메시 생성",
+          "quote": "The vision engine 130 can process the spec 122, analyse existing images of relevant components stored in images DB 190 or accessible on the web, and generate visual representations",
+          "quote_translation": "비전 엔진 130은 사양 122를 처리하고, 이미지 DB 190에 저장되거나 웹에서 접근 가능한 관련 구성요소의 기존 이미지를 분석하여 시각적 표현을 생성할 수 있다",
+          "chunk_id": "D2-P-0103"
+        },
+        {
+          "limitation": "3D 메시 형성",
+          "quote": "produce high-level 2D and 3D meshes that depict how specific components would look",
+          "quote_translation": "특정 구성요소가 어떻게 보일지 묘사하는 고수준 2D 및 3D 메시를 생성한다",
+          "chunk_id": "D2-P-0103"
+        }
+      ],
+      "motivation_quote": "",
+      "combination_risk": "none_explicit",
+      "combination_risk_reason": "특별한 저해사유 없음",
+      "technical_judgment": "일부 차이",
+      "llm_judgment": "일부 차이",
+      "judgment_adjusted": false,
+      "judgment_adjustment_reason": "",
+      "evidence_status": "verified",
+      "unverified_quote": "",
+      "not_evaluated": false,
+      "evaluation_status": "evaluated"
+    },
+    {
+      "label": "C",
+      "found": true,
+      "quote": "output a spec 122, including a working plan including technical instructions based on the input",
+      "quote_translation": "입력에 기초한 기술적 지시를 포함하는 작업 계획을 포함하는 사양 122를 출력한다",
+      "chunk_id": "D2-P-0098",
+      "judgment": "일부 차이",
+      "판단_이유": "인용발명 1은 LLM(120)을 통해 입력 모달리티들을 처리/융합하여 기술적 지시 및 작업 계획을 포함하는 spec 122(구조화된 명령어에 대응)를 생성하는 구성을 개시한다. 다만 인용발명 1에서는 사용자 입력으로부터 먼저 spec 122가 생성된 후 이를 기반으로 비전 엔진이 3D 메시를 생성하는 순서이므로, '이미지 모듈에서 추출된 3D 정보'와 '사용자 입력'을 종합하여 구조화된 명령어를 생성하는 순서 및 입력 결합관계에 차이가 존재한다.",
+      "purpose_effect_similarity": "유사",
+      "directness": "inferred",
+      "missing_limitations": [
+        "추출된 3D 정보와 사용자 입력을 결합하여 구조화된 명령어를 생성하는 단계의 처리 순서 및 입력 결합관계"
+      ],
+      "evidence": [
+        {
+          "limitation": "기술 지시 및 작업 계획을 포함하는 사양 생성",
+          "quote": "output a spec 122, including a working plan including technical instructions based on the input",
+          "quote_translation": "입력에 기초한 기술적 지시를 포함하는 작업 계획을 포함하는 사양 122를 출력한다",
+          "chunk_id": "D2-P-0098"
+        },
+        {
+          "limitation": "입력 모달리티 융합을 통한 사양 출력",
+          "quote": "resulting in a fused spec including technical instructions",
+          "quote_translation": "기술적 지시를 포함하는 융합된 사양을 결과로 생성한다",
+          "chunk_id": "D2-P-0100"
+        }
+      ],
+      "motivation_quote": "",
+      "combination_risk": "none_explicit",
+      "combination_risk_reason": "특별한 저해사유 없음",
+      "technical_judgment": "일부 차이",
+      "llm_judgment": "일부 차이",
+      "judgment_adjusted": false,
+      "judgment_adjustment_reason": "",
+      "evidence_status": "verified",
+      "unverified_quote": "",
+      "not_evaluated": false,
+      "evaluation_status": "evaluated"
+    },
+    {
+      "label": "D",
+      "found": true,
+      "quote": "by the generative mechanical model system (GMMS) 140 to create a complete CAD model",
+      "quote_translation": "생성형 기계 모델 시스템(GMMS) 140에 의해 완전한 CAD 모델을 생성한다",
+      "chunk_id": "D2-P-0106",
+      "judgment": "일부 차이",
+      "판단_이유": "인용발명 1은 생성형 기계 모델 시스템(GMMS 140)이 구조화된 명령어에 대응하는 spec 122(및 비전 엔진의 메시 132)를 기초로 하여 최종 CAD 디자인(150, CAD 표현)을 생성하는 구성을 직접 개시하므로 청구항 구성 (D)와 실질적으로 동일하다.",
+      "purpose_effect_similarity": "동일",
+      "directness": "direct",
+      "missing_limitations": [
+        "없음"
+      ],
+      "evidence": [
+        {
+          "limitation": "GMMS를 통한 완성된 CAD 모델 생성",
+          "quote": "The meshes 132 can then be used, together with the spec 122, by the generative mechanical model system (GMMS) 140 to create a complete CAD model, referred to as a CAD design 150",
+          "quote_translation": "메시 132는 사양 122와 함께 생성형 기계 모델 시스템(GMMS) 140에 의해 사용되어 CAD 디자인 150으로 지칭되는 완전한 CAD 모델을 생성할 수 있다",
+          "chunk_id": "D2-P-0106"
+        }
+      ],
+      "motivation_quote": "",
+      "combination_risk": "none_explicit",
+      "combination_risk_reason": "특별한 저해사유 없음",
+      "technical_judgment": "실질적 동일",
+      "llm_judgment": "실질적 동일",
+      "judgment_adjusted": true,
+      "judgment_adjustment_reason": "missing_or_undisclosed_limitation",
+      "evidence_status": "verified",
+      "unverified_quote": "",
+      "not_evaluated": false,
+      "evaluation_status": "evaluated"
+    }
+  ],
+  "_meta": {
+    "schema_version": 25,
+    "comparison_mode": "mixed"
+  }
+}

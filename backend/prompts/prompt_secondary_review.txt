@@ -1,0 +1,39 @@
+[과제] 확정된 주 인용발명의 남은 공백을 메울 **보조 인용발명**을 고르고, 두 문헌의 기술적 결합 가능성을 사실 항목으로 기록하십시오.
+
+[청구항 ${claim_number}]
+${claim_text}
+
+[확정된 주 인용발명]
+${primary_document}
+
+[주 인용발명이 남긴 공백]
+${gap_elements}
+
+[보조 인용발명 후보]
+각 후보가 위 공백 중 무엇을 어떤 발췌문으로 메우는지 함께 제시합니다.
+${candidates}
+
+[검토 항목]
+결론을 먼저 정하지 말고, 아래 다섯 가지를 각각 독립적으로 판정하십시오.
+
+1. 기술분야 인접성 — 두 문헌이 같은 기술분야인가, 인접 분야인가, 먼 분야인가.
+2. 입출력 호환성 — 보조 인용발명의 구성을 주 인용발명에 가져올 때 입력·출력·처리 대상이 그대로 맞물리는가, 변형이 필요한가, 맞지 않는가.
+3. 치환·부가 가능성 — 해당 구성을 주 인용발명에 치환할 수 있는가, 부가할 수 있는가, 둘 다 어려운가.
+4. 기술적 모순 — 결합을 방해하는 기술적 충돌이 문헌에 드러나는가.
+5. 명시적 시사 — 결합을 시사하는 표현이 문헌 원문에 실제로 있는가. 있으면 그 발췌가 있는 chunk_id를 그대로 적으십시오. 없으면 null을 쓰고, 추측으로 채우지 마십시오.
+
+"자명하다", "진보성이 부정된다" 같은 결론은 쓰지 마십시오. 위 다섯 항목의 사실 판정만 출력하면 됩니다. 최종 결론은 이 프로그램이 그 값들로부터 별도로 조립합니다.
+
+[출력 형식]
+{
+  "selected_secondary_idx": 후보의 doc_idx 정수. 어느 후보도 공백을 실질적으로 메우지 못하면 null,
+  "filled_labels": ["이 문헌이 실제로 메우는 구성요소 라벨"],
+  "field_adjacency": "same | adjacent | distant",
+  "io_compatibility": "compatible | requires_adaptation | incompatible",
+  "substitution_feasibility": "substitutable | addable | neither",
+  "technical_conflict": true 또는 false,
+  "technical_conflict_reason": "충돌이 있으면 한 문장. 없으면 빈 문자열",
+  "explicit_suggestion_quote_ref": "결합을 시사하는 발췌의 chunk_id 또는 null",
+  "reason": "이 후보를 고른 이유 2~3문장",
+  "confidence": "high | medium | low"
+}

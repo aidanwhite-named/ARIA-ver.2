@@ -1,0 +1,149 @@
+{
+  "1": [
+    {
+      "label": "A",
+      "found": true,
+      "quote": "Additional input 108, may include but is not limited to, data that is unique to the current project or problem",
+      "quote_translation": "추가 입력(108)은 현재 프로젝트 또는 문제에 고유한 데이터를 포함할 수 있지만 이에 국한되지는 않습니다.",
+      "chunk_id": "D1-P-P009",
+      "judgment": "동일",
+      "판단_이유": "인용발명 1은 3D BIM 모델 생성을 위해 사용자 입력(additional input 108) 및 프로젝트 요구사항 입력을 획득하는 구성을 명시적으로 개시하고 있으므로 청구항 (A)의 사용자 입력 획득 구성과 동일합니다.",
+      "purpose_effect_similarity": "사용자 요구사항 및 프로젝트 데이터를 입력받아 후속 3D 모델링 처리에 활용하는 목적과 효과가 동일합니다.",
+      "directness": "direct",
+      "missing_limitations": [],
+      "evidence": [
+        {
+          "limitation": "적어도 하나의 사용자 입력 획득",
+          "quote": "Additional input 108, may include but is not limited to, data that is unique to the current project or problem",
+          "quote_translation": "추가 입력(108)은 현재 프로젝트 또는 문제에 고유한 데이터를 포함할 수 있지만 이에 국한되지는 않습니다.",
+          "chunk_id": "D1-P-P009"
+        }
+      ],
+      "motivation_quote": "Currently, 3D modeling is a mostly manual process that requires an individual to look at reference files",
+      "combination_risk": "none_explicit",
+      "combination_risk_reason": "사용자 입력을 획득하는 기본적 데이터 수집 구성으로 기술적 저해 사유가 없습니다.",
+      "technical_judgment": "동일",
+      "llm_judgment": "동일",
+      "judgment_adjusted": false,
+      "judgment_adjustment_reason": "",
+      "evidence_status": "verified",
+      "unverified_quote": "",
+      "not_evaluated": false,
+      "evaluation_status": "evaluated"
+    },
+    {
+      "label": "B",
+      "found": true,
+      "quote": "the ML extraction algorithm 112 may employ computer vision such as convolution neural network.",
+      "quote_translation": "머신러닝 추출 알고리즘(112)은 합성곱 신경망과 같은 컴퓨터 비전을 적용할 수 있습니다.",
+      "chunk_id": "D1-P-P009",
+      "judgment": "일부 차이",
+      "판단_이유": "인용발명 1은 2D 도면/비트맵 이미지에 대해 머신러닝 추출 알고리즘(컴퓨터 비전, 이미지 세그멘테이션)을 적용하여 윤곽선(contour) 및 데이터를 추출하거나 3D 점군 데이터를 입력받는 구성은 개시하지만, '사용자 입력에서 3D 정보 획득이 필요한 경우'를 조건적으로 판단하여 이미지 모듈을 통해 3D 정보를 추출하는 직접적인 처리 흐름은 명시되어 있지 않고 추론이 필요합니다.",
+      "purpose_effect_similarity": "이미지로부터 3D 모델 생성을 위한 공간 및 형상 정보를 추출한다는 목적은 기술적으로 연관되나, 조건적 판정 및 이미지 모듈을 통한 3D 정보 추출 연동 흐름에서 차이가 있습니다.",
+      "directness": "inferred",
+      "missing_limitations": [
+        "사용자 입력에서 3D 정보 획득이 필요한 경우라는 조건적 판단 단계 및 이미지 모듈을 통해 3D 정보를 추출하는 직접적 연동 관계"
+      ],
+      "evidence": [
+        {
+          "limitation": "컴퓨터 비전을 통한 이미지 데이터 추출",
+          "quote": "the ML extraction algorithm 112 may employ computer vision such as convolution neural network.",
+          "quote_translation": "머신러닝 추출 알고리즘(112)은 합성곱 신경망과 같은 컴퓨터 비전을 적용할 수 있습니다.",
+          "chunk_id": "D1-P-P009"
+        },
+        {
+          "limitation": "이미지 세그멘테이션 마스킹",
+          "quote": "the ML extraction algorithm 112 masks the floorplan using an image segmentation technique.",
+          "quote_translation": "머신러닝 추출 알고리즘(112)은 이미지 세그멘테이션 기술을 사용하여 평면도를 마스킹합니다.",
+          "chunk_id": "D1-P-P010"
+        }
+      ],
+      "motivation_quote": "However, creating the 3D models is labour intensive.",
+      "combination_risk": "none_explicit",
+      "combination_risk_reason": "이미지 처리 기술을 적용하는 것으로 결합상 기술적 저해는 없습니다.",
+      "technical_judgment": "일부 차이",
+      "llm_judgment": "일부 차이",
+      "judgment_adjusted": false,
+      "judgment_adjustment_reason": "",
+      "evidence_status": "verified",
+      "unverified_quote": "",
+      "not_evaluated": false,
+      "evaluation_status": "evaluated"
+    },
+    {
+      "label": "C",
+      "found": true,
+      "quote": "utilizes the extracted data to produce a 3D model.",
+      "quote_translation": "추출된 데이터를 활용하여 3D 모델을 생성함",
+      "chunk_id": "D1-P-P010",
+      "judgment": "일부 차이",
+      "판단_이유": "인용문헌은 추출된 데이터(3D 정보 등)와 사용자 선택/입력을 함께 활용하여 3D 모델을 생성하는 구성을 개시하지만, 사용자 입력과 3D 정보를 종합하여 3D 모델 생성을 위한 '구조화된 명령어'를 생성하는 구체적인 중간 처리 단계는 명시되어 있지 않으므로 일부 차이로 판단합니다.",
+      "purpose_effect_similarity": "입력 데이터 및 3D 정보를 종합하여 3D 모델 생성 처리를 수행하는 목적은 유사하나 중간 구조화된 명령어 생성 기능에는 차이가 있음",
+      "directness": "inferred",
+      "missing_limitations": [
+        "사용자 입력 및 3D 정보를 종합하여 3D 모델 생성을 위한 구조화된 명령어를 생성하는 구성"
+      ],
+      "evidence": [
+        {
+          "limitation": "입력 유형에 기초한 3D 모델 생성",
+          "quote": "creates the 3D BIM file 118 based on the type of input and specific use case.",
+          "quote_translation": "입력 유형 및 특정 사용 사례에 기초하여 3D BIM 파일 118을 생성함",
+          "chunk_id": "D1-P-P010"
+        },
+        {
+          "limitation": "사용자 선택 및 데이터 소스로부터 데이터 추출/결합",
+          "quote": "extracted by the ML extraction algorithm 112 from user choices or from a photo or other data source.",
+          "quote_translation": "사용자 선택 또는 사진이나 기타 데이터 소스로부터 ML 추출 알고리즘 112에 의해 추출됨",
+          "chunk_id": "D1-P-P010"
+        }
+      ],
+      "motivation_quote": "creates the 3D BIM file 118 based on the type of input and specific use case.",
+      "combination_risk": "none_explicit",
+      "combination_risk_reason": "명시적 결합 저해 요인 없음",
+      "technical_judgment": "일부 차이",
+      "llm_judgment": "일부 차이",
+      "judgment_adjusted": false,
+      "judgment_adjustment_reason": "",
+      "evidence_status": "verified",
+      "unverified_quote": "",
+      "precision_review": true
+    },
+    {
+      "label": "D",
+      "found": true,
+      "quote": "If needed, then in step 134, a 3D CAD file is generated.",
+      "quote_translation": "필요한 경우, 단계 134에서 3D CAD 파일이 생성됩니다.",
+      "chunk_id": "D1-P-P010",
+      "judgment": "일부 차이",
+      "판단_이유": "인용발명 1은 머신러닝 생성 알고리즘을 통해 3D CAD 파일 및 3D BIM 파일을 생성하는 구성(단계 134, 단계 138)을 직접 개시하고 있으나, 앞선 구성 (C)의 '구조화된 명령어'를 입력으로 받아 이에 기반하여 CAD 표현을 생성하는 결합관계 측면에서는 입력 형태의 차이가 존재합니다.",
+      "purpose_effect_similarity": "최종적으로 3D CAD 표현/파일을 생성한다는 기술적 목적과 결과물 생성 효과는 유사합니다.",
+      "directness": "inferred",
+      "missing_limitations": [
+        "구조화된 명령어를 기반으로 CAD 표현을 생성하는 입력-처리 연결관계"
+      ],
+      "evidence": [
+        {
+          "limitation": "3D CAD 파일 생성",
+          "quote": "If needed, then in step 134, a 3D CAD file is generated.",
+          "quote_translation": "필요한 경우, 단계 134에서 3D CAD 파일이 생성됩니다.",
+          "chunk_id": "D1-P-P010"
+        }
+      ],
+      "motivation_quote": "automatically producing 3D models from design specification documents",
+      "combination_risk": "none_explicit",
+      "combination_risk_reason": "3D CAD 파일 생성 메커니즘을 적용하는 데 있어 저해 요인은 없습니다.",
+      "technical_judgment": "일부 차이",
+      "llm_judgment": "일부 차이",
+      "judgment_adjusted": false,
+      "judgment_adjustment_reason": "",
+      "evidence_status": "verified",
+      "unverified_quote": "",
+      "not_evaluated": false,
+      "evaluation_status": "evaluated"
+    }
+  ],
+  "_meta": {
+    "schema_version": 25,
+    "comparison_mode": "mixed"
+  }
+}

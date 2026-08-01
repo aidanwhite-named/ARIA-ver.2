@@ -196,7 +196,7 @@ def test_distinctive_core_direct_disclosure_selects_primary_before_generic_bread
     assert family["primary_idx"] == 1
     assert family["secondary_idx"] == 2
     assert result["chains"]["1"]["total"] == [1, 2]
-    assert family["selection_method"] == "novelty_gate_then_distinctive_core_gap_pair_v2"
+    assert family["selection_method"] == "novelty_gate_then_eligibility_gated_pair_v3"
     detail = family["primary_score_details"]["1"]
     assert set(detail["distinctive_core_labels"]) == {"D", "E", "F"}
     assert detail["generic_breadth_is_tiebreak_only"] is True

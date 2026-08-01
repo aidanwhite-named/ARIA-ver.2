@@ -1,0 +1,574 @@
+{
+  "1": [
+    {
+      "label": "A",
+      "found": true,
+      "quote": "The input 110 can be received by the system 100, e.g. through a communication interface 111. The input can include requirements for a new design.",
+      "quote_translation": "입력(110)은 예를 들어 통신 인터페이스(111)를 통해 시스템(100)에 의해 수신될 수 있다. 입력은 새로운 디자인에 대한 요구사항을 포함할 수 있다.",
+      "chunk_id": "D2-P-0097",
+      "judgment": "동일",
+      "판단_이유": "인용문헌 2는 통신 인터페이스(111)를 통해 사용자로부터 새로운 디자인 요구사항을 포함하는 사용자 입력(110)을 수신하는 구성을 명시적으로 개시하므로 청구항의 '적어도 하나의 사용자 입력을 획득' 구성과 동일함.",
+      "purpose_effect_similarity": "사용자로부터 디자인 요구사항 입력을 수신한다는 기술적 목적 및 효과가 완벽히 일치함.",
+      "directness": "direct",
+      "missing_limitations": [],
+      "evidence": [
+        {
+          "limitation": "적어도 하나의 사용자 입력을 획득",
+          "subject": "system 100 / communication interface 111",
+          "input": "input 110 (requirements for a new design)",
+          "process": "received by the system",
+          "output": "received input",
+          "condition": "",
+          "relationship": "통신 인터페이스를 통해 사용자 입력을 수신함",
+          "quote": "The input 110 can be received by the system 100, e.g. through a communication interface 111. The input can include requirements for a new design.",
+          "quote_translation": "입력(110)은 예를 들어 통신 인터페이스(111)를 통해 시스템(100)에 의해 수신될 수 있다. 입력은 새로운 디자인에 대한 요구사항을 포함할 수 있다.",
+          "chunk_id": "D2-P-0097",
+          "page": "5",
+          "section": "GENERAL DESCRIPTION"
+        }
+      ],
+      "motivation_quote": "Traditional CAD systems require extensive and iterative manual input and significant expertise to produce accurate designs.",
+      "combination_risk": "none_explicit",
+      "combination_risk_reason": "",
+      "technical_judgment": "동일",
+      "llm_judgment": "동일",
+      "judgment_adjusted": false,
+      "judgment_adjustment_reason": "",
+      "evidence_status": "verified",
+      "unverified_quote": "",
+      "not_evaluated": false,
+      "evaluation_status": "evaluated"
+    },
+    {
+      "label": "B",
+      "found": true,
+      "quote": "The spec 122 can be transmitted to a vision engine 130. The vision engine 130 can process the spec 122, analyse existing images of relevant components stored in images DB 190 or accessible on the web, and generate visual representations based on the input instructions.",
+      "quote_translation": "스펙(122)은 비전 엔진(130)으로 전송될 수 있다. 비전 엔진(130)은 스펙(122)을 처리하고, 이미지 DB(190)에 저장되거나 웹에서 접근 가능한 관련 구성요소의 기존 이미지를 분석하며, 입력 지침에 기초하여 시각적 표현을 생성할 수 있다.",
+      "chunk_id": "D2-P-0103",
+      "judgment": "일부 유사",
+      "판단_이유": "인용문헌 2는 비전 엔진(130, 이미지 모듈)을 통해 스펙 지침에 따른 이미지 분석 및 2D/3D 메쉬(3D 정보) 생성을 개시함. 그러나 사용자 입력에서 3D 정보 획득이 필요한지 여부를 판별하여 조건부로 추출하는 제어 흐름이 부재하며, 사용자 입력이 LLM을 거쳐 스펙(122)으로 변환된 후 비전 엔진에 입력되는 처리 순서상의 차이가 존재함.",
+      "purpose_effect_similarity": "이미지 처리/비전 엔진을 이용하여 3D 메쉬(3D 정보)를 추출/생성한다는 목적과 효과는 유사함.",
+      "directness": "inferred",
+      "missing_limitations": [
+        "사용자 입력에서 3D 정보 획득이 필요한 경우를 판단하여 조건부로 3D 정보를 추출하는 제어 조건",
+        "사용자 입력 자체로부터 직접 이미지 모듈을 통해 3D 정보를 추출하는 처리 순서 및 입출력 연결관계"
+      ],
+      "evidence": [
+        {
+          "limitation": "이미지 모듈을 통한 3D 정보 추출",
+          "subject": "vision engine 130",
+          "input": "spec 122 / existing images",
+          "process": "process spec, analyse existing images, generate visual representations (3D meshes)",
+          "output": "2D & 3D meshes 132",
+          "condition": "upon receiving spec 122",
+          "relationship": "스펙 지침을 전송받아 기존 이미지를 분석하고 3D 메쉬를 생성함",
+          "quote": "The spec 122 can be transmitted to a vision engine 130. The vision engine 130 can process the spec 122, analyse existing images of relevant components stored in images DB 190 or accessible on the web, and generate visual representations based on the input instructions.",
+          "quote_translation": "스펙(122)은 비전 엔진(130)으로 전송될 수 있다. 비전 엔진(130)은 스펙(122)을 처리하고, 이미지 DB(190)에 저장되거나 웹에서 접근 가능한 관련 구성요소의 기존 이미지를 분석하며, 입력 지침에 기초하여 시각적 표현을 생성할 수 있다.",
+          "chunk_id": "D2-P-0103",
+          "page": "5",
+          "section": "GENERAL DESCRIPTION"
+        }
+      ],
+      "motivation_quote": "Traditional CAD systems require extensive and iterative manual input and significant expertise to produce accurate designs.",
+      "combination_risk": "none_explicit",
+      "combination_risk_reason": "",
+      "technical_judgment": "일부 차이",
+      "llm_judgment": "일부 차이",
+      "judgment_adjusted": true,
+      "judgment_adjustment_reason": "multiple_or_composite_missing_limitations",
+      "evidence_status": "verified",
+      "unverified_quote": "",
+      "not_evaluated": false,
+      "evaluation_status": "evaluated"
+    },
+    {
+      "label": "C",
+      "found": true,
+      "quote": "The input may be transmitted to a Large Language Model (LLM) 120 comprising one or more LLMs and Deep Learning Models (DLMs) for processing the input to eventually output a spec 122, including a working plan including technical instructions based on the input.",
+      "quote_translation": "입력은 입력에 기초한 기술적 지침을 포함하는 작업 계획을 포함하는 스펙(122)을 최종적으로 출력하기 위해 입력을 처리하는 하나 이상의 LLM 및 딥러닝 모델(DLM)을 포함하는 대형 언어 모델(LLM)(120)로 전송될 수 있다.",
+      "chunk_id": "D2-P-0098",
+      "judgment": "일부 차이",
+      "판단_이유": "인용문헌 2는 LLM(120)을 통해 다양한 모달리티의 사용자 입력을 융합/종합하여 3D 모델 생성을 위한 작업 계획 및 기술적 지침을 담은 spec(122, 구조화된 명령어)을 생성하는 구성을 개시하므로 청구항 C의 구조화된 명령어 생성 구성과 실질적으로 동일함.",
+      "purpose_effect_similarity": "입력 데이터들을 종합하여 3D CAD/모델 생성을 위한 기술적 명령어/작업 계획(스펙)을 생성한다는 목적 및 효과가 실질적으로 동일함.",
+      "directness": "inferred",
+      "missing_limitations": [
+        "비전 엔진에 의해 사전에 추출된 3D 정보와 사용자 입력을 결합하여 스펙을 생성하는 입출력 순서상의 연결관계"
+      ],
+      "evidence": [
+        {
+          "limitation": "구조화된 명령어 생성",
+          "subject": "Large Language Model (LLM) 120",
+          "input": "user input (various modalities)",
+          "process": "processing and fusing input modalities",
+          "output": "spec 122 (working plan including technical instructions)",
+          "condition": "",
+          "relationship": "사용자 입력을 LLM으로 처리하여 작업 계획 및 지침을 포함하는 스펙을 출력함",
+          "quote": "The input may be transmitted to a Large Language Model (LLM) 120 comprising one or more LLMs and Deep Learning Models (DLMs) for processing the input to eventually output a spec 122, including a working plan including technical instructions based on the input.",
+          "quote_translation": "입력은 입력에 기초한 기술적 지침을 포함하는 작업 계획을 포함하는 스펙(122)을 최종적으로 출력하기 위해 입력을 처리하는 하나 이상의 LLM 및 딥러닝 모델(DLM)을 포함하는 대형 언어 모델(LLM)(120)로 전송될 수 있다.",
+          "chunk_id": "D2-P-0098",
+          "page": "5",
+          "section": "GENERAL DESCRIPTION"
+        }
+      ],
+      "motivation_quote": "Traditional CAD systems require extensive and iterative manual input and significant expertise to produce accurate designs.",
+      "combination_risk": "none_explicit",
+      "combination_risk_reason": "",
+      "technical_judgment": "실질적 동일",
+      "llm_judgment": "실질적 동일",
+      "judgment_adjusted": true,
+      "judgment_adjustment_reason": "directness_inferred",
+      "evidence_status": "verified",
+      "unverified_quote": "",
+      "not_evaluated": false,
+      "evaluation_status": "evaluated"
+    },
+    {
+      "label": "D",
+      "found": true,
+      "quote": "The meshes 132 can then be used, together with the spec 122, by the generative mechanical model system (GMMS) 140 to create a complete CAD model, referred to as a CAD design 150",
+      "quote_translation": "메쉬(132)는 생성형 기계 모델 시스템(GMMS)(140)에 의해 스펙(122)과 함께 사용되어 CAD 디자인(150)으로 지칭되는 완전한 CAD 모델을 생성할 수 있다.",
+      "chunk_id": "D2-P-0106",
+      "judgment": "동일",
+      "판단_이유": "인용문헌 2는 생성형 기계 모델 시스템(GMMS 140)이 구조화된 명령어인 spec(122) 및 3D 메쉬(132)를 기반으로 final CAD design(150, CAD 표현)을 생성하는 구성을 개시하므로 청구항 D의 구성과 실질적으로 동일/동일함.",
+      "purpose_effect_similarity": "구조화된 명령어/스펙을 기반으로 3D CAD 모델(CAD 표현)을 완성한다는 기술적 목적 및 효과가 완벽하게 동일함.",
+      "directness": "direct",
+      "missing_limitations": [],
+      "evidence": [
+        {
+          "limitation": "구조화된 명령어 기반 CAD 표현 생성",
+          "subject": "generative mechanical model system (GMMS) 140",
+          "input": "spec 122, meshes 132",
+          "process": "create a complete CAD model",
+          "output": "CAD design 150",
+          "condition": "",
+          "relationship": "스펙(122)과 메쉬(132)를 함께 사용하여 CAD 모델을 생성함",
+          "quote": "The meshes 132 can then be used, together with the spec 122, by the generative mechanical model system (GMMS) 140 to create a complete CAD model, referred to as a CAD design 150",
+          "quote_translation": "메쉬(132)는 생성형 기계 모델 시스템(GMMS)(140)에 의해 스펙(122)과 함께 사용되어 CAD 디자인(150)으로 지칭되는 완전한 CAD 모델을 생성할 수 있다.",
+          "chunk_id": "D2-P-0106",
+          "page": "5",
+          "section": "GENERAL DESCRIPTION"
+        }
+      ],
+      "motivation_quote": "Traditional CAD systems require extensive and iterative manual input and significant expertise to produce accurate designs.",
+      "combination_risk": "none_explicit",
+      "combination_risk_reason": "",
+      "technical_judgment": "동일",
+      "llm_judgment": "동일",
+      "judgment_adjusted": false,
+      "judgment_adjustment_reason": "",
+      "evidence_status": "verified",
+      "unverified_quote": "",
+      "not_evaluated": false,
+      "evaluation_status": "evaluated"
+    }
+  ],
+  "_meta": {
+    "schema_version": 26,
+    "comparison_mode": "mixed"
+  },
+  "3": [
+    {
+      "label": "A",
+      "found": true,
+      "quote": "In addition to transmitting the spec 122 to the GMMS 140, the spec 122 can be transmitted to the vision engine 130.",
+      "quote_translation": "spec 122를 GMMS 140에 전송하는 것 외에도, spec 122는 비전 엔진 130에 전송될 수 있다.",
+      "chunk_id": "D2-P-0130",
+      "judgment": "일부 유사",
+      "판단_이유": "인용발명 2(D2)는 사용자 입력을 수신하여 스펙(spec 122)을 생성하는 구성(LLM 120)과, 작성된 스펙을 비전 엔진(vision engine 130)에 전송하여 2D 및 3D 메쉬를 생성하는 구성(이미지 모듈 실행)을 개시합니다. 그러나 사용자 입력을 분석하여 3D 정보 획득의 필요 여부를 별도로 판단하고, 그 판단에 따라 3D 정보 획득이 필요한 경우에 한하여 선택적으로 이미지 모듈을 실행하는 조건부 연동관계는 명시되어 있지 않아 결합관계에 차이가 존재합니다.",
+      "purpose_effect_similarity": "유사",
+      "directness": "inferred",
+      "missing_limitations": [
+        "사용자 입력을 분석하여 3D 정보 획득의 필요 여부를 조건부로 판단하는 구성",
+        "3D 정보 획득이 필요한 경우에 한하여 이미지 모듈을 선택적으로 실행하는 연동관계"
+      ],
+      "evidence": [
+        {
+          "limitation": "사용자 요구사항 입력 수신",
+          "subject": "input module 221",
+          "input": "input comprising requirements for a new design",
+          "process": "receive the input",
+          "output": "",
+          "condition": "",
+          "relationship": "receives input with design requirements",
+          "quote": "The input module 221 is configured to receive the input, comprising requirements for a new design",
+          "quote_translation": "입력 모듈 221은 새 디자인에 대한 요구사항을 포함하는 입력을 수신하도록 구성된다.",
+          "chunk_id": "D2-P-0111",
+          "page": "",
+          "section": "Detailed Description"
+        },
+        {
+          "limitation": "비전 엔진으로 스펙 전송",
+          "subject": "",
+          "input": "spec 122",
+          "process": "transmitted to the vision engine 130",
+          "output": "",
+          "condition": "",
+          "relationship": "transmits generated spec to vision engine",
+          "quote": "In addition to transmitting the spec 122 to the GMMS 140, the spec 122 can be transmitted to the vision engine 130.",
+          "quote_translation": "spec 122를 GMMS 140에 전송하는 것 외에도, spec 122는 비전 엔진 130에 전송될 수 있다.",
+          "chunk_id": "D2-P-0130",
+          "page": "",
+          "section": "Detailed Description"
+        },
+        {
+          "limitation": "비전 엔진에 의한 2D/3D 메쉬 생성",
+          "subject": "vision engine 130",
+          "input": "spec 122",
+          "process": "analysing existing images of relevant components and generating the 2D & 3D meshes 132",
+          "output": "2D & 3D meshes 132",
+          "condition": "",
+          "relationship": "processes spec to generate 2D & 3D meshes",
+          "quote": "The vision engine 130 can process the spec 122 by analysing existing images of relevant components... and generating the 2D & 3D meshes 132",
+          "quote_translation": "비전 엔진 130은 spec 122를 처리하여 관련 구성요소의 기존 이미지를 분석하고 2D 및 3D 메쉬 132를 생성할 수 있다.",
+          "chunk_id": "D2-P-0131",
+          "page": "",
+          "section": "Detailed Description"
+        }
+      ],
+      "motivation_quote": "",
+      "combination_risk": "none_explicit",
+      "combination_risk_reason": "",
+      "technical_judgment": "일부 차이",
+      "llm_judgment": "일부 차이",
+      "judgment_adjusted": true,
+      "judgment_adjustment_reason": "multiple_or_composite_missing_limitations",
+      "evidence_status": "verified",
+      "unverified_quote": "",
+      "not_evaluated": false,
+      "evaluation_status": "evaluated"
+    }
+  ],
+  "2": [
+    {
+      "label": "A",
+      "found": true,
+      "quote": "Wherein each of the input modalities is selected from a group comprising: a textual description, a sketch, a CAD design, a 2D illustration image, and a technical specification.",
+      "quote_translation": "입력 양상 각각은 텍스트 설명, 스케치, CAD 디자인, 2D 일러스트레이션 이미지 및 기술 사양으로 구성된 그룹으로부터 선택된다.",
+      "chunk_id": "D2-P-0019",
+      "judgment": "동일",
+      "판단_이유": "인용발명 2(D2)는 3D CAD 디자인 생성을 위한 입력 데이터로 텍스트 설명(텍스트), 스케치, 2D 일러스트레이션 이미지(2D 데이터), CAD 디자인/3D CAD 데이터(3D 데이터)의 다양한 입력 양상(input modalities)을 개시할 뿐만 아니라, 생성된 CAD 디자인 및 이에 부가되는 사용자의 피드백/수정 요청(modification requests)을 새로운 입력으로 재활용하여 반복적으로 디자인을 개선하는 구성을 명시적으로 개시하고 있습니다. 이는 청구항 (A)에 기재된 '생성된 3D 모델에 대한 정보', '해당 모델에 부가된 정보(스케치 등)' 및 '사용자 제공 입력(텍스트, 2D 데이터, 3D 데이터)'의 제반 한정 사항을 그대로 개시하고 있으므로 동일합니다.",
+      "purpose_effect_similarity": "동일",
+      "directness": "direct",
+      "missing_limitations": [],
+      "evidence": [
+        {
+          "limitation": "사용자 제공 입력(텍스트, 2D 데이터, 3D 데이터 등)",
+          "subject": "system 100 / LLM 120",
+          "input": "input modalities (textual description, sketch, CAD design, 2D illustration image, technical specification)",
+          "process": "receives and processes various input modalities",
+          "output": "fused spec / 3D CAD design",
+          "condition": "",
+          "relationship": "",
+          "quote": "Wherein each of the input modalities is selected from a group comprising: a textual description, a sketch, a CAD design, a 2D illustration image, and a technical specification.",
+          "quote_translation": "입력 양상 각각은 텍스트 설명, 스케치, CAD 디자인, 2D 일러스트레이션 이미지 및 기술 사양으로 구성된 그룹으로부터 선택된다.",
+          "chunk_id": "D2-P-0019",
+          "page": "",
+          "section": "Detailed Description"
+        },
+        {
+          "limitation": "생성된 3D 모델에 대한 정보 및 모델에 부가된 수정 요청/피드백 정보",
+          "subject": "system 100",
+          "input": "generated CAD design, output specification, user's requests for modification",
+          "process": "added as CAD input and repeatedly refines design based on user feedback",
+          "output": "revised CAD design",
+          "condition": "",
+          "relationship": "",
+          "quote": "The generated CAD design can then be added as a CAD input, along with the output specification, and the user's requests for modification.",
+          "quote_translation": "생성된 CAD 디자인은 출력 사양 및 사용자의 수정 요청과 함께 CAD 입력으로 추가될 수 있다.",
+          "chunk_id": "D2-P-0142",
+          "page": "",
+          "section": "Detailed Description"
+        }
+      ],
+      "motivation_quote": "Al models can be used to assist in interpreting complex design requirements, optimizing design parameters, and generating models that adhere to specific engineering standards.",
+      "combination_risk": "none_explicit",
+      "combination_risk_reason": "",
+      "technical_judgment": "동일",
+      "llm_judgment": "동일",
+      "judgment_adjusted": false,
+      "judgment_adjustment_reason": "",
+      "evidence_status": "verified",
+      "unverified_quote": "",
+      "not_evaluated": false,
+      "evaluation_status": "evaluated"
+    }
+  ],
+  "4": [
+    {
+      "label": "A",
+      "found": true,
+      "quote": "The input may be transmitted to a Large Language Model (LLM) 120 comprising one or more LLMs and Deep Learning Models (DLMs) for processing the input to eventually output a spec 122",
+      "quote_translation": "입력은 하나 이상의 LLM 및 딥러닝 모델(DLM)을 포함하는 대형 언어 모델(LLM) 120으로 전송되어 입력을 처리하고 최종적으로 명세서(spec 122)를 출력할 수 있다.",
+      "chunk_id": "D2-P-0098",
+      "judgment": "일부 유사",
+      "판단_이유": "인용발명 2(doc_index=1)는 LLM 120을 이용하여 텍스트 설명, 제약 조건, 기술 사양 등 다양한 모달리티의 입력 데이터를 처리하고 작업 계획 및 기술 지시사항을 포함하는 spec 122를 생성함으로써 사용자 입력 요구사항을 해석하는 기능을 수행한다. 이는 생성 요청의 의도를 분석하는 청구항 구성 (A)와 처리 목적 및 기능 측면에서 일부 유사하지만, 의도(intent)를 구체적으로 분석·분리하는 별도의 명시적 처리 알고리즘 표시는 부재하고 추론적 대응에 해당한다.",
+      "purpose_effect_similarity": "유사",
+      "directness": "inferred",
+      "missing_limitations": [
+        "생성 요청의 의도(intent)를 분석하는 구체적인 용어 및 직접적 알고리즘 개시"
+      ],
+      "evidence": [
+        {
+          "limitation": "사용자 입력 처리 및 사양 출력",
+          "subject": "Large Language Model (LLM) 120",
+          "input": "The input",
+          "process": "processing the input to eventually output a spec 122",
+          "output": "spec 122",
+          "condition": "",
+          "relationship": "input -> LLM 120 processing -> output spec 122",
+          "quote": "The input may be transmitted to a Large Language Model (LLM) 120 comprising one or more LLMs and Deep Learning Models (DLMs) for processing the input to eventually output a spec 122",
+          "quote_translation": "입력은 하나 이상의 LLM 및 딥러닝 모델(DLM)을 포함하는 대형 언어 모델(LLM) 120으로 전송되어 입력을 처리하고 최종적으로 명세서(spec 122)를 출력할 수 있다.",
+          "chunk_id": "D2-P-0098",
+          "page": "5",
+          "section": "Detailed Description"
+        }
+      ],
+      "motivation_quote": "it is advantageous, according to certain embodiments of the presently disclosed subject matter, to integrate artificial intelligence (AI) technologies with generation of CAD designs to automate and improve the design process.",
+      "combination_risk": "none_explicit",
+      "combination_risk_reason": "",
+      "technical_judgment": "일부 유사",
+      "llm_judgment": "일부 유사",
+      "judgment_adjusted": false,
+      "judgment_adjustment_reason": "",
+      "evidence_status": "verified",
+      "unverified_quote": "",
+      "not_evaluated": false,
+      "evaluation_status": "evaluated"
+    },
+    {
+      "label": "B",
+      "found": true,
+      "quote": "fusing different combinations of those inputs, to allow the LLM 120 to extract information from one modality to another.",
+      "quote_translation": "입력의 다양한 조합을 융합하여 LLM 120이 한 양식에서 다른 양식으로 정보를 추출할 수 있도록 한다.",
+      "chunk_id": "D2-P-0100",
+      "judgment": "차이",
+      "판단_이유": "인용발명 2(doc_index=1)는 텍스트 요구사항과 3D CAD 데이터 등 다중 모달리티 입력을 융합하여 spec 122를 생성하고 vision engine 및 GMMS를 통해 CAD 모델을 생성하는 기술을 개시하고 있으나, 분석된 의도가 함께 입력된 특정 데이터의 기하학적 형상을 유지 또는 변형하여 3D 모델을 생성하는 조건에 부합할 때 3D 정보 획득이 필요하다고 판단하는 구체적 판단 로직은 개시되어 있지 않다.",
+      "purpose_effect_similarity": "일부 유사",
+      "directness": "direct",
+      "missing_limitations": [
+        "상기 의도가 함께 입력된 특정 데이터의 기하학적 형상을 유지 또는 변형하여 3D 모델을 생성하는 경우 3D 정보 획득이 필요하다고 판단하는 한정"
+      ],
+      "evidence": [
+        {
+          "limitation": "다중 양식 입력 융합 및 정보 추출",
+          "subject": "LLM 120",
+          "input": "different combinations of those inputs",
+          "process": "fusing different combinations of those inputs, to allow the LLM 120 to extract information from one modality to another",
+          "output": "fused spec",
+          "condition": "",
+          "relationship": "inputs fusion -> information extraction across modalities",
+          "quote": "fusing different combinations of those inputs, to allow the LLM 120 to extract information from one modality to another.",
+          "quote_translation": "입력의 다양한 조합을 융합하여 LLM 120이 한 양식에서 다른 양식으로 정보를 추출할 수 있도록 한다.",
+          "chunk_id": "D2-P-0100",
+          "page": "5",
+          "section": "Detailed Description"
+        }
+      ],
+      "motivation_quote": "it is advantageous, according to certain embodiments of the presently disclosed subject matter, to integrate artificial intelligence (AI) technologies with generation of CAD designs to automate and improve the design process.",
+      "combination_risk": "none_explicit",
+      "combination_risk_reason": "",
+      "technical_judgment": "차이",
+      "llm_judgment": "차이",
+      "judgment_adjusted": false,
+      "judgment_adjustment_reason": "",
+      "evidence_status": "verified",
+      "unverified_quote": "",
+      "not_evaluated": false,
+      "evaluation_status": "evaluated"
+    }
+  ],
+  "6": [
+    {
+      "label": "A",
+      "found": true,
+      "quote": "Known components can be obtained e.g. from vector DB 160, organization DB 170, or from other external DBs 180 such as the web.",
+      "quote_translation": "알려진 구성요소는 예를 들어 벡터 DB(160), 조직 DB(170), 또는 웹과 같은 다른 외부 DB(180)로부터 획득될 수 있다.",
+      "chunk_id": "D2-P-0132",
+      "judgment": "실질적 동일",
+      "판단_이유": "인용발명 2는 사용자 입력(설계 요구사항)에 기초하여 3D CAD 모델을 생성하는 과정에서, 외부 소스인 외부 DB(external DBs 180, 예를 들어 웹)나 벡터 DB/조직 DB로부터 3D 모델 생성에 필요한 알려진 구성요소(known component) 정보/임베딩을 검색 및 탐색하여 취득하는 구성을 개시하고 있으므로 실질적 동일합니다.",
+      "purpose_effect_similarity": "사용자 입력 요구사항에 기초하여 외부 DB/웹 등 외부 소스로부터 3D 모델 생성에 필요한 구성요소 정보를 검색 및 취득하는 목적과 효과가 동일합니다.",
+      "directness": "direct",
+      "missing_limitations": [],
+      "evidence": [
+        {
+          "limitation": "외부 소스(외부 DB/웹)로부터 3D 모델 생성에 필요한 알려진 구성요소 정보 검색",
+          "subject": "component replacement module 223 / system",
+          "input": "user input (spec 122) / embedding vector",
+          "process": "obtained / search / retrieve",
+          "output": "known components",
+          "condition": "during generation of CAD design",
+          "relationship": "Obtaining known components from external DBs such as the web based on design generation",
+          "quote": "Known components can be obtained e.g. from vector DB 160, organization DB 170, or from other external DBs 180 such as the web.",
+          "quote_translation": "알려진 구성요소는 예를 들어 벡터 DB(160), 조직 DB(170), 또는 웹과 같은 다른 외부 DB(180)로부터 획득될 수 있다.",
+          "chunk_id": "D2-P-0132",
+          "page": "",
+          "section": ""
+        }
+      ],
+      "motivation_quote": "it is advantageous, according to certain embodiments of the presently disclosed subject matter, to integrate artificial intelligence (AI) technologies with generation of CAD designs to automate and improve the design process.",
+      "combination_risk": "none_explicit",
+      "combination_risk_reason": "명시적 저해사유 없음",
+      "technical_judgment": "실질적 동일",
+      "llm_judgment": "실질적 동일",
+      "judgment_adjusted": false,
+      "judgment_adjustment_reason": "",
+      "evidence_status": "verified",
+      "unverified_quote": "",
+      "not_evaluated": false,
+      "evaluation_status": "evaluated"
+    },
+    {
+      "label": "B",
+      "found": true,
+      "quote": "The retrieved known component may be used in the continuous generation such that the next generated component can fit the retrieved component.",
+      "quote_translation": "검색된 알려진 구성요소는 다음으로 생성되는 구성요소가 검색된 구성요소에 맞추어지도록 연속적인 생성에 사용될 수 있다.",
+      "chunk_id": "D2-P-0133",
+      "judgment": "일부 차이",
+      "판단_이유": "인용발명 2는 검색/회수된 알려진 구성요소 정보나 조직 데이터(입력 융합 데이터)를 제약 조건이나 기술적 지침(technical instructions, spec 122)에 반영하여 연속적인 3D CAD 모델 생성에 사용하는 구성을 개시하고 있으나, 검색된 정보를 '구조화된 명령어(structured instructions)' 생성에 직접적인 입력으로 추가 이용하는 명시적 제어 로직에는 차이가 있어 일부 차이로 평가됩니다.",
+      "purpose_effect_similarity": "검색된 구성요소/조직 데이터를 설계 지침 및 후속 3D 생성 과정에 추가 활용하여 완성도 높은 모델을 생성하는 목적 및 효과는 일부 유사합니다.",
+      "directness": "inferred",
+      "missing_limitations": [
+        "검색된 정보를 '구조화된 명령어(structured instructions)' 생성에 명시적으로 추가 이용하는 구체적 명령어 산출 단계"
+      ],
+      "evidence": [
+        {
+          "limitation": "검색된 알려진 구성요소 정보를 후속 3D 모델 생성 및 설계 지침에 추가 사용",
+          "subject": "system / GMMS 140",
+          "input": "retrieved known component",
+          "process": "used in the continuous generation",
+          "output": "next generated component / CAD design",
+          "condition": "as a constraint to the next generation",
+          "relationship": "Using retrieved component as a constraint so next generated component fits with it",
+          "quote": "The retrieved known component may be used in the continuous generation such that the next generated component can fit the retrieved component.",
+          "quote_translation": "검색된 알려진 구성요소는 다음으로 생성되는 구성요소가 검색된 구성요소에 맞추어지도록 연속적인 생성에 사용될 수 있다.",
+          "chunk_id": "D2-P-0133",
+          "page": "",
+          "section": ""
+        }
+      ],
+      "motivation_quote": "Usage of known components, optionally, from targeted organization-specific data, helps in reducing manufacturing costs, simplifying the assembly process, and improving product quality by designing parts and assemblies that are easy to manufacture and assemble",
+      "combination_risk": "none_explicit",
+      "combination_risk_reason": "명시적 저해사유 없음",
+      "technical_judgment": "일부 차이",
+      "llm_judgment": "일부 차이",
+      "judgment_adjusted": false,
+      "judgment_adjustment_reason": "",
+      "evidence_status": "verified",
+      "unverified_quote": "",
+      "not_evaluated": false,
+      "evaluation_status": "evaluated"
+    }
+  ],
+  "5": [
+    {
+      "label": "A",
+      "found": true,
+      "quote": "processing the input to eventually output a spec 122, including a working plan including technical instructions based on the input.",
+      "quote_translation": "입력을 처리하여 결과적으로 입력을 기반으로 하는 기술 지침을 포함하는 작업 계획인 명세서(spec 122)를 출력함.",
+      "chunk_id": "D2-P-0098",
+      "judgment": "일부 차이",
+      "판단_이유": "인용문헌 1은 사용자 입력(텍스트, 도면, 명세서 등)을 LLM 120이 처리 및 융합하여 구조화된 작업 계획 및 기술 지침(assembly tree를 포함하는 spec 122)을 생성하는 구성을 개시하고 있어 구조화된 명령어 생성과 대응되나, 입력을 분석하는 기준이 '기 설정된 데이터베이스의 규칙 또는 템플릿'이 아닌 LLM/DLM 기계 학습 기반의 멀티모달 융합 방식이라는 점에서 차이가 있으므로 일부 차이로 판단합니다.",
+      "purpose_effect_similarity": "사용자 입력을 분석하여 CAD 모델 생성을 위한 구조화된 기술 지침 및 작업 계획을 생성하는 목적과 효과가 유사함",
+      "directness": "inferred",
+      "missing_limitations": [
+        "사용자 입력을 기 설정된 데이터베이스의 규칙 또는 템플릿에 따라 분석하는 구체적 처리 한정"
+      ],
+      "evidence": [
+        {
+          "limitation": "사용자 입력 분석 및 기술 지침/작업 계획(spec 122) 생성",
+          "subject": "",
+          "input": "",
+          "process": "",
+          "output": "",
+          "condition": "",
+          "relationship": "",
+          "quote": "processing the input to eventually output a spec 122, including a working plan including technical instructions based on the input.",
+          "quote_translation": "입력을 처리하여 결과적으로 입력을 기반으로 하는 기술 지침을 포함하는 작업 계획인 명세서(spec 122)를 출력함.",
+          "chunk_id": "D2-P-0098",
+          "page": null,
+          "section": ""
+        },
+        {
+          "limitation": "다중 모달리티 입력 융합을 통한 기술 지침 명세서 생성",
+          "subject": "",
+          "input": "",
+          "process": "",
+          "output": "",
+          "condition": "",
+          "relationship": "",
+          "quote": "resulting in a fused spec including technical instructions.",
+          "quote_translation": "기술 지침을 포함하는 융합된 명세서(spec)를 생성함.",
+          "chunk_id": "D2-P-0100",
+          "page": null,
+          "section": ""
+        }
+      ],
+      "motivation_quote": "stream-line the creation of CAD models, while reducing the time required for design iterations",
+      "combination_risk": "none_explicit",
+      "combination_risk_reason": "동일 기술분야인 AI 기반 3D CAD 모델 생성 기술로서 명시적 결합 저해 요인이 없음",
+      "technical_judgment": "일부 차이",
+      "llm_judgment": "일부 차이",
+      "judgment_adjusted": false,
+      "judgment_adjustment_reason": "",
+      "evidence_status": "verified",
+      "unverified_quote": "",
+      "not_evaluated": false,
+      "evaluation_status": "evaluated"
+    }
+  ],
+  "7": [
+    {
+      "label": "A",
+      "found": true,
+      "quote": "a CAD design, which provides detailed geometric and engineering data about a similar design.",
+      "quote_translation": "유사한 설계에 대한 상세한 기하학적 및 공학적 데이터를 제공하는 CAD 설계.",
+      "chunk_id": "D2-P-0121",
+      "judgment": "실질적 동일",
+      "판단_이유": "인용문헌 1은 치수, 공차, 재료 사양 등 상세한 기하학적 및 공학적 설계 데이터를 제공하는 CAD 설계를 개시하고 있으므로, 설계 정보를 포함하는 데이터 구조라는 청구항 (A)의 선택적 구성요소와 실질적으로 동일합니다.",
+      "purpose_effect_similarity": "CAD 표현에 상세 기하학적 및 공학적 설계 데이터를 포함시켜 제품 설계 및 제조에 활용하는 목적과 효과가 실질적으로 동일함",
+      "directness": "inferred",
+      "missing_limitations": [],
+      "evidence": [
+        {
+          "limitation": "설계 정보를 포함하는 데이터 구조인 CAD 표현",
+          "subject": "CAD design",
+          "input": "",
+          "process": "provides detailed geometric and engineering data",
+          "output": "detailed geometric and engineering data",
+          "condition": "",
+          "relationship": "",
+          "quote": "a CAD design, which provides detailed geometric and engineering data about a similar design.",
+          "quote_translation": "유사한 설계에 대한 상세한 기하학적 및 공학적 데이터를 제공하는 CAD 설계.",
+          "chunk_id": "D2-P-0121",
+          "page": "",
+          "section": ""
+        },
+        {
+          "limitation": "치수, 공차, 재료 사양 등 공학적 정보 포함",
+          "subject": "This (CAD design)",
+          "input": "",
+          "process": "include dimensions, tolerances, material specifications",
+          "output": "dimensions, tolerances, material specifications, and other technical details necessary for manufacturing",
+          "condition": "",
+          "relationship": "",
+          "quote": "This can include dimensions, tolerances, material specifications, and other technical details necessary for manufacturing",
+          "quote_translation": "이것은 치수, 공차, 재료 사양 및 제조에 필요한 기타 기술적 세부사항을 포함할 수 있습니다.",
+          "chunk_id": "D2-P-0121",
+          "page": "",
+          "section": ""
+        }
+      ],
+      "motivation_quote": "integrate artificial intelligence (AI) technologies with generation of CAD designs to automate and improve the design process.",
+      "combination_risk": "none_explicit",
+      "combination_risk_reason": "동일 기술분야로서 명시적 결합 저해 요인 없음",
+      "technical_judgment": "실질적 동일",
+      "llm_judgment": "실질적 동일",
+      "judgment_adjusted": false,
+      "judgment_adjustment_reason": "",
+      "evidence_status": "verified",
+      "unverified_quote": "",
+      "not_evaluated": false,
+      "evaluation_status": "evaluated"
+    }
+  ]
+}

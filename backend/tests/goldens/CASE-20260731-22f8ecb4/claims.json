@@ -1,0 +1,163 @@
+[
+  {
+    "claim_number": 1,
+    "claim_type": "independent",
+    "parent_claim": null,
+    "text": "전자장치로서,\n적어도 하나의 지시를 포함하는 메모리\n상기 메모리에 전기적으로 연결되어 상기 적어도 하나의 지시를 수행하도록 구성된 적어도 하나의 프로세서를 포함하고\n상기 적어도 하나의 프로세서는\n(A) 적어도 하나의 사용자 입력을 획득하고\n(B) 상기 사용자 입력에서 3D 정보 획득이 필요한 경우, 이미지 모듈을 통해 상기 사용자 입력에 대한 3D 정보를 추출하고,\n(C) 상기 사용자 입력 중 어느 하나 및 상기 3d 정보를 종합하여 3D 모델 생성을 위한 구조화된 명령어를 생성하고,\n(D) 상기 구조화된 명령어를 기반으로 상기 3D 모델 생성을 위한 CAD(Computer aided design) 표현을 생성하는 \n장치",
+    "elements": [
+      {
+        "label": "A",
+        "text": "적어도 하나의 사용자 입력을 획득하고",
+        "importance": "5",
+        "is_sub": false,
+        "parent_label": null
+      },
+      {
+        "label": "B",
+        "text": "상기 사용자 입력에서 3D 정보 획득이 필요한 경우, 이미지 모듈을 통해 상기 사용자 입력에 대한 3D 정보를 추출하고,",
+        "importance": "3",
+        "is_sub": false,
+        "parent_label": null
+      },
+      {
+        "label": "C",
+        "text": "상기 사용자 입력 중 어느 하나 및 상기 3d 정보를 종합하여 3D 모델 생성을 위한 구조화된 명령어를 생성하고,",
+        "importance": "3",
+        "is_sub": false,
+        "parent_label": null
+      },
+      {
+        "label": "D",
+        "text": "상기 구조화된 명령어를 기반으로 상기 3D 모델 생성을 위한 CAD(Computer aided design) 표현을 생성하는 \n장치",
+        "importance": "2",
+        "is_sub": false,
+        "parent_label": null
+      }
+    ],
+    "preamble": null,
+    "closing": null,
+    "split_method": "labeled"
+  },
+  {
+    "claim_number": 2,
+    "claim_type": "dependent",
+    "parent_claim": 1,
+    "text": "제1항에 있어서 상기 사용자 입력은 생성된 3D 모델에 대한 정보, 해당 모델에 부가된 정보(시각적 표시, 스케치, 주석 등) 및 사용자 제공 입력(텍스트, 2D 데이터, 3D 데이터) 중 적어도 어느 하나",
+    "elements": [
+      {
+        "label": "A",
+        "text": "제1항에 있어서 상기 사용자 입력은 생성된 3D 모델에 대한 정보, 해당 모델에 부가된 정보(시각적 표시, 스케치, 주석 등) 및 사용자 제공 입력(텍스트, 2D 데이터, 3D 데이터) 중 적어도 어느 하나",
+        "importance": "5",
+        "is_sub": false,
+        "parent_label": null
+      }
+    ],
+    "preamble": null,
+    "closing": null,
+    "split_method": "fallback"
+  },
+  {
+    "claim_number": 3,
+    "claim_type": "dependent",
+    "parent_claim": 1,
+    "text": "제1항에 있어서 상기 적어도 하나의 프로세서는 상기 사용자 입력을 분석하여 3D 정보 획득의 필요 여부를 판단하고, 상기 판다에 따라 상기 3D 정보 획득이 필요한 경우 이미지 모듈을 선택적으로 실행하는 것",
+    "elements": [
+      {
+        "label": "A",
+        "text": "제1항에 있어서 상기 적어도 하나의 프로세서는 상기 사용자 입력을 분석하여 3D 정보 획득의 필요 여부를 판단하고, 상기 판다에 따라 상기 3D 정보 획득이 필요한 경우 이미지 모듈을 선택적으로 실행하는 것",
+        "importance": "5",
+        "is_sub": false,
+        "parent_label": null
+      }
+    ],
+    "preamble": null,
+    "closing": null,
+    "split_method": "fallback"
+  },
+  {
+    "claim_number": 4,
+    "claim_type": "dependent",
+    "parent_claim": 3,
+    "text": "제3항에 있어서 상기 적어도 하나의 프로세서는 상기 사용자 입력에 담긴 생성 요청의 의도(intent)를 분석하고,\n상기 의도가 함께 입력된 특정 데이터의 기하학적(geometric)형상을 유지 또는 변형하여 3D 모델을 생성하는 경우 3D 정보 획득이 필요하다고 판단하는 것",
+    "elements": [
+      {
+        "label": "A",
+        "text": "제3항에 있어서 상기 적어도 하나의 프로세서는 상기 사용자 입력에 담긴 생성 요청의 의도(intent)를 분석하고,",
+        "importance": "5",
+        "is_sub": false,
+        "parent_label": null
+      },
+      {
+        "label": "B",
+        "text": "상기 의도가 함께 입력된 특정 데이터의 기하학적(geometric)형상을 유지 또는 변형하여 3D 모델을 생성하는 경우 3D 정보 획득이 필요하다고 판단하는 것",
+        "importance": "3",
+        "is_sub": false,
+        "parent_label": null
+      }
+    ],
+    "preamble": null,
+    "closing": null,
+    "split_method": "regex"
+  },
+  {
+    "claim_number": 5,
+    "claim_type": "dependent",
+    "parent_claim": 1,
+    "text": "제1항에 있어서 상기 구조화된 명령어는 기 설정된 데이터베이스의 규칙 또는 템플릿에 따라 사용자 입력을 분석하여 생성",
+    "elements": [
+      {
+        "label": "A",
+        "text": "제1항에 있어서 상기 구조화된 명령어는 기 설정된 데이터베이스의 규칙 또는 템플릿에 따라 사용자 입력을 분석하여 생성",
+        "importance": "5",
+        "is_sub": false,
+        "parent_label": null
+      }
+    ],
+    "preamble": null,
+    "closing": null,
+    "split_method": "fallback"
+  },
+  {
+    "claim_number": 6,
+    "claim_type": "dependent",
+    "parent_claim": 1,
+    "text": "제1항에 있어서 상기 적어도 하나의 프로세서는 상기 사용자 입력에 기초하여 외부 소스(external source)로부터 상기 3D 모델 생성에 필요한 정보를 검색하고,\n상기 검색된 정보를 상기 구조화된 명령어 생성에 추가로 이용",
+    "elements": [
+      {
+        "label": "A",
+        "text": "제1항에 있어서 상기 적어도 하나의 프로세서는 상기 사용자 입력에 기초하여 외부 소스(external source)로부터 상기 3D 모델 생성에 필요한 정보를 검색하고,",
+        "importance": "5",
+        "is_sub": false,
+        "parent_label": null
+      },
+      {
+        "label": "B",
+        "text": "상기 검색된 정보를 상기 구조화된 명령어 생성에 추가로 이용",
+        "importance": "3",
+        "is_sub": false,
+        "parent_label": null
+      }
+    ],
+    "preamble": null,
+    "closing": null,
+    "split_method": "regex"
+  },
+  {
+    "claim_number": 7,
+    "claim_type": "dependent",
+    "parent_claim": 1,
+    "text": "제1항에 있어서 상기 CAD 표현은 설계 정보를 포함하는 데이터 구조 또는 텍스트 기반의 CAD 코드 중 적어도 하나",
+    "elements": [
+      {
+        "label": "A",
+        "text": "제1항에 있어서 상기 CAD 표현은 설계 정보를 포함하는 데이터 구조 또는 텍스트 기반의 CAD 코드 중 적어도 하나",
+        "importance": "5",
+        "is_sub": false,
+        "parent_label": null
+      }
+    ],
+    "preamble": null,
+    "closing": null,
+    "split_method": "fallback"
+  }
+]

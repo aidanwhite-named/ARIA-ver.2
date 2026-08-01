@@ -1,0 +1,15 @@
+{
+  "documents": [
+    "2411.04954v1.pdf",
+    "WO2021068061A1.pdf",
+    "US20240394445A1.pdf"
+  ],
+  "families": {
+    "1": {
+      "primary_idx": 0,
+      "secondary_idx": null
+    }
+  },
+  "verified_by": "algorithm_snapshot",
+  "note": ""
+}

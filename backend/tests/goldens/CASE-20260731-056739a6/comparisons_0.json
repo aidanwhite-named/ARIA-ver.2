@@ -1,0 +1,140 @@
+{
+  "1": [
+    {
+      "label": "A",
+      "found": true,
+      "quote": "Multi-view Images Textual Description",
+      "quote_translation": "다중 뷰 이미지, 텍스트 설명",
+      "chunk_id": "D1-P-P028",
+      "judgment": "일부 유사",
+      "판단_이유": "인용발명 0은 CAD 모델 생성을 위한 조건 데이터셋(Omni-CAD) 예시에서 텍스트 설명(Textual Description), 다중 뷰 이미지, 포인트 클라우드 등 다양한 모달리티의 조건 데이터를 도시하고 있다. 이는 사용자 입력으로 활용될 수 있는 데이터 형식을 포함한다는 점에서 기술적 관련성은 있으나, 사용자 입력을 수신하거나 획득하는 구체적인 장치 인터페이스 및 처리 단계에 대한 직접적인 개시는 부재하다.",
+      "purpose_effect_similarity": "일부 유사",
+      "directness": "inferred",
+      "missing_limitations": [
+        "사용자 입력을 획득하는 구체적인 장치 수단 및 입출력 제어 단계"
+      ],
+      "evidence": [
+        {
+          "limitation": "다양한 조건 데이터 구성 개시",
+          "quote": "illustrate the multimodal conditioned data and the corresponding ground truth CAD models",
+          "quote_translation": "멀티모달 조건 데이터 및 이에 대응하는 정답 CAD 모델을 도시함",
+          "chunk_id": "D1-P-P028"
+        }
+      ],
+      "motivation_quote": "",
+      "combination_risk": "none_explicit",
+      "combination_risk_reason": "특별한 저해사유 없음",
+      "technical_judgment": "일부 유사",
+      "llm_judgment": "일부 유사",
+      "judgment_adjusted": false,
+      "judgment_adjustment_reason": "",
+      "evidence_status": "verified",
+      "unverified_quote": "",
+      "not_evaluated": false,
+      "evaluation_status": "evaluated"
+    },
+    {
+      "label": "B",
+      "found": true,
+      "quote": "Point Cloud Multi-view Images",
+      "quote_translation": "포인트 클라우드, 다중 뷰 이미지",
+      "chunk_id": "D1-P-P028",
+      "judgment": "차이",
+      "판단_이유": "인용발명 0은 다중 뷰 이미지 및 포인트 클라우드 데이터를 예시 데이터셋의 구성 요소로 제시하고 있으나, 사용자 입력에서 3D 정보 획득이 필요한지 여부를 판단하는 조건적 제어 로직 및 이미지 모듈을 통해 사용자 입력으로부터 3D 정보를 추출하는 구체적인 기능 단계가 명시되어 있지 않다.",
+      "purpose_effect_similarity": "일부 유사",
+      "directness": "inferred",
+      "missing_limitations": [
+        "사용자 입력에서 3D 정보 획득 필요성을 판단하는 조건적 제어, 이미지 모듈을 통해 사용자 입력으로부터 3D 정보를 추출하는 구성"
+      ],
+      "evidence": [
+        {
+          "limitation": "이미지 및 3D 데이터 항목 도시",
+          "quote": "Point Cloud Multi-view Images",
+          "quote_translation": "포인트 클라우드, 다중 뷰 이미지",
+          "chunk_id": "D1-P-P028"
+        }
+      ],
+      "motivation_quote": "",
+      "combination_risk": "none_explicit",
+      "combination_risk_reason": "특별한 저해사유 없음",
+      "technical_judgment": "차이",
+      "llm_judgment": "차이",
+      "judgment_adjusted": false,
+      "judgment_adjustment_reason": "",
+      "evidence_status": "verified_from_evidence",
+      "unverified_quote": "Multi-view Images Point Cloud",
+      "not_evaluated": false,
+      "evaluation_status": "evaluated"
+    },
+    {
+      "label": "C",
+      "found": true,
+      "quote": "Unifying Multimodality-Conditioned CAD Generation With MLLM",
+      "quote_translation": "MLLM을 이용한 멀티모달 조건 기반 CAD 생성의 통합",
+      "chunk_id": "D1-P-P027",
+      "judgment": "차이",
+      "판단_이유": "인용발명 0은 멀티모달 조건 기반 CAD 생성에 관한 논문의 보충 자료로서 개념적 기술 분야를 언급하지만, 사용자 입력과 추출된 3D 정보를 종합하여 3D 모델 생성을 위한 구조화된 명령어를 생성하는 알고리즘 및 구체적 처리 단계를 명시하고 있지 않다.",
+      "purpose_effect_similarity": "일부 유사",
+      "directness": "inferred",
+      "missing_limitations": [
+        "사용자 입력과 3D 정보를 종합하여 3D 모델 생성을 위한 구조화된 명령어를 생성하는 단계 및 처리 구성"
+      ],
+      "evidence": [
+        {
+          "limitation": "멀티모달 조건 기반 CAD 생성 기술 분야",
+          "quote": "Supplementary material of CAD-MLLM: Unifying Multimodality-Conditioned CAD Generation With MLLM",
+          "quote_translation": "CAD-MLLM의 보충 자료: MLLM을 이용한 멀티모달 조건 기반 CAD 생성의 통합",
+          "chunk_id": "D1-P-P027"
+        }
+      ],
+      "motivation_quote": "",
+      "combination_risk": "none_explicit",
+      "combination_risk_reason": "특별한 저해사유 없음",
+      "technical_judgment": "차이",
+      "llm_judgment": "차이",
+      "judgment_adjusted": false,
+      "judgment_adjustment_reason": "",
+      "evidence_status": "verified",
+      "unverified_quote": "",
+      "not_evaluated": false,
+      "evaluation_status": "evaluated"
+    },
+    {
+      "label": "D",
+      "found": true,
+      "quote": "Unifying Multimodality-Conditioned CAD Generation With MLLM",
+      "quote_translation": "MLLM을 이용한 멀티모달 조건 기반 CAD 생성의 통합",
+      "chunk_id": "D1-P-P027",
+      "judgment": "차이",
+      "판단_이유": "인용발명 0은 멀티모달 조건을 이용한 CAD 모델 생성을 기술 목적으로 언급하나, 구조화된 명령어를 기초로 하여 CAD(Computer aided design) 표현을 생성하는 구체적인 생성 메커니즘 및 장치 구성을 개시하지 않는다.",
+      "purpose_effect_similarity": "일부 유사",
+      "directness": "inferred",
+      "missing_limitations": [
+        "구조화된 명령어를 기반으로 CAD 표현을 생성하는 구성 및 장치적 제어 수단"
+      ],
+      "evidence": [
+        {
+          "limitation": "CAD 모델 생성 언급",
+          "quote": "Unifying Multimodality-Conditioned CAD Generation With MLLM",
+          "quote_translation": "MLLM을 이용한 멀티모달 조건 기반 CAD 생성의 통합",
+          "chunk_id": "D1-P-P027"
+        }
+      ],
+      "motivation_quote": "",
+      "combination_risk": "none_explicit",
+      "combination_risk_reason": "특별한 저해사유 없음",
+      "technical_judgment": "차이",
+      "llm_judgment": "차이",
+      "judgment_adjusted": false,
+      "judgment_adjustment_reason": "",
+      "evidence_status": "verified",
+      "unverified_quote": "",
+      "not_evaluated": false,
+      "evaluation_status": "evaluated"
+    }
+  ],
+  "_meta": {
+    "schema_version": 25,
+    "comparison_mode": "mixed"
+  }
+}

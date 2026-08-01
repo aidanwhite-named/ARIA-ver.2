@@ -43,6 +43,7 @@ from backend.services.citation_chain import (
     build_citation_chain_from_comparisons,
     get_claim_chain_info,
 )
+from backend.services.reference_adjudicator import adjudicate_all
 from backend.services.citation_extractor import (
     CompareFailed,
     analyze_claim_elements,
@@ -1107,7 +1108,29 @@ async def report(job_id: str, claim_number: int, use_context: bool = True, force
 
 
             chain_start = time.perf_counter()
-            chain_data = build_citation_chain_from_comparisons(str(job_dir), claims, prior_docs)
+            # 1패스: 알고리즘이 후보를 확정하고 LLM이 그 안에서 주/보조를 판정한다.
+            # 판정에 실패하거나 문헌이 2개 미만이면 빈 dict가 돌아오고 기존
+            # 알고리즘 선정이 그대로 쓰인다.
+            adjudication_events: list[dict] = []
+
+            async def _emit_adjudication_log(message: str) -> None:
+                adjudication_events.append(_ev("log", message))
+
+            adjudications = await _await_with_log_heartbeat(
+                adjudicate_all(
+                    str(job_dir), claims, prior_docs, settings,
+                    progress=_emit_adjudication_log,
+                ),
+                _emit_adjudication_log,
+                label="인용발명 판정",
+            )
+            for event in adjudication_events:
+                yield event
+            # 2패스: 확정된 판정을 반영해 체인을 만든다. 커버리지 계산과 후보
+            # 제한은 여전히 이 순수 함수가 담당한다.
+            chain_data = build_citation_chain_from_comparisons(
+                str(job_dir), claims, prior_docs, adjudications=adjudications
+            )
             _save_chain_audit(job_id, chain_data)
             async for event in _yield_timing("citation chain", chain_start):
                 yield event
@@ -1575,7 +1598,14 @@ async def report_batch_dependent(job_id: str, req: BatchDependentRequest):
             message="인용발명 체인을 다시 계산하고 있습니다.",
             started_at=started_at,
         )
-        chain_data = build_citation_chain_from_comparisons(str(job_dir), claims, prior_docs)
+        # 독립항 보고서 경로와 같은 판정을 써야 종속항에서 문헌 번호가 흔들리지
+        # 않는다. 같은 입력이면 해시 캐시가 적중하므로 LLM을 다시 부르지 않는다.
+        batch_adjudications = await adjudicate_all(
+            str(job_dir), claims, prior_docs, settings
+        )
+        chain_data = build_citation_chain_from_comparisons(
+            str(job_dir), claims, prior_docs, adjudications=batch_adjudications
+        )
         _save_chain_audit(job_id, chain_data)
         parent_nums: set[int] = set()
         for claim in targets:

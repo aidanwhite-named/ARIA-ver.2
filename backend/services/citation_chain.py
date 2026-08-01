@@ -34,13 +34,30 @@ logger = logging.getLogger(__name__)
 MAX_INDEPENDENT_REFS = 2   # 독립항에 사용할 최대 인용발명 수
 MAX_INDEPENDENT_REFS_WITH_CONVENTIONAL_SUPPORT = 3
 MAX_DEPTH_INCREMENT = 1    # 종속항 1단계당 추가 허용 인용발명 수
-CITATION_CHAIN_POLICY_VERSION = 27
+CITATION_CHAIN_POLICY_VERSION = 28
 
 # 패밀리별 주인용발명 선정에서 종속항 커버리지는 독립항 적합도를 뒤집는
 # 주점수가 아니라, 독립항 점수가 근접한 후보들 사이의 타이브레이커로만 쓴다.
 PRIMARY_NEAR_TIE_MARGIN = 5.0
 DISTINCTIVE_CORE_NEAR_TIE_MARGIN = 0.12
 DEPENDENT_REUSE_TIEBREAK_MAX = 2.0
+
+# ── 주인용 자격 게이트 ───────────────────────────────────────────────────
+# 순서쌍 전수 탐색은 유지하되, 보조문헌이 좋다는 이유만으로 명백히 열등한
+# 문헌이 주인용 자리를 차지하는 역전을 막는다. 차별적 핵심의 직접 개시량이
+# 최고 문헌에 크게 못 미치는 문헌은 애초에 주인용 후보에서 뺀다.
+# 두 기준(비율/절대차) 중 하나만 만족해도 통과시키는 이유는, 최고값이 0에
+# 가까운 사건에서 비율 기준만 쓰면 후보가 비합리적으로 좁아지기 때문이다.
+PRIMARY_ELIGIBILITY_RATIO = 0.72
+PRIMARY_ELIGIBILITY_ABS_MARGIN = 0.10
+# LLM 최종 판정에 넘길 후보 수. 고정 상수를 피하기 위해 점수 마진으로 정하고
+# 범위만 제한한다.
+PRIMARY_SHORTLIST_MIN = 2
+PRIMARY_SHORTLIST_MAX = 5
+SECONDARY_SHORTLIST_MAX = 4
+# 전체 점수가 낮아도 차별적 핵심 구성을 원문으로 직접 개시한 문헌은 후보에서
+# 누락되면 안 된다. 알고리즘 정렬이 놓친 문헌을 LLM이 볼 기회를 보장한다.
+CORE_DISCLOSURE_FORCE_INCLUDE_SIMILARITY = 0.85
 
 # 판정 점수표 (높을수록 유사)
 _JUDGMENT_SCORE = {
@@ -1572,18 +1589,22 @@ def _explicit_combination_risks(
     return risks
 
 
-def _select_family_reference_pair(
+def _compute_family_context(
     family_claims: List[ParsedClaim],
     caches: Dict[int, Optional[Dict]],
     num_docs: int,
-) -> Dict:
-    """독립항의 차별적 핵심을 우선하면서 최적 보완 문헌쌍을 선택한다."""
+) -> Optional[Dict]:
+    """패밀리 단위의 가중치·주인용 점수·신규성 심사 결과를 한 번에 계산한다.
+
+    문헌쌍 선정(_select_family_reference_pair)과 LLM 판정용 후보 추출
+    (shortlist_primary_candidates)이 같은 값을 두 번 계산하지 않도록 분리했다.
+    LLM 호출은 하지 않는 순수 함수이므로 골든셋 회귀 대상이 된다.
+    """
     root = next((claim for claim in family_claims if claim.claim_type == "independent"), None)
     if root is None:
-        return {}
+        return None
     dependent_claims = [claim for claim in family_claims if claim.claim_type == "dependent"]
     root_key = str(root.claim_number)
-    root_keys = {root_key}
     weights = _element_weight_map([root])
 
     # 사건 내 문헌 희소성과 구성의 자체 복잡도로 차별적 핵심을 재식별한다.
@@ -1682,6 +1703,268 @@ def _select_family_reference_pair(
     # 1단계는 점수 경쟁이 아니라 단일 문헌 완전개시 심사다. 이 단계에서
     # 통과 문헌이 있으면 다른 문헌을 붙이지 않고 신규성용 단일 체인으로 확정한다.
     novelty_screen = _novelty_screen(root, caches, num_docs)
+
+    return {
+        "root": root,
+        "root_key": root_key,
+        "family_claims": family_claims,
+        "weights": weights,
+        "dynamic_weights": dynamic_weights,
+        "dynamic_weight_reasons": dynamic_weight_reasons,
+        "disclosure_frequency": disclosure_frequency,
+        "primary_scores": primary_scores,
+        "primary_details": primary_details,
+        "reuse_scores": reuse_scores,
+        "novelty_screen": novelty_screen,
+    }
+
+
+def _core_disclosure_labels(cache: Optional[Dict], root: ParsedClaim) -> List[str]:
+    """차별적 핵심 구성을 원문 발췌로 직접 개시한 라벨 목록."""
+    root_key = str(root.claim_number)
+    labels: List[str] = []
+    for element in root.elements:
+        if not _is_distinctive_technical_element(element):
+            continue
+        label = normalize_label(element.label)
+        item = _cache_item(cache, root_key, label)
+        if not item or not item.get("quote"):
+            continue
+        if str(item.get("directness") or "direct").strip().lower() == "absent":
+            continue
+        if _item_similarity(item) >= CORE_DISCLOSURE_FORCE_INCLUDE_SIMILARITY:
+            labels.append(label)
+    return labels
+
+
+def _core_disclosure_indices(
+    caches: Dict[int, Optional[Dict]], root: ParsedClaim, num_docs: int
+) -> List[int]:
+    """차별적 핵심 구성을 원문으로 직접 개시한 문헌 인덱스."""
+    return [
+        doc_idx for doc_idx in range(num_docs)
+        if _core_disclosure_labels(caches.get(doc_idx), root)
+    ]
+
+
+def _eligible_primary_indices(
+    primary_details: Dict[int, Dict],
+    num_docs: int,
+    forced: Optional[List[int]] = None,
+) -> List[int]:
+    """주인용 자격을 통과한 문헌 인덱스. 최소 1개는 반드시 반환한다.
+
+    `forced`는 차별적 핵심을 원문으로 직접 개시한 문헌이다. 자격 점수는
+    핵심 구성 전체의 가중 평균이라, 핵심 하나를 정확히 짚었지만 나머지를
+    놓친 문헌이 평균에 희석되어 탈락할 수 있다. 그런 문헌까지 주인용 후보에서
+    빼면 자격 게이트가 원래 막으려던 것(명백히 열등한 주인용)이 아니라
+    유효한 후보를 막게 되므로 항상 통과시킨다.
+    """
+    scores = {
+        idx: float((primary_details.get(idx) or {}).get("distinctive_direct_coverage", 0.0))
+        for idx in range(num_docs)
+    }
+    if not scores:
+        return list(range(num_docs))
+    best = max(scores.values())
+    if best <= 0.0:
+        # 어느 문헌도 핵심을 직접 개시하지 못한 사건에서는 자격 판단의 근거
+        # 자체가 없으므로 게이트를 적용하지 않고 전수 탐색으로 되돌린다.
+        return list(range(num_docs))
+    eligible = {
+        idx for idx, value in scores.items()
+        if value >= best * PRIMARY_ELIGIBILITY_RATIO
+        or value >= best - PRIMARY_ELIGIBILITY_ABS_MARGIN
+    }
+    eligible.update(idx for idx in (forced or []) if 0 <= idx < num_docs)
+    return sorted(eligible) or [max(scores, key=lambda key: scores[key])]
+
+
+def shortlist_primary_candidates(
+    family_claims: List[ParsedClaim],
+    caches: Dict[int, Optional[Dict]],
+    num_docs: int,
+    context: Optional[Dict] = None,
+) -> Dict:
+    """LLM 주인용 판정(LLM-A)에 넘길 후보를 추린다. LLM 호출 없는 순수 함수.
+
+    자격 게이트를 통과한 문헌을 차별적 핵심 직접 개시량 순으로 정렬하고,
+    전체 점수가 낮더라도 핵심 구성을 원문으로 직접 개시한 문헌은 정렬 순위와
+    무관하게 후보에 포함시킨다(알고리즘 정렬이 놓친 문헌을 구제하는 장치).
+    """
+    context = context or _compute_family_context(family_claims, caches, num_docs)
+    if not context:
+        return {}
+    root = context["root"]
+    primary_details = context["primary_details"]
+    primary_scores = context["primary_scores"]
+    novelty_idx = context["novelty_screen"].get("selected_document")
+
+    core_disclosers = _core_disclosure_indices(caches, root, num_docs)
+    eligible = _eligible_primary_indices(primary_details, num_docs, core_disclosers)
+
+    def _merit(doc_idx: int) -> tuple[float, float, float]:
+        detail = primary_details.get(doc_idx) or {}
+        return (
+            float(detail.get("distinctive_direct_coverage", 0.0)),
+            float(detail.get("core_coverage", 0.0)),
+            float(primary_scores.get(doc_idx, 0.0)),
+        )
+
+    ordered = sorted(eligible, key=_merit, reverse=True)[:PRIMARY_SHORTLIST_MAX]
+
+    forced: List[int] = []
+    core_labels_by_doc: Dict[int, List[str]] = {}
+    for doc_idx in range(num_docs):
+        labels = _core_disclosure_labels(caches.get(doc_idx), root)
+        core_labels_by_doc[doc_idx] = labels
+        if labels and doc_idx not in ordered:
+            forced.append(doc_idx)
+    for doc_idx in sorted(forced, key=_merit, reverse=True):
+        if len(ordered) >= PRIMARY_SHORTLIST_MAX:
+            break
+        ordered.append(doc_idx)
+
+    candidates = [
+        {
+            "doc_idx": doc_idx,
+            "algorithm_rank": position + 1,
+            "primary_score": round(float(primary_scores.get(doc_idx, 0.0)), 2),
+            "distinctive_direct_coverage": round(
+                float((primary_details.get(doc_idx) or {}).get("distinctive_direct_coverage", 0.0)), 4
+            ),
+            "core_coverage": round(
+                float((primary_details.get(doc_idx) or {}).get("core_coverage", 0.0)), 4
+            ),
+            "critical_gap_weight": round(
+                float((primary_details.get(doc_idx) or {}).get("critical_gap_weight", 0.0)), 4
+            ),
+            "core_disclosure_labels": core_labels_by_doc.get(doc_idx, []),
+            "forced_include": doc_idx in forced,
+        }
+        for position, doc_idx in enumerate(ordered)
+    ]
+
+    return {
+        "root_claim": root.claim_number,
+        "novelty_selected_document": novelty_idx,
+        "eligible_indices": eligible,
+        "algorithm_top1": ordered[0] if ordered else None,
+        "candidates": candidates,
+        "needs_adjudication": novelty_idx is None and len(candidates) >= PRIMARY_SHORTLIST_MIN,
+    }
+
+
+def shortlist_secondary_candidates(
+    root: ParsedClaim,
+    caches: Dict[int, Optional[Dict]],
+    num_docs: int,
+    primary_idx: int,
+    weights: Optional[Dict[tuple[str, str], float]] = None,
+) -> Dict:
+    """확정된 주인용의 공백을 메우는 보조 후보를 추린다(Gate 2). LLM 호출 없음.
+
+    반대 교시·기본 원리 변경·비양립이 명시된 문헌은 후보에서 제외하고 제외
+    사유를 남긴다. 순위는 기존 정책과 동일하게 (핵심 공백 보완량, 보조 점수)다.
+    """
+    root_key = str(root.claim_number)
+    root_keys = {root_key}
+    primary_cache = caches.get(primary_idx)
+    hard_gaps = _compute_primary_gaps(primary_cache, root_keys)
+    soft_gaps = _compute_soft_gaps(primary_cache, root_keys)
+    targets = hard_gaps | soft_gaps
+    element_by_label = {normalize_label(e.label): e for e in root.elements}
+    intrinsic_technical_gaps = {
+        (root_key, label)
+        for label in {normalize_label(e.label) for e in root.elements}
+        if (root_key, label) in hard_gaps
+        and label in element_by_label
+        and _is_distinctive_technical_element(element_by_label[label])
+    }
+
+    candidates: List[Dict] = []
+    rejected: Dict[str, List[str]] = {}
+    for doc_idx in range(num_docs):
+        if doc_idx == primary_idx:
+            continue
+        risks = _explicit_combination_risks(caches.get(doc_idx), targets)
+        if risks:
+            rejected[str(doc_idx)] = risks
+            continue
+        sub_score, sub_detail = _score_secondary_candidate(
+            caches.get(doc_idx), primary_cache, [root], hard_gaps, soft_gaps, weights
+        )
+        if sub_score <= 0 or sub_detail.get("secondary_reason") not in {"hard", "soft", "support"}:
+            continue
+        filled: List[Dict] = []
+        for claim_key, label in sorted(targets):
+            item = _cache_item(caches.get(doc_idx), claim_key, label)
+            if not item or _item_similarity(item) < 0.35:
+                continue
+            element = element_by_label.get(label)
+            filled.append({
+                "label": label,
+                "claim_text": (element.text if element else ""),
+                "judgment": item.get("judgment", "대응 없음"),
+                "quote": item.get("quote", ""),
+                "chunk_id": item.get("chunk_id", ""),
+                "motivation_quote": item.get("motivation_quote", ""),
+                "gap_type": "hard" if (claim_key, label) in hard_gaps else "soft",
+            })
+        candidates.append({
+            "doc_idx": doc_idx,
+            "sub_score": sub_score,
+            "critical_gap_evidence_gain": _critical_gap_evidence_gain(
+                caches.get(doc_idx), primary_cache, intrinsic_technical_gaps, weights
+            ),
+            "secondary_reason": sub_detail.get("secondary_reason"),
+            "filled": filled,
+            "detail": sub_detail,
+        })
+
+    candidates.sort(
+        key=lambda item: (item["critical_gap_evidence_gain"], item["sub_score"]), reverse=True
+    )
+    candidates = candidates[:SECONDARY_SHORTLIST_MAX]
+    for position, candidate in enumerate(candidates):
+        candidate["algorithm_rank"] = position + 1
+
+    return {
+        "primary_idx": primary_idx,
+        "hard_gaps": sorted(f"{key}:{label}" for key, label in hard_gaps),
+        "soft_gaps": sorted(f"{key}:{label}" for key, label in soft_gaps),
+        "candidates": candidates,
+        "rejected_for_explicit_risk": rejected,
+        "algorithm_top1": candidates[0]["doc_idx"] if candidates else None,
+        "needs_adjudication": len(candidates) >= 1,
+    }
+
+
+def _select_family_reference_pair(
+    family_claims: List[ParsedClaim],
+    caches: Dict[int, Optional[Dict]],
+    num_docs: int,
+    adjudication: Optional[Dict] = None,
+) -> Dict:
+    """독립항의 차별적 핵심을 우선하면서 최적 보완 문헌쌍을 선택한다.
+
+    adjudication이 주어지면 LLM 판정 결과를 우선 적용한다. 다만 후보 목록과
+    커버리지 계산은 여전히 이 함수가 확정하며, LLM은 알고리즘이 만든 후보
+    안에서만 선택할 수 있다(검증은 reference_adjudicator에서 수행).
+    """
+    context = _compute_family_context(family_claims, caches, num_docs)
+    if context is None:
+        return {}
+    root = context["root"]
+    root_key = context["root_key"]
+    root_keys = {root_key}
+    weights = context["weights"]
+    dynamic_weights = context["dynamic_weights"]
+    primary_scores = context["primary_scores"]
+    primary_details = context["primary_details"]
+    reuse_scores = context["reuse_scores"]
+    novelty_screen = context["novelty_screen"]
+
     novelty_idx = novelty_screen.get("selected_document")
     if novelty_idx is not None:
         return {
@@ -1704,7 +1987,9 @@ def _select_family_reference_pair(
             "primary_score_details": {str(key): value for key, value in primary_details.items()},
             "dependent_reuse_scores": {str(key): round(value, 4) for key, value in reuse_scores.items()},
             "near_primary_candidates": [novelty_idx],
+            "eligible_primary_candidates": [novelty_idx],
             "pair_candidates": [],
+            "llm_adjudication": {},
             "selection_method": "single_document_novelty_gate_v1",
         }
 
@@ -1716,10 +2001,42 @@ def _select_family_reference_pair(
         ),
         default=0.0,
     )
-    # 후보 수와 무관하게 모든 문헌을 주문헌 출발점으로 평가한다. 공개일은
-    # 법적 적격성 판단이나 후보 제외에 사용하지 않으며, 각 ordered pair의
-    # 원문 발췌·위치·누락 제한에 따른 커버리지와 추론 부담만 비교한다.
-    near_primary_pool = list(range(num_docs))
+    # 주인용 자격 게이트. 순서쌍 전수 탐색의 장점(결합 가능성까지 본 출발점
+    # 선택)은 유지하되, 차별적 핵심 직접 개시량이 최고 문헌에 크게 못 미치는
+    # 문헌은 보조문헌이 아무리 좋아도 주인용이 될 수 없게 한다. 공개일은 여전히
+    # 법적 적격성 판단이나 후보 제외에 사용하지 않는다.
+    eligible_pool = _eligible_primary_indices(
+        primary_details, num_docs, _core_disclosure_indices(caches, root, num_docs)
+    )
+    near_primary_pool = eligible_pool
+
+    # LLM 판정 결과는 reference_adjudicator에서 이미 검증(후보 소속·인덱스
+    # 범위·근거 chunk 실재)을 마친 값이다. 여기서는 자격 게이트를 통과한
+    # 문헌인지만 한 번 더 확인하고 적용한다.
+    adjudicated_primary: Optional[int] = None
+    adjudicated_secondary: Optional[int] = None
+    adjudicated_no_secondary = False
+    if adjudication:
+        proposed_primary = adjudication.get("primary_idx")
+        if isinstance(proposed_primary, int) and proposed_primary in eligible_pool:
+            adjudicated_primary = proposed_primary
+            near_primary_pool = [proposed_primary]
+            proposed_secondary = adjudication.get("secondary_idx")
+            if (
+                isinstance(proposed_secondary, int)
+                and 0 <= proposed_secondary < num_docs
+                and proposed_secondary != proposed_primary
+            ):
+                adjudicated_secondary = proposed_secondary
+            elif adjudication.get("secondary_explicitly_none"):
+                # 기술 검토가 어느 후보도 결합 불가로 판정한 경우다. 알고리즘이
+                # 보조문헌을 도로 끼워 넣으면 검토 결과와 어긋난 보고서가 된다.
+                adjudicated_no_secondary = True
+        else:
+            logger.warning(
+                "LLM 주인용 판정 doc[%s]이 자격 게이트를 통과하지 못해 무시합니다.",
+                proposed_primary,
+            )
 
     pair_candidates: List[Dict] = []
     for primary_idx in near_primary_pool:
@@ -1742,6 +2059,8 @@ def _select_family_reference_pair(
         for secondary_idx in range(num_docs):
             if secondary_idx == primary_idx:
                 continue
+            if adjudicated_no_secondary and primary_idx == adjudicated_primary:
+                break
             sub_score, sub_detail = _score_secondary_candidate(
                 caches.get(secondary_idx),
                 primary_cache,
@@ -1772,6 +2091,13 @@ def _select_family_reference_pair(
             # improves that gap outranks a stronger match limited to generic
             # interfaces.  The ordinary SubScore remains the tie-breaker.
             candidate_rank = (critical_gap_gain, adjusted_sub_score)
+            # LLM-B가 이 주인용에 대한 보조문헌을 확정했으면 그 문헌만 채택한다.
+            # 후보 목록 자체는 위 필터가 확정하므로, LLM은 알고리즘이 통과시킨
+            # 문헌 중에서만 고를 수 있다.
+            if adjudicated_secondary is not None and primary_idx == adjudicated_primary:
+                if secondary_idx != adjudicated_secondary:
+                    continue
+                candidate_rank = (float("inf"), float("inf"))
             if candidate_rank > best_secondary_rank:
                 best_secondary = secondary_idx
                 best_secondary_score = adjusted_sub_score
@@ -1798,6 +2124,13 @@ def _select_family_reference_pair(
             label for label in residual
             if distinctive_weight_by_label.get(normalize_label(label), 3) >= _CORE_IMPORTANCE_THRESHOLD
         }
+        # 미커버 "개수"만 세면 사소한 구성 3개를 덮은 쌍이 핵심 구성 1개를 덮은
+        # 쌍을 이긴다. 1순위 키는 이미 핵심 가중치로 걸러지므로, 2순위 키는
+        # 가중합으로 두어 같은 왜곡이 아래 단계에서 반복되지 않게 한다.
+        uncovered_weight = sum(
+            distinctive_weight_by_label.get(normalize_label(label), 3.0)
+            for label in uncovered
+        )
         primary_reuse_tiebreak = min(
             DEPENDENT_REUSE_TIEBREAK_MAX,
             reuse_scores.get(primary_idx, 0.0) * DEPENDENT_REUSE_TIEBREAK_MAX,
@@ -1812,7 +2145,7 @@ def _select_family_reference_pair(
         ) else 0
         pair_rank = (
             -len(critical_uncovered),
-            -len(uncovered),
+            -uncovered_weight,
             (
                 float(primary_detail.get("field_alignment_coverage", 0.0))
                 if best_distinctive_direct < 0.35
@@ -1884,10 +2217,16 @@ def _select_family_reference_pair(
         "primary_score_details": {str(key): value for key, value in primary_details.items()},
         "dependent_reuse_scores": {str(key): round(value, 4) for key, value in reuse_scores.items()},
         "near_primary_candidates": near_primary_pool,
+        "eligible_primary_candidates": eligible_pool,
         "pair_candidates": pair_candidates,
         "novelty_screen": novelty_screen,
+        "llm_adjudication": adjudication or {},
         "analysis_track": "inventive_step_combination",
-        "selection_method": "novelty_gate_then_distinctive_core_gap_pair_v2",
+        "selection_method": (
+            "novelty_gate_then_eligibility_gated_pair_v3_llm_adjudicated"
+            if adjudicated_primary is not None
+            else "novelty_gate_then_eligibility_gated_pair_v3"
+        ),
     }
 
 
@@ -1899,6 +2238,7 @@ def build_citation_chain_from_comparisons(
     job_dir: str,
     claims: List[ParsedClaim],
     prior_docs: List[ExtractedDocument],
+    adjudications: Optional[Dict[str, Dict]] = None,
 ) -> Dict:
     """
     comparisons_{doc_idx}.json 에서 판정 점수를 집계하여 주인용발명을 선정하고,
@@ -2166,7 +2506,12 @@ def build_citation_chain_from_comparisons(
     family_single_sufficient: set[str] = set()
 
     for root_number, family_claims in sorted(family_groups.items()):
-        selection = _select_family_reference_pair(family_claims, caches, num_docs)
+        selection = _select_family_reference_pair(
+            family_claims,
+            caches,
+            num_docs,
+            adjudication=(adjudications or {}).get(str(root_number)),
+        )
         if not selection:
             continue
         lock_data = selection_locks.get(str(root_number))

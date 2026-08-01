@@ -1,0 +1,41 @@
+[
+  {
+    "claim_number": 1,
+    "claim_type": "independent",
+    "parent_claim": null,
+    "text": "전자장치로서,\n적어도 하나의 지시를 포함하는 메모리\n상기 메모리에 전기적으로 연결되어 상기 적어도 하나의 지시를 수행하도록 구성된 적어도 하나의 프로세서를 포함하고\n상기 적어도 하나의 프로세서는\n(A) 적어도 하나의 사용자 입력을 획득하고\n(B) 상기 사용자 입력에서 3D 정보 획득이 필요한 경우, 이미지 모듈을 통해 상기 사용자 입력에 대한 3D 정보를 추출하고,\n(C) 상기 사용자 입력 중 어느 하나 및 상기 3d 정보를 종합하여 3D 모델 생성을 위한 구조화된 명령어를 생성하고,\n(D) 상기 구조화된 명령어를 기반으로 상기 3D 모델 생성을 위한 CAD(Computer aided design) 표현을 생성하는 \n장치",
+    "elements": [
+      {
+        "label": "A",
+        "text": "적어도 하나의 사용자 입력을 획득하고",
+        "importance": "5",
+        "is_sub": false,
+        "parent_label": null
+      },
+      {
+        "label": "B",
+        "text": "상기 사용자 입력에서 3D 정보 획득이 필요한 경우, 이미지 모듈을 통해 상기 사용자 입력에 대한 3D 정보를 추출하고,",
+        "importance": "3",
+        "is_sub": false,
+        "parent_label": null
+      },
+      {
+        "label": "C",
+        "text": "상기 사용자 입력 중 어느 하나 및 상기 3d 정보를 종합하여 3D 모델 생성을 위한 구조화된 명령어를 생성하고,",
+        "importance": "3",
+        "is_sub": false,
+        "parent_label": null
+      },
+      {
+        "label": "D",
+        "text": "상기 구조화된 명령어를 기반으로 상기 3D 모델 생성을 위한 CAD(Computer aided design) 표현을 생성하는 \n장치",
+        "importance": "2",
+        "is_sub": false,
+        "parent_label": null
+      }
+    ],
+    "preamble": null,
+    "closing": null,
+    "split_method": "labeled"
+  }
+]

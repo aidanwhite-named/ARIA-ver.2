@@ -37,6 +37,10 @@ Thumbs.db
 cases/
 deleted_diff.txt
 
+# 인용발명 판정 캐시 (재현성용 로컬 캐시, 커밋 대상 아님)
+# backend/tests/goldens/ 는 회귀 픽스처이므로 반대로 반드시 커밋한다.
+data/adjudication_cache/
+
 # Vite 임시 파일
 frontend/vite.config.js.timestamp-*
 
